@@ -1,4 +1,5 @@
 import KernelAbstractions
+import MLDataDevices
 import Random
 
 struct FusedQuadraticTarget{T}
@@ -55,6 +56,40 @@ Random.randn(rng::PrefilledNormalRNG{Float32}, ::Type{Float32}) =
     _next_prefilled_normal!(rng)
 Random.randn(rng::PrefilledNormalRNG{Float64}, ::Type{Float64}) =
     _next_prefilled_normal!(rng)
+
+mutable struct BulkFillRecorder <: Random.AbstractRNG
+    calls::Vector{Symbol}
+end
+
+function Random.rand!(rng::BulkFillRecorder, values::AbstractArray)
+    push!(rng.calls, :uniform)
+    fill!(values, 0.25)
+    return values
+end
+
+function Random.randn!(rng::BulkFillRecorder, values::AbstractArray)
+    push!(rng.calls, :normal)
+    fill!(values, -0.25)
+    return values
+end
+
+struct OwnedBufferAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
+MLDataDevices.functional(::OwnedBufferAccelerator) = true
+(::OwnedBufferAccelerator)(values::Vector) = copy(values)
+(::OwnedBufferAccelerator)(proposal::ImportanceSamplers._GaussianProposal) =
+    deepcopy(proposal)
+
+@eval ImportanceSamplers begin
+    _owned_backend_rng(::Main.OwnedBufferAccelerator, seed::UInt64) =
+        Random.Xoshiro(seed)
+end
+
+struct SharedRNGAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
+MLDataDevices.functional(::SharedRNGAccelerator) = true
+
+const SHARED_BACKEND_TEST_RNG = Random.Xoshiro(0)
+MLDataDevices.default_device_rng(::SharedRNGAccelerator) =
+    SHARED_BACKEND_TEST_RNG
 
 function _caught_kernel_execution_error(f)
     try
@@ -157,6 +192,96 @@ end
     @test fused32.logweights isa Vector{Float32}
     @test fused64.samples isa Vector{Float64}
     @test fused64.logweights isa Vector{Float64}
+end
+
+@testset "native random buffers are bulk-filled and reused" begin
+    proposal = SphericalGaussian(0.25, 1.5)
+    algorithm = ImportanceSampling(proposal; nsamples=32)
+    rng = Random.Xoshiro(0x9109)
+    sampler = prepare_sampler(
+        rng,
+        FusedQuadraticTarget(0.75),
+        algorithm;
+        threaded=false,
+    )
+
+    buffers = getfield(sampler, :random_buffers)
+    normal_buffer = getfield(buffers, :normal)
+
+    first_result = @inferred importance_sample!(sampler)
+    second_result = @inferred importance_sample!(sampler)
+    @test getfield(getfield(sampler, :random_buffers), :normal) === normal_buffer
+    @test first_result.samples != second_result.samples
+
+    replay = @inferred importance_sample!(
+        prepare_sampler(
+            Random.Xoshiro(0x9109),
+            FusedQuadraticTarget(0.75),
+            algorithm;
+            threaded=false,
+        ),
+    )
+    @test replay.samples == first_result.samples
+    @test replay.logweights == first_result.logweights
+end
+
+@testset "random buffers use the standard bulk fill APIs" begin
+    rng = BulkFillRecorder(Symbol[])
+    buffers = ImportanceSamplers._RandomBuffers(zeros(8), zeros(8))
+
+    @test ImportanceSamplers._fill_random_buffers!(rng, buffers) === buffers
+    @test rng.calls == [:uniform, :normal]
+end
+
+@testset "accelerator transfer owns one seeded stream and destination buffers" begin
+    device = OwnedBufferAccelerator()
+    algorithm = ImportanceSampling(
+        SphericalGaussian(0.25, 1.5);
+        nsamples=32,
+    )
+    source_rng = Random.Xoshiro(0x9111)
+    expected_source = copy(source_rng)
+    expected_seed = rand(expected_source, UInt64)
+    expected_next = rand(expected_source, UInt64)
+    source = prepare_sampler(
+        source_rng,
+        FusedQuadraticTarget(0.75),
+        algorithm;
+        threaded=true,
+    )
+
+    destination = @inferred device(source)
+    destination_rng = getfield(destination, :rng)
+    destination_buffers = getfield(destination, :random_buffers)
+    @test destination_rng isa Random.Xoshiro
+    @test destination_rng !== getfield(source, :rng)
+    @test rand(source_rng, UInt64) == expected_next
+    @test getfield(destination_buffers, :uniform) isa Vector{Float64}
+    @test getfield(destination_buffers, :normal) isa Vector{Float64}
+    @test getfield(destination_buffers, :normal) !==
+          getfield(getfield(source, :random_buffers), :normal)
+
+    normal_buffer = getfield(destination_buffers, :normal)
+    expected_buffer = similar(normal_buffer)
+    Random.randn!(Random.Xoshiro(expected_seed), expected_buffer)
+    ImportanceSamplers._fill_random_buffers!(destination_rng, destination_buffers)
+    @test collect(normal_buffer) == collect(expected_buffer)
+    @test getfield(destination_buffers, :normal) === normal_buffer
+
+    @test MLDataDevices.default_device_rng(SharedRNGAccelerator()) ===
+          MLDataDevices.default_device_rng(SharedRNGAccelerator())
+    shared_error = _caught_kernel_execution_error() do
+        SharedRNGAccelerator()(
+            prepare_sampler(
+                Random.Xoshiro(0x9112),
+                FusedQuadraticTarget(0.75),
+                algorithm;
+                threaded=true,
+            ),
+        )
+    end
+    @test shared_error isa SamplerDeviceError
+    @test shared_error.reason === :accelerator_rng_unavailable
 end
 
 @testset "native transformed density follows public inverse semantics" begin

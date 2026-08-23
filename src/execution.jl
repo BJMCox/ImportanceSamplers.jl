@@ -6,6 +6,12 @@ struct _KernelExecution{E}
 end
 
 struct _NoSampleTransform end
+struct _NoRandomBuffers end
+
+struct _RandomBuffers{U,N}
+    uniform::U
+    normal::N
+end
 
 const _NativeFusedScalarTransform = Union{
     IdentityTransform,
@@ -45,6 +51,55 @@ function _sampling_execution(proposal, threaded::Bool)
            _KernelExecution(cpu_execution) : cpu_execution
 end
 
+function _allocate_random_buffers(device, proposal, nsamples)
+    _supports_native_fused_cpu(proposal) || return _NoRandomBuffers()
+    T = _native_fused_float_type(proposal)
+    prototype = device(Vector{T}(undef, 0))
+    uniform = similar(prototype, T, 0)
+    normal = similar(prototype, T, nsamples)
+    return _RandomBuffers(uniform, normal)
+end
+
+function _fill_random_buffers!(rng, buffers::_RandomBuffers)
+    isempty(buffers.uniform) || Random.rand!(rng, buffers.uniform)
+    isempty(buffers.normal) || Random.randn!(rng, buffers.normal)
+    return buffers
+end
+
+_owned_backend_rng(
+    device::MLDataDevices.AbstractAcceleratorDevice,
+    ::UInt64,
+) = throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
+
+function _owned_backend_rng(device::MLDataDevices.CUDADevice, seed::UInt64)
+    # MLDataDevices delegates to CUDA.default_rng(), a mutable task-local cache
+    # shared by samplers created on the same task. Use it only as a concrete type
+    # witness; never retain or seed that shared object.
+    shared = try
+        MLDataDevices.default_device_rng(device)
+    catch
+        throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
+    end
+    R = typeof(shared)
+    isconcretetype(R) && all(isbitstype, fieldtypes(R)) || throw(
+        SamplerDeviceError(device, :accelerator_rng_unavailable),
+    )
+    owned = try
+        R(seed)
+    catch
+        throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
+    end
+    independent = try
+        R(seed)
+    catch
+        throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
+    end
+    owned isa Random.AbstractRNG && owned !== shared && owned !== independent || throw(
+        SamplerDeviceError(device, :accelerator_rng_unavailable),
+    )
+    return owned
+end
+
 _importance_sample!(sampler, ::_SerialCPUExecution) =
     _importance_sample_generic_cpu!(sampler, false)
 _importance_sample!(sampler, ::_ThreadedCPUExecution) =
@@ -55,17 +110,10 @@ function _importance_sample!(sampler, execution::_KernelExecution)
     nsamples = sampler.algorithm.nsamples
     logical_indices = Base.OneTo(nsamples)
     T = _native_fused_float_type(proposal)
-    normal_buffer = _capture_sampler_failure(:proposal_draw, 1) do
-        Vector{T}(undef, nsamples)
+    buffers = _capture_sampler_failure(:proposal_draw, 1) do
+        _fill_random_buffers!(sampler.rng, sampler.random_buffers)
     end
-    for sample_index in logical_indices
-        normal_buffer[sample_index] = _capture_sampler_failure(
-            :proposal_draw,
-            sample_index,
-        ) do
-            Random.randn(sampler.rng, T)
-        end
-    end
+    normal_buffer = buffers.normal
     base, transform = _native_fused_components(proposal)
     target = _capture_sampler_failure(:target, 1) do
         _bind_resolved_target(sampler.target, zero(T))

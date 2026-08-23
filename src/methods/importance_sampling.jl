@@ -128,8 +128,9 @@ struct _ContextualPreparedTarget{T,P}
     context::P
 end
 
-mutable struct _PreparedImportanceSampler{R,T,A,D}
+mutable struct _PreparedImportanceSampler{R,B,T,A,D}
     rng::R
+    random_buffers::B
     target::T
     algorithm::A
     device::D
@@ -185,11 +186,13 @@ end
 function _prepare_importance_sampler(rng, target, algorithm, threaded)
     threaded isa Bool || throw(ArgumentError("threaded must be Bool"))
     prepared_target = _resolve_prepared_target(target, algorithm.proposal)
+    device = MLDataDevices.CPUDevice()
     return _PreparedImportanceSampler(
         rng,
+        _allocate_random_buffers(device, algorithm.proposal, algorithm.nsamples),
         prepared_target,
         algorithm,
-        MLDataDevices.CPUDevice(),
+        device,
         threaded,
         false,
         false,
@@ -228,10 +231,12 @@ function _transfer_prepared_sampler(
     _target_transfer_rewrites_opaque_closure(sampler.target) && throw(
         SamplerDeviceError(device, :opaque_host_closure),
     )
+    algorithm = _copy_algorithm(device, sampler.algorithm)
     return _PreparedImportanceSampler(
         _clone_rng(device, sampler.rng),
+        _allocate_random_buffers(device, algorithm.proposal, algorithm.nsamples),
         _transfer_prepared_target(device, sampler.target),
-        _copy_algorithm(device, sampler.algorithm),
+        algorithm,
         device,
         sampler.threaded,
         false,
@@ -253,7 +258,30 @@ function _transfer_prepared_sampler(
     MLDataDevices.functional(device) || throw(
         SamplerDeviceError(device, :backend_unavailable),
     )
-    throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
+    algorithm = _copy_algorithm(device, sampler.algorithm)
+    random_buffers = _allocate_random_buffers(
+        device,
+        algorithm.proposal,
+        algorithm.nsamples,
+    )
+    random_buffers isa _RandomBuffers || throw(
+        SamplerDeviceError(device, :accelerator_rng_unavailable),
+    )
+    seed = try
+        Random.rand(sampler.rng, UInt64)
+    catch
+        throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
+    end
+    return _PreparedImportanceSampler(
+        _owned_backend_rng(device, seed),
+        random_buffers,
+        _transfer_prepared_target(device, sampler.target),
+        algorithm,
+        device,
+        sampler.threaded,
+        false,
+        false,
+    )
 end
 
 function _transfer_prepared_sampler(

@@ -2,7 +2,7 @@ using Test
 using ImportanceSamplers
 import DensityInterface
 import Random
-import Random: rand, randn
+import Random: rand, randn, randn!
 
 mutable struct ThreadRecordingRNG{R<:Random.AbstractRNG} <: Random.AbstractRNG
     inner::R
@@ -52,9 +52,10 @@ mutable struct NativeThreadRecordingRNG{R<:Random.AbstractRNG} <: Random.Abstrac
     access_tasks::Vector{Task}
 end
 
-function randn(rng::NativeThreadRecordingRNG, ::Type{Float64})
+function Random.randn!(rng::NativeThreadRecordingRNG, values::AbstractArray{Float64})
     push!(rng.access_tasks, current_task())
-    return randn(rng.inner, Float64)
+    Random.randn!(rng.inner, values)
+    return values
 end
 
 mutable struct NativeThreadTarget
@@ -173,9 +174,8 @@ end
 
     expected_rng = copy(initial_state)
     expected_samples = Vector{Float64}(undef, nsamples)
-    for index in eachindex(expected_samples)
-        expected_samples[index] = 0.5 + 1.25 * randn(expected_rng, Float64)
-    end
+    randn!(expected_rng, expected_samples)
+    expected_samples .= 0.5 .+ 1.25 .* expected_samples
 
     @test serial_result.samples == expected_samples
     @test threaded_result.samples == expected_samples
@@ -183,6 +183,8 @@ end
     expected_next = rand(expected_rng)
     @test rand(serial_rng.inner) == expected_next
     @test rand(threaded_rng.inner) == expected_next
+    @test length(serial_rng.access_tasks) == 1
+    @test length(threaded_rng.access_tasks) == 1
     @test all(==(caller_task), serial_rng.access_tasks)
     @test all(==(caller_task), threaded_rng.access_tasks)
     @test all(==(caller_task), serial_target.tasks)
