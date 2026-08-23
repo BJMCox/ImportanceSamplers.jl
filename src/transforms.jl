@@ -1,7 +1,7 @@
 """
     AbstractSampleTransform
 
-Abstract supertype for transforms from an unconstrained scalar to a logical
+Abstract supertype for transforms from unconstrained coordinates to a logical
 sample value.
 """
 abstract type AbstractSampleTransform end
@@ -15,6 +15,27 @@ struct SoftplusTransform <: AbstractSampleTransform end
 struct IntervalTransform{T,L,U} <: AbstractSampleTransform
     lower::L
     upper::U
+end
+
+"""
+    SimplexTransform(K)
+
+Transform `K - 1` unconstrained coordinates into `K` positive weights that
+sum to one. The coordinates use an orthonormal embedding into the sum-zero
+logit subspace. The forward Jacobian is measured against the first `K - 1`
+simplex coordinates, `dx₁⋯dxₖ₋₁`.
+"""
+struct SimplexTransform <: AbstractSampleTransform
+    dimension::Int
+
+    function SimplexTransform(dimension::Int)
+        dimension >= 2 || throw(ArgumentError("simplex dimension must be at least two"))
+        return new(dimension)
+    end
+end
+
+function SimplexTransform(dimension)
+    throw(ArgumentError("simplex dimension must be an Int"))
 end
 
 """
@@ -245,4 +266,126 @@ end
     z = lower_logdistance - upper_logdistance
     logabsjac = lower_logdistance + upper_logdistance - span_logdistance
     return _checked_forward_value(z, logabsjac)
+end
+
+@inline function _simplex_embedding_constants(::Type{T}, dimension::Int) where {T}
+    inverse_root_dimension = inv(sqrt(T(dimension)))
+    shared_coefficient = (one(T) + inverse_root_dimension) / T(dimension - 1)
+    return inverse_root_dimension, shared_coefficient
+end
+
+@inline function _compensated_add(total::T, correction::T, value::T) where {T}
+    corrected_value = value - correction
+    updated_total = total + corrected_value
+    updated_correction = (updated_total - total) - corrected_value
+    return updated_total, updated_correction
+end
+
+@inline function _simplex_sum_tolerance(::Type{T}) where {T}
+    # Compensated accumulation plus rounded stored weights stays within a few ulps.
+    return T(8) * eps(T)
+end
+
+function _transform_with_logjac(
+    transform::SimplexTransform,
+    z::AbstractVector{T},
+) where {T<:_TransformFloat}
+    dimension = transform.dimension
+    length(z) == dimension - 1 || throw(
+        DimensionMismatch(
+            "SimplexTransform($dimension) requires $(dimension - 1) unconstrained coordinates",
+        ),
+    )
+
+    x = similar(z, dimension)
+    coordinate_sum = zero(T)
+    coordinate_sum_correction = zero(T)
+    for index in eachindex(z)
+        coordinate = z[index]
+        isfinite(coordinate) || _throw_invalid_transform(:nonfinite_input)
+        coordinate_sum, coordinate_sum_correction =
+            _compensated_add(coordinate_sum, coordinate_sum_correction, coordinate)
+    end
+    isfinite(coordinate_sum) || _throw_invalid_transform(:nonfinite_output)
+
+    inverse_root_dimension, shared_coefficient =
+        _simplex_embedding_constants(T, dimension)
+    maximum_logit = inverse_root_dimension * coordinate_sum
+    x[dimension] = maximum_logit
+    for index in eachindex(z)
+        logit = z[index] - shared_coefficient * coordinate_sum
+        isfinite(logit) || _throw_invalid_transform(:nonfinite_output)
+        x[index] = logit
+        maximum_logit = max(maximum_logit, logit)
+    end
+
+    exponential_sum = zero(T)
+    exponential_sum_correction = zero(T)
+    for index in eachindex(x)
+        weight = exp(x[index] - maximum_logit)
+        x[index] = weight
+        exponential_sum, exponential_sum_correction =
+            _compensated_add(exponential_sum, exponential_sum_correction, weight)
+    end
+    isfinite(exponential_sum) || _throw_invalid_transform(:nonfinite_output)
+
+    logabsjac = T(0.5) * log(T(dimension))
+    logabsjac_correction = zero(T)
+    for index in eachindex(x)
+        weight = x[index] / exponential_sum
+        weight > zero(T) || _throw_invalid_transform(:outside_support)
+        x[index] = weight
+        logabsjac, logabsjac_correction =
+            _compensated_add(logabsjac, logabsjac_correction, log(weight))
+    end
+    isfinite(logabsjac) || _throw_invalid_transform(:nonfinite_logabsjac)
+    return x, logabsjac
+end
+
+function _inverse_with_logjac(
+    transform::SimplexTransform,
+    x::AbstractVector{T},
+) where {T<:_TransformFloat}
+    dimension = transform.dimension
+    length(x) == dimension || throw(
+        DimensionMismatch("SimplexTransform($dimension) requires $dimension simplex weights"),
+    )
+
+    z = similar(x, dimension - 1)
+    weight_sum = zero(T)
+    weight_sum_correction = zero(T)
+    log_weight_sum = zero(T)
+    log_weight_sum_correction = zero(T)
+    last_log_weight = zero(T)
+    for index in eachindex(x)
+        weight = x[index]
+        isfinite(weight) || _throw_invalid_transform(:nonfinite_input)
+        weight > zero(T) || _throw_invalid_transform(:outside_support)
+        weight_sum, weight_sum_correction =
+            _compensated_add(weight_sum, weight_sum_correction, weight)
+        log_weight = log(weight)
+        log_weight_sum, log_weight_sum_correction =
+            _compensated_add(log_weight_sum, log_weight_sum_correction, log_weight)
+        if index < dimension
+            z[index] = log_weight
+        else
+            last_log_weight = log_weight
+        end
+    end
+    isfinite(weight_sum) || _throw_invalid_transform(:nonfinite_input)
+    abs(weight_sum - one(T)) <= _simplex_sum_tolerance(T) ||
+        _throw_invalid_transform(:outside_support)
+
+    mean_log_weight = log_weight_sum / T(dimension)
+    inverse_root_dimension, _ = _simplex_embedding_constants(T, dimension)
+    transpose_coefficient = inverse_root_dimension / (one(T) - inverse_root_dimension)
+    last_centered_log_weight = last_log_weight - mean_log_weight
+    for index in eachindex(z)
+        z[index] =
+            z[index] - mean_log_weight + transpose_coefficient * last_centered_log_weight
+    end
+
+    logabsjac = T(0.5) * log(T(dimension)) + log_weight_sum
+    isfinite(logabsjac) || _throw_invalid_transform(:nonfinite_logabsjac)
+    return z, logabsjac
 end
