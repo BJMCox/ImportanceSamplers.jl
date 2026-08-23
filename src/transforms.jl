@@ -80,6 +80,12 @@ function Base.showerror(io::IO, error::InvalidTransformError)
 end
 
 const _TransformFloat = Union{Float32,Float64}
+const _NativeScalarTransform = Union{
+    IdentityTransform,
+    PositiveTransform,
+    SoftplusTransform,
+    IntervalTransform,
+}
 
 const _NATIVE_TRANSFORM_NONFINITE_INPUT = UInt16(0x0001)
 const _NATIVE_TRANSFORM_NONFINITE_OUTPUT = UInt16(0x0002)
@@ -92,6 +98,45 @@ const _NATIVE_TRANSFORM_OUTSIDE_SUPPORT = UInt16(0x0008)
     isfinite(x) || return (x, logabsjac, _NATIVE_TRANSFORM_NONFINITE_OUTPUT)
     isfinite(logabsjac) || return (x, logabsjac, _NATIVE_TRANSFORM_NONFINITE_LOGJAC)
     return _native_transform_success(x, logabsjac)
+end
+
+@inline function _native_inverse_with_logjac(::IdentityTransform, x::T) where {T<:_TransformFloat}
+    isfinite(x) || return (x, zero(T), _NATIVE_TRANSFORM_NONFINITE_INPUT)
+    return _native_transform_success(x, zero(T))
+end
+
+@inline function _native_inverse_with_logjac(::PositiveTransform, x::T) where {T<:_TransformFloat}
+    isfinite(x) || return (x, x, _NATIVE_TRANSFORM_NONFINITE_INPUT)
+    x > zero(T) || return (x, x, _NATIVE_TRANSFORM_OUTSIDE_SUPPORT)
+    z = log(x)
+    return _native_checked_transform_result(z, z)
+end
+
+@inline function _native_inverse_with_logjac(::SoftplusTransform, x::T) where {T<:_TransformFloat}
+    isfinite(x) || return (x, x, _NATIVE_TRANSFORM_NONFINITE_INPUT)
+    x > zero(T) || return (x, x, _NATIVE_TRANSFORM_OUTSIDE_SUPPORT)
+    z = LogExpFunctions.logexpm1(x)
+    return _native_checked_transform_result(z, z - x)
+end
+
+@inline function _native_inverse_with_logjac(
+    transform::IntervalTransform{T,T,Nothing},
+    x::T,
+) where {T<:_TransformFloat}
+    isfinite(x) || return (x, x, _NATIVE_TRANSFORM_NONFINITE_INPUT)
+    x > transform.lower || return (x, x, _NATIVE_TRANSFORM_OUTSIDE_SUPPORT)
+    z = log(x - transform.lower)
+    return _native_checked_transform_result(z, z)
+end
+
+@inline function _native_inverse_with_logjac(
+    transform::IntervalTransform{T,Nothing,T},
+    x::T,
+) where {T<:_TransformFloat}
+    isfinite(x) || return (x, x, _NATIVE_TRANSFORM_NONFINITE_INPUT)
+    x < transform.upper || return (x, x, _NATIVE_TRANSFORM_OUTSIDE_SUPPORT)
+    z = log(transform.upper - x)
+    return _native_checked_transform_result(z, z)
 end
 
 @inline function _native_transform_with_logjac(::IdentityTransform, z::T) where {T<:_TransformFloat}
@@ -217,21 +262,17 @@ end
     throw(InvalidTransformError(reason))
 end
 
-@inline function _checked_transform_input(z::T) where {T<:_TransformFloat}
-    isfinite(z) || _throw_invalid_transform(:nonfinite_input)
-    return z
+@inline function _native_transform_failure_reason(reason_bits)
+    reason_bits & _NATIVE_TRANSFORM_NONFINITE_INPUT != 0 && return :nonfinite_input
+    reason_bits & _NATIVE_TRANSFORM_NONFINITE_OUTPUT != 0 && return :nonfinite_output
+    reason_bits & _NATIVE_TRANSFORM_NONFINITE_LOGJAC != 0 && return :nonfinite_logabsjac
+    return :outside_support
 end
 
-@inline function _checked_forward_value(x::T, logabsjac::T) where {T<:_TransformFloat}
-    isfinite(x) || _throw_invalid_transform(:nonfinite_output)
-    isfinite(logabsjac) || _throw_invalid_transform(:nonfinite_logabsjac)
-    return x, logabsjac
-end
-
-@inline function _checked_positive_value(x::T, logabsjac::T) where {T<:_TransformFloat}
-    _checked_forward_value(x, logabsjac)
-    x > zero(T) || _throw_invalid_transform(:outside_support)
-    return x, logabsjac
+@inline function _checked_native_transform_result(result)
+    value, logabsjac, reason = result
+    iszero(reason) || _throw_invalid_transform(_native_transform_failure_reason(reason))
+    return value, logabsjac
 end
 
 @inline function _softplus(z::T) where {T<:_TransformFloat}
@@ -267,112 +308,11 @@ end
     return (one(T) - probability) * lower + probability * upper
 end
 
-@inline function _transform_with_logjac(::IdentityTransform, z::T) where {T<:_TransformFloat}
-    _checked_transform_input(z)
-    return z, zero(T)
-end
+@inline _transform_with_logjac(transform::_NativeScalarTransform, z::_TransformFloat) =
+    _checked_native_transform_result(_native_transform_with_logjac(transform, z))
 
-@inline function _transform_with_logjac(::PositiveTransform, z::T) where {T<:_TransformFloat}
-    _checked_transform_input(z)
-    return _checked_positive_value(exp(z), z)
-end
-
-@inline function _transform_with_logjac(::SoftplusTransform, z::T) where {T<:_TransformFloat}
-    _checked_transform_input(z)
-    x = _softplus(z)
-    return _checked_positive_value(x, z - x)
-end
-
-@inline function _transform_with_logjac(
-    transform::IntervalTransform{T,T,Nothing},
-    z::T,
-) where {T<:_TransformFloat}
-    _checked_transform_input(z)
-    distance, logabsjac = _transform_with_logjac(PositiveTransform(), z)
-    x = transform.lower + distance
-    _checked_forward_value(x, logabsjac)
-    x > transform.lower || _throw_invalid_transform(:outside_support)
-    return x, logabsjac
-end
-
-@inline function _transform_with_logjac(
-    transform::IntervalTransform{T,Nothing,T},
-    z::T,
-) where {T<:_TransformFloat}
-    _checked_transform_input(z)
-    distance, logabsjac = _transform_with_logjac(PositiveTransform(), z)
-    x = transform.upper - distance
-    _checked_forward_value(x, logabsjac)
-    x < transform.upper || _throw_invalid_transform(:outside_support)
-    return x, logabsjac
-end
-
-@inline function _transform_with_logjac(
-    transform::IntervalTransform{T,T,T},
-    z::T,
-) where {T<:_TransformFloat}
-    _checked_transform_input(z)
-    probability = _logistic(z)
-    x = _bounded_interval_value(transform.lower, transform.upper, probability)
-    logabsjac = _log_positive_difference(transform.upper, transform.lower) +
-                 _logsigmoid(z) + _logsigmoid(-z)
-    _checked_forward_value(x, logabsjac)
-    transform.lower < x < transform.upper || _throw_invalid_transform(:outside_support)
-    return x, logabsjac
-end
-
-@inline function _inverse_with_logjac(::IdentityTransform, x::T) where {T<:_TransformFloat}
-    _checked_transform_input(x)
-    return x, zero(T)
-end
-
-@inline function _inverse_with_logjac(::PositiveTransform, x::T) where {T<:_TransformFloat}
-    isfinite(x) || _throw_invalid_transform(:nonfinite_input)
-    x > zero(T) || _throw_invalid_transform(:outside_support)
-    z = log(x)
-    return _checked_forward_value(z, z)
-end
-
-@inline function _inverse_with_logjac(::SoftplusTransform, x::T) where {T<:_TransformFloat}
-    isfinite(x) || _throw_invalid_transform(:nonfinite_input)
-    x > zero(T) || _throw_invalid_transform(:outside_support)
-    z = LogExpFunctions.logexpm1(x)
-    return _checked_forward_value(z, z - x)
-end
-
-@inline function _inverse_with_logjac(
-    transform::IntervalTransform{T,T,Nothing},
-    x::T,
-) where {T<:_TransformFloat}
-    isfinite(x) || _throw_invalid_transform(:nonfinite_input)
-    x > transform.lower || _throw_invalid_transform(:outside_support)
-    z = log(x - transform.lower)
-    return _checked_forward_value(z, z)
-end
-
-@inline function _inverse_with_logjac(
-    transform::IntervalTransform{T,Nothing,T},
-    x::T,
-) where {T<:_TransformFloat}
-    isfinite(x) || _throw_invalid_transform(:nonfinite_input)
-    x < transform.upper || _throw_invalid_transform(:outside_support)
-    z = log(transform.upper - x)
-    return _checked_forward_value(z, z)
-end
-
-@inline function _inverse_with_logjac(
-    transform::IntervalTransform{T,T,T},
-    x::T,
-) where {T<:_TransformFloat}
-    isfinite(x) || _throw_invalid_transform(:nonfinite_input)
-    transform.lower < x < transform.upper || _throw_invalid_transform(:outside_support)
-    lower_logdistance = _log_positive_difference(x, transform.lower)
-    upper_logdistance = _log_positive_difference(transform.upper, x)
-    span_logdistance = _log_positive_difference(transform.upper, transform.lower)
-    z = lower_logdistance - upper_logdistance
-    logabsjac = lower_logdistance + upper_logdistance - span_logdistance
-    return _checked_forward_value(z, logabsjac)
-end
+@inline _inverse_with_logjac(transform::_NativeScalarTransform, x::_TransformFloat) =
+    _checked_native_transform_result(_native_inverse_with_logjac(transform, x))
 
 @inline function _simplex_embedding_constants(::Type{T}, dimension::Int) where {T}
     inverse_root_dimension = inv(sqrt(T(dimension)))
@@ -385,6 +325,48 @@ end
     updated_total = total + corrected_value
     updated_correction = (updated_total - total) - corrected_value
     return updated_total, updated_correction
+end
+
+@inline function _native_simplex_inverse!(coordinate, offset, transform, x)
+    T = eltype(x)
+    dimension = transform.dimension
+    weight_sum = zero(T)
+    weight_sum_correction = zero(T)
+    log_weight_sum = zero(T)
+    log_weight_sum_correction = zero(T)
+    last_log_weight = zero(T)
+    for index in 1:dimension
+        weight = @inbounds x[index]
+        isfinite(weight) || return zero(T), _NATIVE_TRANSFORM_NONFINITE_INPUT
+        weight > zero(T) || return zero(T), _NATIVE_TRANSFORM_OUTSIDE_SUPPORT
+        weight_sum, weight_sum_correction =
+            _compensated_add(weight_sum, weight_sum_correction, weight)
+        log_weight = log(weight)
+        log_weight_sum, log_weight_sum_correction =
+            _compensated_add(log_weight_sum, log_weight_sum_correction, log_weight)
+        if index < dimension
+            @inbounds coordinate[offset + index - 1] = log_weight
+        else
+            last_log_weight = log_weight
+        end
+    end
+    isfinite(weight_sum) || return zero(T), _NATIVE_TRANSFORM_NONFINITE_INPUT
+    abs(weight_sum - one(T)) <= _simplex_sum_tolerance(T) ||
+        return zero(T), _NATIVE_TRANSFORM_OUTSIDE_SUPPORT
+
+    mean_log_weight = log_weight_sum / T(dimension)
+    inverse_root_dimension, _ = _simplex_embedding_constants(T, dimension)
+    transpose_coefficient = inverse_root_dimension / (one(T) - inverse_root_dimension)
+    last_centered_log_weight = last_log_weight - mean_log_weight
+    for index in 1:(dimension - 1)
+        @inbounds coordinate[offset + index - 1] =
+            coordinate[offset + index - 1] - mean_log_weight +
+            transpose_coefficient * last_centered_log_weight
+    end
+
+    logabsjac = T(0.5) * log(T(dimension)) + log_weight_sum
+    isfinite(logabsjac) || return logabsjac, _NATIVE_TRANSFORM_NONFINITE_LOGJAC
+    return logabsjac, UInt16(0)
 end
 
 @inline function _simplex_sum_tolerance(::Type{T}) where {T}
@@ -458,41 +440,8 @@ function _inverse_with_logjac(
     )
 
     z = similar(x, dimension - 1)
-    weight_sum = zero(T)
-    weight_sum_correction = zero(T)
-    log_weight_sum = zero(T)
-    log_weight_sum_correction = zero(T)
-    last_log_weight = zero(T)
-    for index in eachindex(x)
-        weight = x[index]
-        isfinite(weight) || _throw_invalid_transform(:nonfinite_input)
-        weight > zero(T) || _throw_invalid_transform(:outside_support)
-        weight_sum, weight_sum_correction =
-            _compensated_add(weight_sum, weight_sum_correction, weight)
-        log_weight = log(weight)
-        log_weight_sum, log_weight_sum_correction =
-            _compensated_add(log_weight_sum, log_weight_sum_correction, log_weight)
-        if index < dimension
-            z[index] = log_weight
-        else
-            last_log_weight = log_weight
-        end
-    end
-    isfinite(weight_sum) || _throw_invalid_transform(:nonfinite_input)
-    abs(weight_sum - one(T)) <= _simplex_sum_tolerance(T) ||
-        _throw_invalid_transform(:outside_support)
-
-    mean_log_weight = log_weight_sum / T(dimension)
-    inverse_root_dimension, _ = _simplex_embedding_constants(T, dimension)
-    transpose_coefficient = inverse_root_dimension / (one(T) - inverse_root_dimension)
-    last_centered_log_weight = last_log_weight - mean_log_weight
-    for index in eachindex(z)
-        z[index] =
-            z[index] - mean_log_weight + transpose_coefficient * last_centered_log_weight
-    end
-
-    logabsjac = T(0.5) * log(T(dimension)) + log_weight_sum
-    isfinite(logabsjac) || _throw_invalid_transform(:nonfinite_logabsjac)
+    logabsjac, reason = _native_simplex_inverse!(z, firstindex(z), transform, x)
+    iszero(reason) || _throw_invalid_transform(_native_transform_failure_reason(reason))
     return z, logabsjac
 end
 

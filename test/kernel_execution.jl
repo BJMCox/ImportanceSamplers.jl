@@ -37,6 +37,29 @@ function (::MinusInfVectorTarget{T})(sample::AbstractVector{T})::T where {T}
     return iszero(first(sample)) ? T(-Inf) : -sum(abs2, sample)
 end
 
+struct NativeVectorOnlyTarget end
+(::NativeVectorOnlyTarget)(sample::Vector{Float64}) = -sum(abs2, sample)
+
+struct NativeTargetFailure <: Exception
+    sample::Float64
+end
+
+struct NativeFailAtVectorTarget
+    coordinate::Float64
+end
+
+function (target::NativeFailAtVectorTarget)(sample::AbstractVector{Float64})::Float64
+    first(sample) == target.coordinate && throw(NativeTargetFailure(first(sample)))
+    return -sum(abs2, sample)
+end
+
+struct NativePhaseOrderTarget end
+
+function (::NativePhaseOrderTarget)(sample::Float64)::Float64
+    sample == 2.0 && throw(NativeTargetFailure(sample))
+    return isfinite(sample) ? 0.0 : -Inf
+end
+
 mutable struct PrefilledNormalRNG{T} <: Random.AbstractRNG
     values::Vector{T}
     index::Int
@@ -169,13 +192,38 @@ function _check_vector_native_equivalence(::Type{T}, proposal, normals, target) 
     nsamples = length(normals) ÷ dimension
     fused = @inferred _run_native_fused(target, proposal, normals, false, nsamples)
     reference = @inferred _native_unfused_reference(
-        target, proposal, copy(normals), nsamples
+        target, proposal, normals, nsamples
     )
     tolerance = T(128) * eps(T)
     @test fused.samples == reference.samples
     @test fused.logweights ≈ reference.logweights rtol = tolerance atol = tolerance
     return fused
 end
+
+_view_backed_scale(scale::ImportanceSamplers._SphericalGaussianScale) = scale
+_view_backed_scale(scale::ImportanceSamplers._DiagonalGaussianScale) =
+    ImportanceSamplers._DiagonalGaussianScale(view(scale.scales, :))
+_view_backed_scale(scale::ImportanceSamplers._FactorGaussianScale) =
+    ImportanceSamplers._FactorGaussianScale(view(scale.factor, :, :))
+
+function _view_backed_gaussian(proposal)
+    return ImportanceSamplers._GaussianProposal(
+        proposal.family,
+        view(proposal.location, :),
+        _view_backed_scale(proposal.scale),
+        proposal.lognormalizer,
+    )
+end
+
+function _view_backed_proposal(proposal::TransformedProposal)
+    return ImportanceSamplers.TransformedProposal(
+        _view_backed_gaussian(proposal.base),
+        proposal.transform,
+        ImportanceSamplers._PreparedProposalToken(),
+    )
+end
+
+_view_backed_proposal(proposal) = _view_backed_gaussian(proposal)
 
 function _check_transformed_native_equivalence(
     ::Type{T},
@@ -188,7 +236,7 @@ function _check_transformed_native_equivalence(
     reference = @inferred _native_unfused_reference(
         target,
         proposal,
-        copy(coordinates),
+        coordinates,
     )
     tolerance = T(64) * eps(T)
     @test fused.samples == reference.samples
@@ -207,7 +255,7 @@ function _check_scalar_native_equivalence(::Type{T}) where {T<:Union{Float32,Flo
     )
     target = FusedQuadraticTarget(T(0.75))
     fused = @inferred _run_native_fused(target, proposal, normals, false)
-    reference = @inferred _native_unfused_reference(target, proposal, copy(normals))
+    reference = @inferred _native_unfused_reference(target, proposal, normals)
 
     coordinates = location .+ scale .* normals
     expected_samples = max.(coordinates, zero(T)) .+ log1p.(exp.(-abs.(coordinates)))
@@ -268,6 +316,11 @@ end
             @test ImportanceSamplers._sampling_execution(proposal, false) isa
                   ImportanceSamplers._KernelExecution
             fused = _check_vector_native_equivalence(T, proposal, normals, target)
+            backend_shaped = @inferred _run_native_fused(
+                target, _view_backed_proposal(proposal), normals, false, 3
+            )
+            @test backend_shaped.samples == fused.samples
+            @test backend_shaped.logweights == fused.logweights
         end
     end
 end
@@ -286,6 +339,15 @@ end
             FusedVectorTarget(T(0.5)),
         )
         @test all(isone, vec(sum(simplex_result.samples; dims=1)))
+        backend_simplex = @inferred _run_native_fused(
+            FusedVectorTarget(T(0.5)),
+            _view_backed_proposal(simplex),
+            simplex_normals,
+            false,
+            3,
+        )
+        @test backend_simplex.samples == simplex_result.samples
+        @test backend_simplex.logweights == simplex_result.logweights
 
         factor = T[
             1 0 0 0
@@ -313,6 +375,15 @@ end
             FusedNamedTarget{T}(),
         )
         @test all(isone, vec(sum(named_result.samples.weights; dims=1)))
+        backend_named = @inferred _run_native_fused(
+            FusedNamedTarget{T}(),
+            _view_backed_proposal(named),
+            named_normals,
+            false,
+            3,
+        )
+        @test backend_named.samples == named_result.samples
+        @test backend_named.logweights == named_result.logweights
     end
 end
 
@@ -359,6 +430,48 @@ end
         @test failure.captured.ex.location == 1:2
         @test failure.captured.ex.reason === :nonfinite_output
 
+    end
+end
+
+@testset "native CPU target failures retain binding, phase, and index" begin
+    proposal = SphericalGaussian(zeros(2), 1.0)
+    binding_failure = _caught_kernel_execution_error() do
+        _run_native_fused(NativeVectorOnlyTarget(), proposal, zeros(2), false, 1)
+    end
+    @test binding_failure isa SamplerExecutionError
+    if binding_failure isa SamplerExecutionError
+        @test (binding_failure.phase, binding_failure.sample_index) == (:target, 1)
+        @test binding_failure.captured.ex isa ArgumentError
+    end
+
+    target_failure = _caught_kernel_execution_error() do
+        _run_native_fused(
+            NativeFailAtVectorTarget(1.0),
+            proposal,
+            [0.0, 0.0, 1.0, 1.0, 2.0, 2.0],
+            false,
+            3,
+        )
+    end
+    @test target_failure isa SamplerExecutionError
+    if target_failure isa SamplerExecutionError
+        @test (target_failure.phase, target_failure.sample_index) == (:target, 2)
+        @test target_failure.captured.ex isa NativeTargetFailure
+        @test target_failure.captured.ex.sample == 1.0
+    end
+
+    phase_order_failure = _caught_kernel_execution_error() do
+        _run_native_fused(
+            NativePhaseOrderTarget(),
+            SphericalGaussian(0.0, 1.0),
+            [Inf, 0.0, 2.0],
+            true,
+        )
+    end
+    @test phase_order_failure isa SamplerExecutionError
+    if phase_order_failure isa SamplerExecutionError
+        @test (phase_order_failure.phase, phase_order_failure.sample_index) == (:target, 3)
+        @test phase_order_failure.captured.ex isa NativeTargetFailure
     end
 end
 
@@ -514,6 +627,35 @@ end
             error = _check_transformed_native_equivalence(T, transform, extreme)
             @test error <= T(64) * eps(T)
         end
+    end
+end
+
+@testset "native density is canonical at the returned finite-precision sample" begin
+    for (T, location) in ((Float32, Float32(1e30)), (Float64, Float64(1e300)))
+        proposal = SphericalGaussian(location, one(T))
+        normals = T[1]
+        fused = @inferred _run_native_fused(FusedConstantTarget{T}(), proposal, normals, false)
+        reference = @inferred _native_unfused_reference(
+            FusedConstantTarget{T}(), proposal, normals
+        )
+        @test fused.samples == reference.samples == T[location]
+        @test fused.logweights == reference.logweights
+    end
+
+    for (T, normals) in (
+        (Float32, Float32[60, 60]),
+        (Float64, Float64[-450, -350]),
+    )
+        proposal = TransformedProposal(
+            SphericalGaussian(zeros(T, 2), one(T)),
+            SimplexTransform(3),
+        )
+        _check_vector_native_equivalence(
+            T,
+            proposal,
+            normals,
+            FusedVectorTarget(zero(T)),
+        )
     end
 end
 

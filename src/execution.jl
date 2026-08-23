@@ -17,12 +17,17 @@ struct _DeviceFailureRecord{A}
     storage::A
 end
 
-const _NativeFusedScalarTransform = Union{
-    IdentityTransform,
-    PositiveTransform,
-    SoftplusTransform,
-    IntervalTransform,
-}
+struct _NoNativeTargetFailures end
+
+struct _NativeDeviceTarget{L,T}
+    target::T
+end
+
+struct _NativeCPUTarget{L,T,F}
+    target::T
+    failures::F
+end
+
 const _NativeFusedNonidentityScalarTransform = Union{
     PositiveTransform,
     SoftplusTransform,
@@ -51,7 +56,7 @@ end
 
 _supports_native_transform(::IdentityTransform, dimension) = true
 _supports_native_transform(::SimplexTransform, dimension) = true
-_supports_native_transform(::_NativeFusedScalarTransform, dimension) = dimension == 1
+_supports_native_transform(::_NativeScalarTransform, dimension) = dimension == 1
 
 function _supports_native_transform(layout::_FlatTransformLayout, dimension)
     layout.dimension == dimension || return false
@@ -143,32 +148,55 @@ _importance_sample!(sampler, ::_ThreadedCPUExecution) =
 function _importance_sample!(sampler, execution::_KernelExecution)
     proposal = sampler.algorithm.proposal
     nsamples = sampler.algorithm.nsamples
-    T = _native_fused_float_type(proposal)
     buffers = _capture_sampler_failure(:proposal_draw, 1) do
         _fill_random_buffers!(sampler.rng, sampler.random_buffers)
     end
     normal_buffer = buffers.normal
     base, transform = _native_fused_components(proposal)
-    sample_template = _native_sample_template(proposal)
-    target = _capture_sampler_failure(:target, 1) do
-        _bind_resolved_target(sampler.target, sample_template)
-    end
-    log_type = _resolve_logweight_type(target, proposal, typeof(sample_template))
     samples = _allocate_native_samples(normal_buffer, proposal, nsamples)
+    binding_sample = _native_binding_sample(samples)
+    target = _capture_sampler_failure(:target, 1) do
+        _bind_resolved_target(sampler.target, binding_sample)
+    end
+    log_type = _resolve_native_logweight_type(target, base, typeof(binding_sample))
     logweights = similar(normal_buffer, log_type, nsamples)
     failure_record = _allocate_device_failure_record(normal_buffer)
+    target_evaluator, target_failures = _native_target_evaluator(
+        KernelAbstractions.get_backend(normal_buffer),
+        target,
+        log_type,
+        nsamples,
+    )
     _launch_native_fused!(
         samples,
         logweights,
         failure_record,
         normal_buffer,
-        target,
+        target_evaluator,
         base,
         transform,
         execution.cpu_execution,
     )
-    _throw_native_failure(_device_failure_snapshot(failure_record), transform)
+    _throw_native_failures(
+        _device_failure_snapshot(failure_record),
+        target_failures,
+        transform,
+    )
     return samples, logweights
+end
+
+function _native_target_evaluator(
+    ::KernelAbstractions.CPU,
+    target,
+    ::Type{L},
+    nsamples,
+) where {L}
+    failures = Vector{Union{Nothing,SamplerExecutionError}}(nothing, nsamples)
+    return _NativeCPUTarget{L,typeof(target),typeof(failures)}(target, failures), failures
+end
+
+function _native_target_evaluator(backend, target, ::Type{L}, nsamples) where {L}
+    return _NativeDeviceTarget{L,typeof(target)}(target), _NoNativeTargetFailures()
 end
 
 _native_fused_components(proposal::_GaussianProposal) =
@@ -187,31 +215,22 @@ function _native_fused_dimension(proposal)
     return _gaussian_dimension(base.location)
 end
 
-_native_sample_template(base::_GaussianProposal{F,T}) where {F,T<:_NativeGaussianFloat} =
-    zero(T)
-_native_sample_template(base::_GaussianProposal{F,<:AbstractVector{T}}) where {F,T} =
-    zeros(T, _gaussian_dimension(base.location))
-
-function _native_sample_template(proposal::TransformedProposal)
-    base = proposal.base
-    transform = proposal.transform
-    T = _native_fused_float_type(base)
-    if transform isa IdentityTransform && base.location isa AbstractVector
-        return zeros(T, _gaussian_dimension(base.location))
-    elseif transform isa _NativeFusedScalarTransform
-        return zero(T)
-    elseif transform isa SimplexTransform
-        return zeros(T, transform.dimension)
+function _resolve_native_logweight_type(target, base, sample_type::Type)
+    target_type = _capture_sampler_failure(:target, 1) do
+        _canonical_inferred_log_type(Base.promote_op(target, sample_type), "target")
     end
-    return _native_flat_transform_template(transform, T)
+    proposal_type = _canonical_inferred_log_type(typeof(base.lognormalizer), "proposal")
+    return target_type === Float64 || proposal_type === Float64 ? Float64 : Float32
 end
 
-function _native_flat_transform_template(layout::_FlatTransformLayout, ::Type{T}) where {T}
-    return map(layout.blocks) do block
-        block.transform isa SimplexTransform ?
-        zeros(T, block.transform.dimension) :
-        block.location isa Int ? zero(T) : zeros(T, length(block.location))
+_native_binding_sample(samples::AbstractVector{T}) where {T} = zero(T)
+_native_binding_sample(samples::AbstractMatrix) = view(samples, :, 1)
+
+@generated function _native_binding_sample(samples::NamedTuple{Names}) where {Names}
+    leaves = map(Names) do name
+        :(_native_binding_sample(getfield(samples, $(QuoteNode(name)))))
     end
+    return :(NamedTuple{$Names}(($(leaves...),)))
 end
 
 function _allocate_native_samples(
@@ -234,7 +253,7 @@ function _allocate_native_samples(prototype, proposal::TransformedProposal, nsam
     base = proposal.base
     transform = proposal.transform
     T = _native_fused_float_type(base)
-    if transform isa _NativeFusedScalarTransform &&
+    if transform isa _NativeScalarTransform &&
        base.location isa _NativeGaussianFloat
         return similar(prototype, T, nsamples)
     elseif transform isa _FlatTransformLayout
@@ -306,37 +325,142 @@ const _NATIVE_TRANSFORM_REASONS = UInt16(0x000f)
     return UInt16(0)
 end
 
+@inline function (evaluator::_NativeDeviceTarget{L})(sample, slot) where {L}
+    value = convert(L, evaluator.target(sample))
+    reason = _native_target_reason(value)
+    return value, reason, !iszero(reason)
+end
+
+@inline function _record_cpu_target_failure!(
+    evaluator::_NativeCPUTarget{L},
+    slot,
+    cause,
+    trace,
+) where {L}
+    @inbounds evaluator.failures[slot] = SamplerExecutionError(
+        :target,
+        slot,
+        CapturedException(cause, trace),
+    )
+    return zero(L), UInt16(0), true
+end
+
+@inline function (evaluator::_NativeCPUTarget{L})(sample, slot) where {L}
+    try
+        value = convert(L, evaluator.target(sample))
+        reason = _native_target_reason(value)
+        if !iszero(reason)
+            cause = DomainError(value, "target log density may not be NaN or +Inf")
+            return _record_cpu_target_failure!(evaluator, slot, cause, backtrace())
+        end
+        return value, UInt16(0), false
+    catch error
+        return _record_cpu_target_failure!(evaluator, slot, error, catch_backtrace())
+    end
+end
+
 @inline function _native_proposal_reason(value)
     (isnan(value) || value == -Inf) && return _NATIVE_PROPOSAL_INVALID
     return UInt16(0)
 end
 
-@inline function _native_generated_logdensity(
-    base::_GaussianProposal{F,T},
-    transform::IntervalTransform{T,T,T},
-    sample,
-    normals,
-    normal_offset,
-    forward_logabsjac,
-) where {F,T<:_NativeGaussianFloat}
+@inline function _native_inverse_sample!(
+    coordinates,
+    offset,
+    sample::T,
+    ::_NoSampleTransform,
+) where {T<:_NativeGaussianFloat}
+    @inbounds coordinates[offset] = sample
+    return zero(T), UInt16(0)
+end
+
+@inline function _native_copy_coordinates!(coordinates, offset, sample::AbstractVector{T}) where {T}
+    for index in eachindex(sample)
+        @inbounds coordinates[offset + index - 1] = sample[index]
+    end
+    return zero(T), UInt16(0)
+end
+
+@inline _native_inverse_sample!(
+    coordinates,
+    offset,
+    sample::AbstractVector,
+    ::Union{_NoSampleTransform,IdentityTransform},
+) = _native_copy_coordinates!(coordinates, offset, sample)
+
+@inline function _native_inverse_sample!(
+    coordinates,
+    offset,
+    sample::T,
+    transform::_NativeScalarTransform,
+) where {T<:_NativeGaussianFloat}
     coordinate, logabsjac, reason = _native_inverse_with_logjac(transform, sample)
-    iszero(reason) || return base.lognormalizer, reason
-    standardized = (coordinate - base.location) / base.scale.scale
-    base_logdensity = base.lognormalizer -
-                      oftype(base.lognormalizer, 0.5) * abs2(standardized)
-    return base_logdensity - logabsjac, UInt16(0)
+    @inbounds coordinates[offset] = coordinate
+    return logabsjac, reason
+end
+
+@inline function _native_inverse_sample!(
+    coordinates,
+    offset,
+    sample::AbstractVector,
+    transform::SimplexTransform,
+)
+    return _native_simplex_inverse!(coordinates, offset, transform, sample)
+end
+
+@inline function _native_inverse_flat_block!(coordinates, offset, sample, block::_LocatedTransform)
+    return _native_inverse_sample!(
+        coordinates,
+        offset + first(_selector_indices(block.location)) - 1,
+        sample,
+        block.transform,
+    )
+end
+
+@inline _native_inverse_flat_blocks!(coordinates, offset, ::Tuple{}, ::Tuple{}) =
+    (zero(eltype(coordinates)), UInt16(0))
+
+@inline function _native_inverse_flat_blocks!(coordinates, offset, samples, blocks)
+    logabsjac, reason = _native_inverse_flat_block!(
+        coordinates,
+        offset,
+        first(samples),
+        first(blocks),
+    )
+    iszero(reason) || return logabsjac, reason
+    tail_logabsjac, tail_reason = _native_inverse_flat_blocks!(
+        coordinates,
+        offset,
+        Base.tail(samples),
+        Base.tail(blocks),
+    )
+    return logabsjac + tail_logabsjac, tail_reason
+end
+
+@inline function _native_inverse_sample!(
+    coordinates,
+    offset,
+    sample::NamedTuple,
+    layout::_FlatTransformLayout,
+)
+    return _native_inverse_flat_blocks!(
+        coordinates,
+        offset,
+        values(sample),
+        values(layout.blocks),
+    )
 end
 
 @inline function _native_generated_logdensity(
     base,
     transform,
     sample,
-    normals,
-    normal_offset,
-    forward_logabsjac,
+    coordinates,
+    offset,
 )
-    return _gaussian_logdensity_from_normal(base, normals, normal_offset) -
-           forward_logabsjac, UInt16(0)
+    logabsjac, reason = _native_inverse_sample!(coordinates, offset, sample, transform)
+    iszero(reason) || return base.lognormalizer, _NATIVE_PROPOSAL_INVALID
+    return _native_gaussian_logdensity!(base, coordinates, offset) - logabsjac, UInt16(0)
 end
 
 @inline _native_sample_at(samples::AbstractVector, slot) = @inbounds samples[slot]
@@ -606,7 +730,7 @@ end
     slot = @index(Global, Linear)
     dimension = _gaussian_dimension(base.location)
     normal_offset = (slot - 1) * dimension + 1
-    logabsjac, reason, block = _native_generate_sample!(
+    _, reason, block = _native_generate_sample!(
         samples,
         slot,
         base,
@@ -618,10 +742,10 @@ end
         _record_native_failure!(failure_storage, slot, block, reason)
     else
         sample = _native_sample_at(samples, slot)
-        target_log = target(sample)
-        target_reason = _native_target_reason(target_log)
-        if !iszero(target_reason)
-            _record_native_failure!(failure_storage, slot, 0, target_reason)
+        target_log, target_reason, target_failed = target(sample, slot)
+        if target_failed
+            iszero(target_reason) ||
+                _record_native_failure!(failure_storage, slot, 0, target_reason)
         else
             proposal_log, density_reason = _native_generated_logdensity(
                 base,
@@ -629,7 +753,6 @@ end
                 sample,
                 normal_buffer,
                 normal_offset,
-                logabsjac,
             )
             proposal_reason = iszero(density_reason) ?
                               _native_proposal_reason(proposal_log) : density_reason
@@ -645,15 +768,8 @@ end
 _native_workgroupsize(::_SerialCPUExecution, nsamples) = nsamples
 _native_workgroupsize(::_ThreadedCPUExecution, nsamples) = nothing
 
-function _native_transform_failure_reason(reason_bits)
-    reason_bits & _NATIVE_TRANSFORM_NONFINITE_INPUT != 0 && return :nonfinite_input
-    reason_bits & _NATIVE_TRANSFORM_NONFINITE_OUTPUT != 0 && return :nonfinite_output
-    reason_bits & _NATIVE_TRANSFORM_NONFINITE_LOGJAC != 0 && return :nonfinite_logabsjac
-    return :outside_support
-end
-
 _native_failure_location(::_NoSampleTransform, block) = nothing
-_native_failure_location(::_NativeFusedScalarTransform, block) = nothing
+_native_failure_location(::_NativeScalarTransform, block) = nothing
 _native_failure_location(transform::SimplexTransform, block) = 1:(transform.dimension - 1)
 _native_failure_location(layout::_FlatTransformLayout, block) =
     getfield(values(layout.blocks), block).location
@@ -680,6 +796,23 @@ function _throw_native_failure(snapshot, transform)
             CapturedException(cause, backtrace()),
         ),
     )
+end
+
+_throw_first_native_target_failure(::_NoNativeTargetFailures) = nothing
+
+function _throw_first_native_target_failure(failures)
+    for failure in failures
+        isnothing(failure) || throw(failure)
+    end
+    return nothing
+end
+
+function _throw_native_failures(snapshot, target_failures, transform)
+    if !iszero(snapshot.count) && snapshot.reason_bits & _NATIVE_TRANSFORM_REASONS != 0
+        _throw_native_failure(snapshot, transform)
+    end
+    _throw_first_native_target_failure(target_failures)
+    return _throw_native_failure(snapshot, transform)
 end
 
 function _launch_native_fused!(

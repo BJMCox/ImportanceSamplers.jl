@@ -314,11 +314,82 @@ end
     return @inbounds(location[coordinate]) + value
 end
 
-@inline function _gaussian_logdensity_from_normal(proposal::_GaussianProposal, normals, offset)
-    squared_radius = zero(proposal.lognormalizer)
-    for coordinate in 1:_gaussian_dimension(proposal.location)
-        squared_radius += abs2(@inbounds normals[offset + coordinate - 1])
+@inline function _native_gaussian_squared_radius!(
+    location::T,
+    scale::_SphericalGaussianScale{T},
+    coordinates,
+    offset,
+) where {T<:_NativeGaussianFloat}
+    standardized = (@inbounds coordinates[offset] - location) / scale.scale
+    @inbounds coordinates[offset] = standardized
+    return abs2(standardized)
+end
+
+@inline function _native_standardized_coordinate(
+    location::AbstractVector{T},
+    scale::_SphericalGaussianScale{T},
+    coordinates,
+    offset,
+    index,
+) where {T<:_NativeGaussianFloat}
+    return (@inbounds coordinates[offset + index - 1] - location[index]) / scale.scale
+end
+
+@inline function _native_standardized_coordinate(
+    location::AbstractVector{T},
+    scale::_DiagonalGaussianScale,
+    coordinates,
+    offset,
+    index,
+) where {T<:_NativeGaussianFloat}
+    return (@inbounds coordinates[offset + index - 1] - location[index]) /
+           @inbounds(scale.scales[index])
+end
+
+@inline function _native_gaussian_squared_radius!(
+    location::AbstractVector{T},
+    scale::Union{_SphericalGaussianScale,_DiagonalGaussianScale},
+    coordinates,
+    offset,
+) where {T<:_NativeGaussianFloat}
+    squared_radius = zero(T)
+    for index in eachindex(location)
+        standardized = _native_standardized_coordinate(
+            location, scale, coordinates, offset, index
+        )
+        @inbounds coordinates[offset + index - 1] = standardized
+        squared_radius += abs2(standardized)
     end
+    return squared_radius
+end
+
+@inline function _native_gaussian_squared_radius!(
+    location::AbstractVector{T},
+    scale::_FactorGaussianScale,
+    coordinates,
+    offset,
+) where {T<:_NativeGaussianFloat}
+    squared_radius = zero(T)
+    for row in eachindex(location)
+        standardized = @inbounds coordinates[offset + row - 1] - location[row]
+        for column in 1:(row - 1)
+            standardized -= @inbounds(scale.factor[row, column]) *
+                            @inbounds(coordinates[offset + column - 1])
+        end
+        standardized /= @inbounds scale.factor[row, row]
+        @inbounds coordinates[offset + row - 1] = standardized
+        squared_radius += abs2(standardized)
+    end
+    return squared_radius
+end
+
+@inline function _native_gaussian_logdensity!(proposal::_GaussianProposal, coordinates, offset)
+    squared_radius = _native_gaussian_squared_radius!(
+        proposal.location,
+        proposal.scale,
+        coordinates,
+        offset,
+    )
     return proposal.lognormalizer -
            oftype(proposal.lognormalizer, 0.5) * squared_radius
 end
