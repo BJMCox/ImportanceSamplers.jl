@@ -289,6 +289,27 @@ single-owner sampler: do not draw from it elsewhere while relying on replay.
 Repeated results are separate, noncumulative estimators and own separate
 arrays.
 
+Preparation always returns CPU state. Before its first execution, apply an
+explicit MLDataDevices device to transfer the complete prepared sampler:
+
+```julia
+device = MLDataDevices.cpu_device()
+transferred = device(sampler)
+# Equivalent: transferred = sampler |> device
+```
+
+Transfer returns a distinct sampler. Its RNG, explicit context `p`, callable
+target structs, proposal state, and numerical arrays are independent of the
+source. Ordinary functions remain the same callable object; pass device data
+through `p` instead of capturing host arrays in a closure. The source remains
+valid. RNG state is cloned with the RNG's standard `copy` operation. An RNG
+whose copy is unavailable or aliases the source is rejected with
+[`SamplerDeviceError`](@ref). Callable target structs that contain reachable
+opaque closures are also rejected before transfer rather than allowing the
+standard traversal to inspect or reconstruct their captures. Once an execution
+has begun, later transfer throws [`SamplerAlreadyExecutedError`](@ref),
+including after a failed run.
+
 A prepared sampler is mutable and non-reentrant. Do not call
 `importance_sample!` concurrently on the same handle; prepare separate
 samplers with separate RNGs. Re-entry throws [`SamplerBusyError`](@ref). A
@@ -314,19 +335,22 @@ already-drawn samples. Therefore those callables must be pure, deterministic,
 thread-safe, and free of hidden mutable scratch state. Worker tasks never draw
 from the prepared RNG.
 
-## CPU capability and future accelerator work
+## Device capability and future accelerator work
 
-This release supports `MLDataDevices.CPUDevice` only, with `Float32` and
-`Float64` log densities. Supplying another device fails during preparation; the
-package never silently transfers samples back to CPU.
+Preparation has no `device=` keyword and the one-shot form is CPU-only. Applying
+an `MLDataDevices.CPUDevice` to an unexecuted prepared sampler is supported.
+Accelerator requests fail during transfer until backend-owned random buffers
+and execution are implemented. An unavailable backend, `threaded=false`, and
+an opaque closure with captured host state each produce a typed
+[`SamplerDeviceError`](@ref). The package never silently falls back to CPU.
 
 ## Future accelerator work
 
 GPU execution is a future slice requiring native packed proposal kernels,
 device-resident RNG and result storage, scalar-indexing-disabled tests, and
 validation on real hardware. No CUDA, AMDGPU, Metal, or oneAPI support is
-implemented or promised by this CPU release. Return to
-[CPU capability and future accelerator work](@ref) for the current boundary.
+implemented or promised by this CPU execution slice. Return to
+[Device capability and future accelerator work](@ref) for the current boundary.
 
 ## Troubleshooting
 
@@ -345,8 +369,9 @@ target is finite.
 zero at every draw. The raw result remains inspectable, but normalized
 summaries are undefined.
 
-**Unsupported device.** Select the default CPU device. There is no host
-fallback inside an accelerator request; see [Future accelerator work](@ref).
+**Unsupported device.** Apply `cpu_device()` before first execution when an
+independent CPU copy is wanted. Accelerator requests fail during transfer;
+there is no host fallback. See [Future accelerator work](@ref).
 
 **Unstable return types or shapes.** Make every proposal draw return the same
 scalar type, vector length, named-tuple keys, and numeric leaf types. Make every

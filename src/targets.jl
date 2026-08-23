@@ -40,6 +40,143 @@ end
 
 _bind_resolved_target(target::_BoundTarget, sample) = target
 
+_copy_target_callable(::MLDataDevices.AbstractDevice, target::Function) = target
+_copy_target_callable(device::MLDataDevices.AbstractDevice, target) =
+    _copy_to_device(device, target)
+
+function _transfer_prepared_target(
+    device::MLDataDevices.AbstractDevice,
+    target::_ContextFreePreparedTarget,
+)
+    return _ContextFreePreparedTarget(_copy_target_callable(device, target.target))
+end
+
+function _transfer_prepared_target(
+    device::MLDataDevices.AbstractDevice,
+    target::_ContextualPreparedTarget,
+)
+    return _ContextualPreparedTarget(
+        _copy_target_callable(device, target.target),
+        _copy_to_device(device, target.context),
+    )
+end
+
+_transfer_prepared_target(device::MLDataDevices.AbstractDevice, target::_BoundTarget) =
+    _copy_to_device(device, target)
+
+function _target_has_opaque_host_closure(target::_ContextFreePreparedTarget)
+    return _has_opaque_host_closure(target.target)
+end
+
+function _target_has_opaque_host_closure(target::_ContextualPreparedTarget)
+    return _has_opaque_host_closure(target.target)
+end
+
+function _target_has_opaque_host_closure(target::_BoundLogDensityProblemsTarget)
+    return _has_opaque_host_closure(target.target)
+end
+
+function _target_has_opaque_host_closure(target::_BoundDensityInterfaceTarget)
+    return _has_opaque_host_closure(target.target)
+end
+
+function _target_transfer_rewrites_opaque_closure(
+    target::_ContextFreePreparedTarget,
+)
+    return !(target.target isa Function) &&
+           _has_opaque_host_closure(target.target)
+end
+
+function _target_transfer_rewrites_opaque_closure(
+    target::_ContextualPreparedTarget,
+)
+    return !(target.target isa Function) &&
+           _has_opaque_host_closure(target.target)
+end
+
+function _target_transfer_rewrites_opaque_closure(target::_BoundTarget)
+    return _target_has_opaque_host_closure(target)
+end
+
+_has_opaque_host_closure(target) = _has_opaque_host_closure(target, IdSet())
+
+function _has_opaque_host_closure(target::Function, seen)
+    return !isbitstype(typeof(target))
+end
+
+_has_opaque_host_closure(target::Type, seen) = false
+_has_opaque_host_closure(target::Module, seen) = false
+
+_collection_eltype_is_closure_free(::Type{T}) where {T} =
+    T <: Number || isbitstype(T)
+
+function _already_visited!(target, seen)
+    Base.ismutable(target) || return false
+    target in seen && return true
+    push!(seen, target)
+    return false
+end
+
+function _has_opaque_host_closure(target::AbstractArray{T}, seen) where {T}
+    _collection_eltype_is_closure_free(T) && return false
+    _already_visited!(target, seen) && return false
+    for index in eachindex(target)
+        isassigned(target, index) || continue
+        _has_opaque_host_closure(target[index], seen) && return true
+    end
+    return false
+end
+
+function _has_opaque_host_closure(target::AbstractDict{K,V}, seen) where {K,V}
+    scan_keys = !_collection_eltype_is_closure_free(K)
+    scan_values = !_collection_eltype_is_closure_free(V)
+    (scan_keys || scan_values) || return false
+    _already_visited!(target, seen) && return false
+    for (key, value) in target
+        scan_keys && _has_opaque_host_closure(key, seen) && return true
+        scan_values && _has_opaque_host_closure(value, seen) && return true
+    end
+    return false
+end
+
+function _has_opaque_host_closure(target::AbstractSet{T}, seen) where {T}
+    _collection_eltype_is_closure_free(T) && return false
+    _already_visited!(target, seen) && return false
+    for value in target
+        _has_opaque_host_closure(value, seen) && return true
+    end
+    return false
+end
+
+function _has_opaque_host_closure(
+    target::Union{
+        Number,
+        Random.AbstractRNG,
+        AbstractString,
+        Symbol,
+        Nothing,
+        Missing,
+        Val,
+        AbstractRange,
+    },
+    seen,
+)
+    return false
+end
+
+function _has_opaque_host_closure(target::Union{Tuple,NamedTuple}, seen)
+    return any(value -> _has_opaque_host_closure(value, seen), target)
+end
+
+function _has_opaque_host_closure(target, seen)
+    isbits(target) && return false
+    _already_visited!(target, seen) && return false
+    for field in 1:fieldcount(typeof(target))
+        _has_opaque_host_closure(getfield(target, field), seen) && return true
+    end
+    return false
+end
+
 _proposal_dimension(proposal) = nothing
 
 function _prepare_target(target::LogTarget, proposal)

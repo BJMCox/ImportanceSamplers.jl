@@ -85,6 +85,37 @@ contextual_result = importance_sample(
 The context-free and contextual forms have identical estimator semantics. The
 proposal—not the context or the data—defines the sampled shape.
 
+## Prepared device transfer
+
+Preparation always starts on the CPU. Apply an explicit MLDataDevices device
+to the complete prepared sampler before its first execution:
+
+```julia
+using MLDataDevices
+
+prepared = prepare_sampler(
+    Xoshiro(44),
+    contextual_target,
+    context,
+    ImportanceSampling(proposal; nsamples=32);
+    threaded=false,
+)
+transferred = cpu_device()(prepared)
+transferred_result = importance_sample!(transferred)
+
+(transferred !== prepared, length(transferred_result)) # (true, 32)
+```
+
+The pipe form `prepared |> device` is equivalent. Transfer returns a distinct
+prepared sampler with independent RNG and numerical state, leaving the source
+valid. RNGs use their standard `copy` operation; transfer raises a typed error
+when that operation cannot return independent RNG state. Transfer is rejected
+when callable target state contains a reachable opaque closure that the
+standard device traversal would reconstruct. It is also rejected after the
+source's first execution begins. Accelerator devices currently fail during
+transfer because accelerator RNG buffers and execution are not implemented
+yet; no accelerator request falls back to CPU.
+
 ## Choose the next page
 
 - Read [Plain importance sampling](@ref) for the mathematical contract,
@@ -105,8 +136,9 @@ registry.
 Main.PLAIN_IS_CAPABILITY_TABLE
 ```
 
-Only CPU execution is implemented today. See [Future accelerator work](@ref)
-for the deliberately deferred GPU boundary.
+CPU transfer is implemented today. Accelerator transfer has a checked API but
+remains unavailable until the required RNG buffers and execution path exist.
+See [Future accelerator work](@ref) for that boundary.
 
 ## Runnable analytic validation
 
@@ -135,5 +167,7 @@ normalized_weights
 lognormalizer
 AllZeroWeightsError
 SamplerBusyError
+SamplerAlreadyExecutedError
+SamplerDeviceError
 SamplerExecutionError
 ```

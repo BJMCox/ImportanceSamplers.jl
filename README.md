@@ -115,8 +115,8 @@ Results add one final sample axis to each logical leaf.
 
 ## Prepared reuse and threading
 
-Prepare once when the target, proposal, sample count, device, and threading
-policy stay fixed:
+Prepare once when the target, proposal, sample count, and threading policy stay
+fixed:
 
 ```julia
 sampler = prepare_sampler(
@@ -141,8 +141,12 @@ when threading was requested. All proposal draws finish before worker tasks
 start; target and proposal-density callables must therefore be pure,
 deterministic, and thread-safe.
 
-Only CPU execution is implemented. Unsupported device requests fail during
-preparation rather than falling back to the host. GPU work is deliberately
+Preparation starts on CPU and has no `device=` keyword. Before first execution,
+apply `MLDataDevices.cpu_device()` to the complete prepared sampler when an
+independently owned CPU copy is needed; `device(sampler)` and `sampler |> device`
+are equivalent. RNGs that cannot provide an independent standard copy are
+rejected. Accelerator requests fail during transfer rather than falling back
+to the host because accelerator RNG buffers and execution are deliberately
 deferred; see the
 [current and future device boundary](docs/src/methods/importance_sampling.md#future-accelerator-work).
 

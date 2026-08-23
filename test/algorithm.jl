@@ -4,6 +4,7 @@
 
     @test algorithm.proposal === proposal
     @test algorithm.nsamples === 8
+    @test fieldnames(typeof(algorithm)) == (:proposal, :nsamples)
     @test algorithm isa AbstractImportanceSampler
     @test_throws UndefKeywordError ImportanceSampling(proposal)
     @test_throws ArgumentError ImportanceSampling(proposal; nsamples=true)
