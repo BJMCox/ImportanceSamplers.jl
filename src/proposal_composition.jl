@@ -67,11 +67,23 @@ _known_proposal_transform_input(base::_GaussianProposal) = base.location
 
 _validate_known_transform_input(transform, input) = nothing
 function _validate_known_transform_input(
-    transform::Union{PositiveTransform,SoftplusTransform,IntervalTransform},
+    transform::Union{PositiveTransform,SoftplusTransform},
     input,
 )
     input === nothing || input isa _NativeGaussianFloat || input isa Int || throw(
         DimensionMismatch("$(typeof(transform)) requires one unconstrained scalar"),
+    )
+    return nothing
+end
+function _validate_known_transform_input(transform::IntervalTransform{T}, input) where {T}
+    input === nothing || input isa _NativeGaussianFloat || input isa Int || throw(
+        DimensionMismatch("$(typeof(transform)) requires one unconstrained scalar"),
+    )
+    input isa _NativeGaussianFloat && typeof(input) !== T && throw(
+        ArgumentError(
+            "interval endpoint type must match native Gaussian coordinate type: " *
+            "got $T and $(typeof(input))",
+        ),
     )
     return nothing
 end

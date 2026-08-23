@@ -2,7 +2,7 @@ using Test
 using ImportanceSamplers
 import DensityInterface
 import Random
-import Random: rand
+import Random: rand, randn
 
 mutable struct ThreadRecordingRNG{R<:Random.AbstractRNG} <: Random.AbstractRNG
     inner::R
@@ -45,6 +45,31 @@ function DensityInterface.logdensityof(
     proposal.density_draw_counts[sample_index] = proposal.draw_index
     proposal.target_complete_seen[sample_index] = all(proposal.target_complete)
     return -sample
+end
+
+mutable struct NativeThreadRecordingRNG{R<:Random.AbstractRNG} <: Random.AbstractRNG
+    inner::R
+    access_tasks::Vector{Task}
+end
+
+function randn(rng::NativeThreadRecordingRNG, ::Type{Float64})
+    push!(rng.access_tasks, current_task())
+    return randn(rng.inner, Float64)
+end
+
+mutable struct NativeThreadTarget
+    lock::ReentrantLock
+    tasks::Vector{Task}
+end
+
+function (target::NativeThreadTarget)(sample::Float64)::Float64
+    lock(target.lock)
+    try
+        push!(target.tasks, current_task())
+    finally
+        unlock(target.lock)
+    end
+    return -abs2(sample) / 2
 end
 
 @testset "CPU threading ($(Threads.nthreads(:default)) default threads)" begin
@@ -125,5 +150,51 @@ end
     else
         @test all(==(caller_task), threaded_target_tasks)
         @test all(==(caller_task), threaded_proposal.density_tasks)
+    end
+end
+
+@testset "native CPU buffer and execution equivalence" begin
+    nsamples = 2_048
+    initial_state = Random.Xoshiro(0x8108)
+    serial_rng = NativeThreadRecordingRNG(copy(initial_state), Task[])
+    threaded_rng = NativeThreadRecordingRNG(copy(initial_state), Task[])
+    serial_target = NativeThreadTarget(ReentrantLock(), Task[])
+    threaded_target = NativeThreadTarget(ReentrantLock(), Task[])
+    proposal = SphericalGaussian(0.5, 1.25)
+    algorithm = ImportanceSampling(proposal; nsamples=nsamples)
+    caller_task = current_task()
+
+    serial_result = @inferred importance_sample!(
+        prepare_sampler(serial_rng, serial_target, algorithm; threaded=false),
+    )
+    threaded_result = @inferred importance_sample!(
+        prepare_sampler(threaded_rng, threaded_target, algorithm; threaded=true),
+    )
+
+    expected_rng = copy(initial_state)
+    expected_samples = Vector{Float64}(undef, nsamples)
+    for index in eachindex(expected_samples)
+        expected_samples[index] = 0.5 + 1.25 * randn(expected_rng, Float64)
+    end
+
+    @test serial_result.samples == expected_samples
+    @test threaded_result.samples == expected_samples
+    @test serial_result.logweights == threaded_result.logweights
+    expected_next = rand(expected_rng)
+    @test rand(serial_rng.inner) == expected_next
+    @test rand(threaded_rng.inner) == expected_next
+    @test all(==(caller_task), serial_rng.access_tasks)
+    @test all(==(caller_task), threaded_rng.access_tasks)
+    @test all(==(caller_task), serial_target.tasks)
+    @test serial_result.diagnostics.execution === :serial
+    expected_execution = Threads.nthreads(:default) > 1 ? :threaded : :serial
+    @test threaded_result.diagnostics.execution === expected_execution
+
+    if Threads.nthreads(:default) > 1
+        @test all(!=(caller_task), threaded_target.tasks)
+        @test all(task -> Threads.threadpool(task) === :default, threaded_target.tasks)
+        @test length(unique(threaded_target.tasks)) > 1
+    else
+        @test all(==(caller_task), threaded_target.tasks)
     end
 end

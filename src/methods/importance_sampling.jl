@@ -341,6 +341,20 @@ function importance_sample!(sampler::_PreparedImportanceSampler)
 end
 
 function _importance_sample_cpu!(sampler, threaded)
+    execution = _sampling_execution(sampler.algorithm.proposal, threaded)
+    samples, logweights = _importance_sample!(sampler, execution)
+    diagnostics = (
+        method=:importance_sampling,
+        execution=_execution_name(execution),
+        threaded=sampler.threaded,
+        nsamples=sampler.algorithm.nsamples,
+        failures=0,
+        transfers=(count=0, bytes=0),
+    )
+    return _adopt_weighted_samples(samples, logweights; diagnostics=diagnostics)
+end
+
+function _importance_sample_generic_cpu!(sampler, threaded)
     samples = _draw_prepared_batch(sampler)
     target = _bind_prepared_target(sampler.target, samples)
     log_type = _resolve_logweight_type(
@@ -363,15 +377,7 @@ function _importance_sample_cpu!(sampler, threaded)
             samples,
         )
     end
-    diagnostics = (
-        method=:importance_sampling,
-        execution=threaded ? :threaded : :serial,
-        threaded=sampler.threaded,
-        nsamples=sampler.algorithm.nsamples,
-        failures=0,
-        transfers=(count=0, bytes=0),
-    )
-    return _adopt_weighted_samples(samples, logweights; diagnostics=diagnostics)
+    return samples, logweights
 end
 
 function _evaluate_logweights_threaded(
@@ -527,7 +533,10 @@ function _bind_prepared_target(target, samples)
 end
 
 function _resolve_logweight_type(target, proposal, samples)
-    sample_type = typeof(_sample_at(samples, 1))
+    return _resolve_logweight_type(target, proposal, typeof(_sample_at(samples, 1)))
+end
+
+function _resolve_logweight_type(target, proposal, sample_type::Type)
     target_type = _capture_sampler_failure(:target, 1) do
         inferred = Base.promote_op(target, sample_type)
         _canonical_inferred_log_type(inferred, "target")

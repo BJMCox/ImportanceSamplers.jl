@@ -265,7 +265,7 @@ end
     )
 end
 
-@testset "known transform arity is rejected before drawing" begin
+@testset "known transform shape and precision are rejected before drawing" begin
     flat_base = FactorGaussian(zeros(4), Matrix{Float64}(LinearAlgebra.I, 4, 4))
     direct_vector_base = SphericalGaussian(zeros(2), 1.0)
     scalar_transform_builders = map(
@@ -325,6 +325,30 @@ end
             caught
         end
         @test error isa DimensionMismatch
+        @test rand(actual_rng) == rand(expected_rng)
+    end
+
+    mixed_interval_builders = (
+        () -> TransformedProposal(
+            SphericalGaussian(0.0f0, 1.0f0),
+            IntervalTransform(0.0, 1.0),
+        ),
+        () -> TransformedProposal(
+            SphericalGaussian(0.0, 1.0),
+            IntervalTransform(0.0f0, 1.0f0),
+        ),
+    )
+    for build_invalid in mixed_interval_builders
+        actual_rng = Random.Xoshiro(0x7208)
+        expected_rng = copy(actual_rng)
+        error = try
+            rand(actual_rng, build_invalid())
+            nothing
+        catch caught
+            caught
+        end
+        @test error isa ArgumentError
+        @test occursin("interval endpoint type must match", sprint(showerror, error))
         @test rand(actual_rng) == rand(expected_rng)
     end
 end

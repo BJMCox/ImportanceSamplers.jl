@@ -45,6 +45,7 @@ include("proposal_composition.jl")
 include("methods/importance_sampling.jl")
 include("targets.jl")
 include("storage.jl")
+include("execution.jl")
 include("results.jl")
 
 @kernel function _kernel_smoke_kernel!(output)
