@@ -393,10 +393,11 @@ end
     _exercise_failure_record!(record_backend)(failure_record.storage; ndrange=3)
     KernelAbstractions.synchronize(record_backend)
     snapshot = ImportanceSamplers._device_failure_snapshot(failure_record)
-    @test snapshot.count == 3
-    @test snapshot.first_logical_index == 3
-    @test snapshot.first_block == 4
-    @test snapshot.reason_bits == UInt16(1) << 2
+    @test snapshot.failure.count == 3
+    @test snapshot.failure.first_logical_index == 3
+    @test snapshot.failure.first_block == 4
+    @test snapshot.failure.reason_bits == UInt16(1) << 2
+    @test snapshot.transfers == (count=0, bytes=0)
 
     for T in (Float32, Float64)
         proposal = SphericalGaussian(zeros(T, 2), one(T))

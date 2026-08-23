@@ -8,18 +8,14 @@ mutable struct _ResultTransferCounter
     bytes::Int
 end
 
-function _record_scalar_transfer!(counter::_ResultTransferCounter, value)
+function _record_scalar_transfer!(counter::_ResultTransferCounter, ::Type{T}) where {T}
     counter.count += 1
-    counter.bytes += sizeof(value)
-    return value
+    counter.bytes += sizeof(T)
+    return nothing
 end
 
-_record_device_scalar_transfer!(counter, storage, value) =
-    _is_host_storage(storage) ? value : _record_scalar_transfer!(counter, value)
-
-_kernel_result_transfers(logweights) = _is_host_storage(logweights) ?
-                                       (count=0, bytes=0) :
-                                       (count=1, bytes=2sizeof(UInt64))
+_record_device_scalar_transfer!(counter, storage, type::Type) =
+    _is_host_storage(storage) ? nothing : _record_scalar_transfer!(counter, type)
 
 function _result_transfer_counter(diagnostics::NamedTuple)
     if !hasproperty(diagnostics, :transfers)
@@ -209,12 +205,28 @@ function _adopt_weighted_samples(
 end
 
 function (device::MLDataDevices.AbstractDevice)(result::WeightedSamples)
-    samples = _copy_to_device(device, result.samples)
-    logweights = _copy_to_device(device, result.logweights)
-    provenance = _copy_to_device(device, result.provenance)
-    diagnostics = _copy_to_device(device, result.diagnostics)
+    samples = _transfer_result_storage(device, result.samples)
+    logweights = _transfer_result_storage(device, result.logweights)
+    provenance = _transfer_result_storage(device, result.provenance)
+    diagnostics = _transfer_result_storage(device, result.diagnostics)
     return _new_weighted_samples(samples, logweights, provenance, diagnostics)
 end
+
+function _transfer_result_storage(device, storage::AbstractArray)
+    transferred = device(storage)
+    return _storage_device(storage) == device ? copy(transferred) : transferred
+end
+
+function _transfer_result_storage(device, storage::NamedTuple)
+    leaves = map(value -> _transfer_result_storage(device, value), values(storage))
+    return NamedTuple{keys(storage)}(leaves)
+end
+
+_transfer_result_storage(device, storage::Tuple) =
+    map(value -> _transfer_result_storage(device, value), storage)
+_transfer_result_storage(device, counter::_ResultTransferCounter) =
+    _ResultTransferCounter(counter.count, counter.bytes)
+_transfer_result_storage(device, value) = value
 
 function _new_weighted_samples(samples, logweights, provenance, diagnostics)
     R = _result_record_type(samples, logweights, provenance)
@@ -270,7 +282,7 @@ function _validate_logweights(logweights, transfers::_ResultTransferCounter, ::V
         logweights;
         init=false,
     )
-    _record_device_scalar_transfer!(transfers, logweights, has_invalid)
+    _record_device_scalar_transfer!(transfers, logweights, Bool)
     has_invalid && throw(ArgumentError("log weights may not contain NaN or +Inf"))
     return nothing
 end
@@ -289,7 +301,7 @@ function _require_aligned_storage_device(sample_device, logweight_device, proven
     devices = isnothing(provenance_device) ?
               (sample_device, logweight_device) :
               (sample_device, logweight_device, provenance_device)
-    all(device -> typeof(device) === typeof(first(devices)), devices) || throw(
+    all(==(first(devices)), devices) || throw(
         ArgumentError("samples, log weights, and provenance must use the same device"),
     )
     return nothing
@@ -525,9 +537,15 @@ end
 
 function _logweight_sum(result::_AbstractWeightedSamples)
     logweight_sum = LogExpFunctions.logsumexp(result.logweights)
-    return _record_device_scalar_transfer!(
+    accumulator_type = Base.promote_op(
+        LogExpFunctions._logsumexp_onepass_op,
+        eltype(result.logweights),
+        eltype(result.logweights),
+    )
+    _record_device_scalar_transfer!(
         _result_transfers(result),
         result.logweights,
-        logweight_sum,
+        accumulator_type,
     )
+    return logweight_sum
 end

@@ -140,10 +140,15 @@ function _owned_backend_rng(device::MLDataDevices.CUDADevice, seed::UInt64)
     return owned
 end
 
-_importance_sample!(sampler, ::_SerialCPUExecution) =
-    _importance_sample_generic_cpu!(sampler, false)
-_importance_sample!(sampler, ::_ThreadedCPUExecution) =
-    _importance_sample_generic_cpu!(sampler, true)
+function _importance_sample!(sampler, ::_SerialCPUExecution)
+    samples, logweights = _importance_sample_generic_cpu!(sampler, false)
+    return samples, logweights, (count=0, bytes=0)
+end
+
+function _importance_sample!(sampler, ::_ThreadedCPUExecution)
+    samples, logweights = _importance_sample_generic_cpu!(sampler, true)
+    return samples, logweights, (count=0, bytes=0)
+end
 
 function _importance_sample!(sampler, execution::_KernelExecution)
     proposal = sampler.algorithm.proposal
@@ -177,12 +182,9 @@ function _importance_sample!(sampler, execution::_KernelExecution)
         transform,
         execution.cpu_execution,
     )
-    _throw_native_failures(
-        _device_failure_snapshot(failure_record),
-        target_failures,
-        transform,
-    )
-    return samples, logweights
+    snapshot = _device_failure_snapshot(failure_record)
+    _throw_native_failures(snapshot.failure, target_failures, transform)
+    return samples, logweights, snapshot.transfers
 end
 
 function _native_target_evaluator(
@@ -296,21 +298,28 @@ end
 
 function _device_failure_snapshot(record::_DeviceFailureRecord)
     values = Array(record.storage)
+    transfers = _is_host_storage(record.storage) ?
+                (count=0, bytes=0) : (count=1, bytes=sizeof(values))
     count = values[1]
     packed = values[2]
-    iszero(count) && return (
+    failure = iszero(count) ? (
         count=count,
         first_logical_index=0,
         first_block=0,
         reason_bits=UInt16(0),
-    )
-    inverse_index = UInt32(packed >> 32)
-    inverse_block = UInt16((packed >> 16) & 0xffff)
+    ) : let
+        inverse_index = UInt32(packed >> 32)
+        inverse_block = UInt16((packed >> 16) & 0xffff)
+        (
+            count=count,
+            first_logical_index=Int(typemax(UInt32) - inverse_index + one(UInt32)),
+            first_block=Int(typemax(UInt16) - inverse_block + one(UInt16)),
+            reason_bits=UInt16(packed & 0xffff),
+        )
+    end
     return (
-        count=count,
-        first_logical_index=Int(typemax(UInt32) - inverse_index + one(UInt32)),
-        first_block=Int(typemax(UInt16) - inverse_block + one(UInt16)),
-        reason_bits=UInt16(packed & 0xffff),
+        failure=failure,
+        transfers=transfers,
     )
 end
 

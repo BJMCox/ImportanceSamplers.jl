@@ -81,7 +81,7 @@ _storage_device(storage::AbstractArray) = MLDataDevices.get_device(storage)
 
 function _combine_storage_devices(devices::Tuple)
     device = first(devices)
-    all(other -> typeof(other) === typeof(device), devices) || throw(
+    all(==(device), devices) || throw(
         ArgumentError("numeric storage leaves must use the same device"),
     )
     return device

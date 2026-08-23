@@ -370,16 +370,14 @@ end
 
 function _importance_sample_cpu!(sampler, threaded)
     execution = _sampling_execution(sampler.algorithm.proposal, threaded)
-    samples, logweights = _importance_sample!(sampler, execution)
+    samples, logweights, transfers = _importance_sample!(sampler, execution)
     diagnostics = (
         method=:importance_sampling,
         execution=_execution_name(execution),
         threaded=sampler.threaded,
         nsamples=sampler.algorithm.nsamples,
         failures=0,
-        transfers=execution isa _KernelExecution ?
-                  _kernel_result_transfers(logweights) :
-                  (count=0, bytes=0),
+        transfers=transfers,
     )
     if execution isa _KernelExecution
         return _adopt_validated_weighted_samples(
