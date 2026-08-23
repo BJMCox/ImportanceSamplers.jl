@@ -28,7 +28,9 @@ export AbstractImportanceSampler,
     SimplexTransform,
     SphericalGaussian,
     PositiveTransform,
+    ProductProposal,
     SoftplusTransform,
+    TransformedProposal,
     WeightedSamples,
     WeightedSampleView,
     importance_sample,
@@ -39,6 +41,7 @@ export AbstractImportanceSampler,
 
 include("proposals.jl")
 include("transforms.jl")
+include("proposal_composition.jl")
 include("methods/importance_sampling.jl")
 include("targets.jl")
 include("storage.jl")

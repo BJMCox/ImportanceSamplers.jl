@@ -156,8 +156,22 @@ deterministic tolerance.
 
 ```@docs
 AbstractImportanceSampler
+AbstractProposalFamily
+AbstractRadialProposalFamily
+AbstractSampleTransform
+DiagonalGaussian
+FactorGaussian
+IdentityTransform
 ImportanceSampling
+IntervalTransform
+InvalidTransformError
 LogTarget
+PositiveTransform
+ProductProposal
+SimplexTransform
+SoftplusTransform
+SphericalGaussian
+TransformedProposal
 prepare_sampler
 importance_sample
 importance_sample!

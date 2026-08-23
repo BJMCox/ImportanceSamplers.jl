@@ -4,11 +4,17 @@ using ImportanceSamplers
 using Markdown
 using Random
 
+const MLDataDevices = ImportanceSamplers.MLDataDevices
+
 struct CapabilityGaussian end
 
 Random.rand(rng::Random.AbstractRNG, ::CapabilityGaussian) = randn(rng)
 DensityInterface.logdensityof(::CapabilityGaussian, x::Real) =
     -0.5 * abs2(x) - 0.5 * log(2pi)
+
+struct CapabilityAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
+MLDataDevices.functional(::CapabilityAccelerator) = true
+capability_product_target(sample)::Float64 = 0.0
 
 function checked_plain_is_capability_table()
     proposal = CapabilityGaussian()
@@ -54,12 +60,34 @@ function checked_plain_is_capability_table()
                       "threaded execution verified" :
                       "one-thread serial fallback verified"
 
+    product = ProductProposal((left=CapabilityGaussian(), right=CapabilityGaussian()))
+    product_sampler = prepare_sampler(
+        Xoshiro(0x3),
+        capability_product_target,
+        ImportanceSampling(product; nsamples=1);
+        threaded=true,
+    )
+    product_error = try
+        CapabilityAccelerator()(product_sampler)
+        nothing
+    catch error
+        error
+    end
+    product_error isa SamplerDeviceError || error(
+        "ProductProposal accelerator capability check did not return SamplerDeviceError",
+    )
+    product_error.reason === :product_proposal_cpu_only || error(
+        "ProductProposal accelerator capability check returned the wrong reason",
+    )
+
     return Markdown.parse(
         "| Method | Target forms | Device | Execution policies | Status |\n" *
         "|:--|:--|:--|:--|:--|\n" *
         "| Plain importance sampling | `logtarget(x)` and `logtarget(x, p)` " *
         "| CPU | `threaded=false` serial; `threaded=true` accepted " *
-        "($threaded_detail) | **supported** |",
+        "($threaded_detail) | **supported** |\n" *
+        "| `ProductProposal` | named independent blocks | CPU only | " *
+        "coordinator draws in block order | **supported on CPU; typed accelerator rejection verified** |",
     )
 end
 

@@ -55,6 +55,7 @@ DensityInterface.logdensityof(target::NestedClosureDensityTarget, sample) =
     target.logdensity(sample)
 
 top_level_transfer_target(sample, p) = p.shift[1] - abs2(sample) / 2
+product_transfer_target(sample) = 0.0
 
 function prepared_parts(prepared)
     target = getfield(prepared, :target)
@@ -287,6 +288,25 @@ end
     )
     @test rng_limit_error isa SamplerDeviceError
     @test rng_limit_error.reason === :accelerator_rng_unavailable
+
+    product = ProductProposal((
+        left=SphericalGaussian(0.0, 1.0),
+        right=SphericalGaussian(0.0, 1.0),
+    ))
+    product_sampler = prepare_sampler(
+        Random.Xoshiro(2210),
+        product_transfer_target,
+        ImportanceSampling(product; nsamples=1);
+        threaded=true,
+    )
+    product_error = caught_device_error(
+        () -> FunctionalAccelerator()(product_sampler),
+    )
+    @test product_error isa SamplerDeviceError
+    @test product_error.reason === :product_proposal_cpu_only
+    @test sprint(showerror, product_error) ==
+          "prepared-sampler device transfer failed for FunctionalAccelerator: " *
+          "ProductProposal is CPU-only"
 
     unsupported_error = caught_device_error(
         () -> UnsupportedTestDevice()(make_transfer_sampler(2208)),

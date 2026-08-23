@@ -14,6 +14,7 @@ test_files = if isempty(ARGS)
         "kernel_execution",
         "native_proposals",
         "transforms",
+        "product_proposal",
     ]
 else
     ARGS

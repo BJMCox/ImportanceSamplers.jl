@@ -6,10 +6,25 @@ sample value.
 """
 abstract type AbstractSampleTransform end
 
+"""
+    IdentityTransform()
+
+Leave an unconstrained scalar or vector unchanged with zero log Jacobian.
+"""
 struct IdentityTransform <: AbstractSampleTransform end
 
+"""
+    PositiveTransform()
+
+Map an unconstrained scalar `z` to `exp(z)` on the positive real line.
+"""
 struct PositiveTransform <: AbstractSampleTransform end
 
+"""
+    SoftplusTransform()
+
+Map an unconstrained scalar smoothly to the positive real line with `softplus`.
+"""
 struct SoftplusTransform <: AbstractSampleTransform end
 
 struct IntervalTransform{T,L,U} <: AbstractSampleTransform
@@ -389,3 +404,16 @@ function _inverse_with_logjac(
     isfinite(logabsjac) || _throw_invalid_transform(:nonfinite_logabsjac)
     return z, logabsjac
 end
+
+function _transform_with_logjac(
+    ::IdentityTransform,
+    z::AbstractVector{T},
+) where {T<:_TransformFloat}
+    for coordinate in z
+        isfinite(coordinate) || _throw_invalid_transform(:nonfinite_input)
+    end
+    return z, zero(T)
+end
+
+_inverse_with_logjac(transform::IdentityTransform, x::AbstractVector{<:_TransformFloat}) =
+    _transform_with_logjac(transform, x)

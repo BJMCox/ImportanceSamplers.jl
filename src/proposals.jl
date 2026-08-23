@@ -14,6 +14,48 @@ abstract type AbstractRadialProposalFamily <: AbstractProposalFamily end
 
 struct GaussianFamily <: AbstractRadialProposalFamily end
 
+"""
+    ProductProposal(blocks::NamedTuple)
+
+Construct a CPU proposal for the product of independent named proposal blocks.
+Blocks are drawn in field order with the supplied RNG, and their normalized log
+densities are summed.
+"""
+struct ProductProposal{B<:NamedTuple}
+    blocks::B
+
+    function ProductProposal(blocks::B) where {B<:NamedTuple}
+        isempty(blocks) && throw(ArgumentError("product proposal must contain at least one block"))
+        all(isconcretetype, fieldtypes(B)) || throw(
+            ArgumentError("product proposal blocks must have concrete field types"),
+        )
+        return new{B}(blocks)
+    end
+end
+
+_accelerator_proposal_limit(proposal) = nothing
+_accelerator_proposal_limit(::ProductProposal) = :product_proposal_cpu_only
+
+struct _PreparedProposalToken end
+
+"""
+    TransformedProposal(base, transform)
+
+Construct a proposal that maps draws from `base` into logical values through
+`transform`. Its density uses the exact normalized change of variables
+`log q_x(x) = log q_z(z) - log|J(z)|`.
+"""
+struct TransformedProposal{B,T}
+    base::B
+    transform::T
+
+    function TransformedProposal(base::B, transform::T, ::_PreparedProposalToken) where {B,T}
+        return new{B,T}(base, transform)
+    end
+end
+
+TransformedProposal(base, transform) = _prepare_transformed_proposal(base, transform)
+
 struct _SphericalGaussianScale{T}
     scale::T
 end
@@ -339,3 +381,26 @@ function DensityInterface.logdensityof(
 end
 
 _proposal_dimension(proposal::_GaussianProposal) = _gaussian_dimension(proposal.location)
+
+_draw_product_values(rng::Random.AbstractRNG, ::Tuple{}) = ()
+
+function _draw_product_values(rng::Random.AbstractRNG, blocks::Tuple)
+    return (Random.rand(rng, first(blocks)), _draw_product_values(rng, Base.tail(blocks))...)
+end
+
+function Random.rand(rng::Random.AbstractRNG, proposal::ProductProposal)
+    block_values = _draw_product_values(rng, values(proposal.blocks))
+    return NamedTuple{keys(proposal.blocks)}(block_values)
+end
+
+function DensityInterface.logdensityof(
+    proposal::ProductProposal{B},
+    sample::NamedTuple{Names},
+) where {Names,B<:NamedTuple{Names}}
+    block_logs = map(DensityInterface.logdensityof, proposal.blocks, sample)
+    return sum(values(block_logs))
+end
+
+function DensityInterface.logdensityof(proposal::ProductProposal, sample::NamedTuple)
+    throw(ArgumentError("product proposal sample fields must match proposal blocks"))
+end

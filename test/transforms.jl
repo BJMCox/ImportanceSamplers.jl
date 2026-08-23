@@ -7,6 +7,69 @@ function _transform_forward_derivative(transform, z::T) where {T}
     return (upper - lower) / (T(2) * step)
 end
 
+const _transformed_proposal_api_ready =
+    isdefined(ImportanceSamplers, :TransformedProposal) &&
+    :TransformedProposal in names(ImportanceSamplers)
+
+@testset "normalized transformed proposal density API" begin
+    @test _transformed_proposal_api_ready
+end
+
+if _transformed_proposal_api_ready
+
+struct FixedTransformBase{T}
+    coordinate::T
+    logdensity::T
+end
+
+Random.rand(::Random.AbstractRNG, proposal::FixedTransformBase) = proposal.coordinate
+DensityInterface.logdensityof(proposal::FixedTransformBase, sample) = proposal.logdensity
+
+@testset "normalized transformed proposal densities" begin
+    for T in (Float32, Float64)
+        scalar_base = SphericalGaussian(zero(T), one(T))
+        positive = @inferred TransformedProposal(scalar_base, PositiveTransform())
+        at_one = @inferred DensityInterface.logdensityof(positive, one(T))
+        @test at_one isa T
+        @test at_one == -T(0.5) * log(T(2) * T(pi))
+
+        simplex_base = SphericalGaussian(zeros(T, 2), one(T))
+        simplex = @inferred TransformedProposal(simplex_base, SimplexTransform(3))
+        uniform = fill(inv(T(3)), 3)
+        at_uniform = @inferred DensityInterface.logdensityof(simplex, uniform)
+        expected = -log(T(2) * T(pi)) + T(2.5) * log(T(3))
+        @test at_uniform isa T
+        @test at_uniform ≈ expected rtol = T(16) * eps(T) atol = T(16) * eps(T)
+    end
+end
+
+@testset "transformed proposal support and generated failures" begin
+    positive = TransformedProposal(
+        FixedTransformBase(floatmax(Float64), 0.0),
+        PositiveTransform(),
+    )
+    generated_error = try
+        rand(Random.Xoshiro(0x7101), positive)
+        nothing
+    catch error
+        error
+    end
+    @test generated_error isa InvalidTransformError
+    @test generated_error.reason === :nonfinite_output
+    @test DensityInterface.logdensityof(positive, 0.0) === -Inf
+    @test DensityInterface.logdensityof(positive, -1.0) === -Inf
+    @test DensityInterface.logdensityof(positive, NaN) === -Inf
+
+    simplex = TransformedProposal(
+        SphericalGaussian(zeros(2), 1.0),
+        SimplexTransform(3),
+    )
+    @test DensityInterface.logdensityof(simplex, [0.0, 0.5, 0.5]) === -Inf
+    @test DensityInterface.logdensityof(simplex, [0.2, 0.3, 0.6]) === -Inf
+end
+
+end
+
 function _transform_error_reason(f)
     error = try
         f()

@@ -590,3 +590,25 @@ end
     )
     @test inferred_one_shot.logweights == zeros(4)
 end
+
+@testset "normalized positive transformed proposal through plain IS" begin
+    proposal = @inferred TransformedProposal(
+        SphericalGaussian(0.0, 1.0),
+        PositiveTransform(),
+    )
+    lognormal_target(x)::Float64 =
+        -0.5 * abs2(log(x)) - log(x) - 0.5 * log(2pi)
+    sampler = @inferred prepare_sampler(
+        Random.Xoshiro(0x7102),
+        lognormal_target,
+        ImportanceSampling(proposal; nsamples=64);
+        threaded=false,
+    )
+    result = @inferred importance_sample!(sampler)
+    @test maximum(abs, result.logweights) <= 4eps()
+    @test abs(lognormalizer(result)) <= 4eps()
+
+    logical_value = 1.25
+    DensityInterface.logdensityof(proposal, logical_value)
+    @test (@allocated DensityInterface.logdensityof(proposal, logical_value)) == 0
+end

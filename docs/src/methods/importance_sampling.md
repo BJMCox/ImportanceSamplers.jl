@@ -152,6 +152,76 @@ concentration before trusting posterior summaries. More samples do not repair
 a proposal that almost never reaches the posterior; use a proposal adapted to
 the posterior geometry when collapse is material.
 
+## Transformed and product proposals
+
+[`TransformedProposal`](@ref) maps normalized base-proposal draws into logical
+values and evaluates the exact change-of-variables density
+
+```math
+\log q_x(x) = \log q_z(z) - \log |J(z)|.
+```
+
+A partial named layout requires a [`ProductProposal`](@ref) base. Omitted
+known fields receive [`IdentityTransform`](@ref); unknown fields are rejected
+when the proposal is constructed. A flat base uses named selector pairs.
+Selectors are validated once as scalar indices or contiguous ranges that are
+in bounds, disjoint, and collectively complete. Both layouts return the same
+target-facing named-tuple shape:
+
+```jldoctest transformed_proposals
+using DensityInterface
+using ImportanceSamplers
+using Random
+
+named = TransformedProposal(
+    ProductProposal((
+        weights=SphericalGaussian(zeros(2), 1.0),
+        rate=SphericalGaussian(0.0, 1.0),
+        offset=SphericalGaussian(0.0, 1.0),
+    )),
+    (weights=SimplexTransform(3), rate=PositiveTransform()),
+)
+
+factor = [
+    1.0 0.0 0.0 0.0
+    0.3 1.2 0.0 0.0
+    -0.2 0.4 0.8 0.0
+    0.1 -0.3 0.25 1.5
+]
+flat = TransformedProposal(
+    FactorGaussian(zeros(4), factor),
+    (
+        weights=(1:2 => SimplexTransform(3)),
+        rate=(3 => PositiveTransform()),
+        offset=(4 => IdentityTransform()),
+    ),
+)
+
+x = (weights=fill(1 / 3, 3), rate=1.0, offset=0.0)
+named_reference = -2log(2pi) + 2.5log(3)
+flat_reference = named_reference - sum(log, (1.0, 1.2, 0.8, 1.5))
+
+(
+    keys(rand(Xoshiro(7), named)),
+    keys(rand(Xoshiro(8), flat)),
+    DensityInterface.logdensityof(named, x) ≈ named_reference,
+    DensityInterface.logdensityof(flat, x) ≈ flat_reference,
+)
+
+# output
+
+((:weights, :rate, :offset), (:weights, :rate, :offset), true, true)
+```
+
+The simplex Jacobian in this example is measured against
+`dx₁ dx₂`, with `x₃ = 1 - x₁ - x₂`, and retains the full
+`sqrt(3)` factor. External logical values outside transform support have
+proposal log density `-Inf`. A transform failure while producing a base draw
+instead raises [`InvalidTransformError`](@ref), preserving its block location.
+Product blocks use the sampler-owned coordinator RNG sequentially in field
+order. Product proposals are CPU-only in this slice and accelerator transfer
+raises a typed [`SamplerDeviceError`](@ref); mixtures are not implied.
+
 ## Target contract
 
 A context-free target has one argument:
@@ -203,7 +273,7 @@ repair the estimator.
 Target and proposal densities must also use the same reference measure. For
 example, do not subtract a density with respect to Lebesgue measure from a
 density with respect to a transformed coordinate measure unless the required
-Jacobian is already included. This first slice has no transform API.
+Jacobian is already included.
 
 At every generated sample, proposal log density may be finite or `+Inf`, but
 not `NaN` or `-Inf`. A generating proposal assigning itself zero density is an

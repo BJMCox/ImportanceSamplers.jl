@@ -75,6 +75,8 @@ function Base.showerror(io::IO, error::SamplerDeviceError)
         "the requested device backend is unavailable or nonfunctional"
     elseif error.reason === :accelerator_rng_unavailable
         "accelerator random-buffer support is not available"
+    elseif error.reason === :product_proposal_cpu_only
+        "ProductProposal is CPU-only"
     elseif error.reason === :rng_not_cloneable
         "the prepared RNG does not provide an independent copy"
     else
@@ -246,6 +248,8 @@ function _transfer_prepared_sampler(
     _target_has_opaque_host_closure(sampler.target) && throw(
         SamplerDeviceError(device, :opaque_host_closure),
     )
+    proposal_limit = _accelerator_proposal_limit(sampler.algorithm.proposal)
+    isnothing(proposal_limit) || throw(SamplerDeviceError(device, proposal_limit))
     MLDataDevices.functional(device) || throw(
         SamplerDeviceError(device, :backend_unavailable),
     )
