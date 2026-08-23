@@ -249,14 +249,13 @@ end
     @test length(identity_result) == 8
     @test identity_result.logweights == zeros(Float64, 8)
     @test identity_result.logweights isa Vector{Float64}
-    @test identity_result.diagnostics == (
-        method=:importance_sampling,
-        execution=:serial,
-        threaded=false,
-        nsamples=8,
-        failures=0,
-        transfers=(count=0, bytes=0),
-    )
+    @test identity_result.diagnostics.method === :importance_sampling
+    @test identity_result.diagnostics.execution === :serial
+    @test identity_result.diagnostics.threaded === false
+    @test identity_result.diagnostics.nsamples == 8
+    @test identity_result.diagnostics.failures == 0
+    @test identity_result.diagnostics.transfers.count == 0
+    @test identity_result.diagnostics.transfers.bytes == 0
 
     @testset "preparation resolves known targets once" begin
         mismatched_proposal = TestVectorProposal(zeros(2))

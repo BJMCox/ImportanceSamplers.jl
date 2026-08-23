@@ -77,6 +77,19 @@ function _throw_structure_mismatch(sample_index)
     throw(ArgumentError("sample $sample_index has inconsistent structure"))
 end
 
+_storage_device(storage::AbstractArray) = MLDataDevices.get_device(storage)
+
+function _combine_storage_devices(devices::Tuple)
+    device = first(devices)
+    all(other -> typeof(other) === typeof(device), devices) || throw(
+        ArgumentError("numeric storage leaves must use the same device"),
+    )
+    return device
+end
+
+_is_host_storage(storage::AbstractArray) =
+    _storage_device(storage) isa MLDataDevices.AbstractCPUDevice
+
 _sample_count(batch::AbstractVector) = length(batch)
 _sample_count(batch::AbstractMatrix) = size(batch, 2)
 

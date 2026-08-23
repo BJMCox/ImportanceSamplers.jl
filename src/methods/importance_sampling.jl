@@ -377,8 +377,17 @@ function _importance_sample_cpu!(sampler, threaded)
         threaded=sampler.threaded,
         nsamples=sampler.algorithm.nsamples,
         failures=0,
-        transfers=(count=0, bytes=0),
+        transfers=execution isa _KernelExecution ?
+                  _kernel_result_transfers(logweights) :
+                  (count=0, bytes=0),
     )
+    if execution isa _KernelExecution
+        return _adopt_validated_weighted_samples(
+            samples,
+            logweights;
+            diagnostics=diagnostics,
+        )
+    end
     return _adopt_weighted_samples(samples, logweights; diagnostics=diagnostics)
 end
 

@@ -10,6 +10,7 @@ test_files = if isempty(ARGS)
         "plain_is",
         "threading",
         "results",
+        "device_results",
         "failures",
         "kernel_execution",
         "native_proposals",

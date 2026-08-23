@@ -158,6 +158,7 @@ end
         view([1.0], 1:1),
         view([Inf], 1:1),
         NamedTuple(),
+        ImportanceSamplers._ResultTransferCounter(0, 0),
         forged_token,
     )
 end
