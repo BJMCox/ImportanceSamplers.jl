@@ -81,7 +81,10 @@ function _owned_backend_rng(device::MLDataDevices.CUDADevice, seed::UInt64)
         throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
     end
     R = typeof(shared)
-    isconcretetype(R) && all(isbitstype, fieldtypes(R)) || throw(
+    isconcretetype(R) &&
+        ismutabletype(R) &&
+        fieldnames(R) == (:seed, :counter) &&
+        fieldtypes(R) == (UInt64, UInt64) || throw(
         SamplerDeviceError(device, :accelerator_rng_unavailable),
     )
     owned = try

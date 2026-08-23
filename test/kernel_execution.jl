@@ -91,6 +91,38 @@ const SHARED_BACKEND_TEST_RNG = Random.Xoshiro(0)
 MLDataDevices.default_device_rng(::SharedRNGAccelerator) =
     SHARED_BACKEND_TEST_RNG
 
+mutable struct PointerBackedTestRNG <: Random.AbstractRNG
+    state::Ptr{Nothing}
+end
+
+PointerBackedTestRNG(seed::UInt64) =
+    PointerBackedTestRNG(Ptr{Nothing}(seed | one(UInt64)))
+
+struct NestedPointerTestState
+    state::Ptr{Nothing}
+end
+
+mutable struct NestedPointerBackedTestRNG <: Random.AbstractRNG
+    state::NestedPointerTestState
+end
+
+NestedPointerBackedTestRNG(seed::UInt64) =
+    NestedPointerBackedTestRNG(
+        NestedPointerTestState(Ptr{Nothing}(seed | one(UInt64))),
+    )
+
+mutable struct ValueBackedTestRNG <: Random.AbstractRNG
+    seed::UInt64
+    counter::UInt64
+end
+
+ValueBackedTestRNG(seed::UInt64) = ValueBackedTestRNG(seed, zero(UInt64))
+
+const CUDA_RNG_TEST_WITNESS =
+    Ref{Random.AbstractRNG}(PointerBackedTestRNG(UInt64(1)))
+MLDataDevices.default_device_rng(::MLDataDevices.CUDADevice) =
+    CUDA_RNG_TEST_WITNESS[]
+
 function _caught_kernel_execution_error(f)
     try
         f()
@@ -282,6 +314,33 @@ end
     end
     @test shared_error isa SamplerDeviceError
     @test shared_error.reason === :accelerator_rng_unavailable
+end
+
+@testset "CUDA ownership rejects pointer-backed RNG state" begin
+    CUDA_RNG_TEST_WITNESS[] = ValueBackedTestRNG(UInt64(1))
+    owned = ImportanceSamplers._owned_backend_rng(
+        MLDataDevices.CUDADevice(),
+        UInt64(0x9191),
+    )
+    @test owned isa ValueBackedTestRNG
+    @test (owned.seed, owned.counter) == (UInt64(0x9191), zero(UInt64))
+
+    for witness in (
+        PointerBackedTestRNG(UInt64(1)),
+        NestedPointerBackedTestRNG(UInt64(1)),
+    )
+        CUDA_RNG_TEST_WITNESS[] = witness
+        error = _caught_kernel_execution_error() do
+            ImportanceSamplers._owned_backend_rng(
+                MLDataDevices.CUDADevice(),
+                UInt64(0x9191),
+            )
+        end
+        @test error isa SamplerDeviceError
+        if error isa SamplerDeviceError
+            @test error.reason === :accelerator_rng_unavailable
+        end
+    end
 end
 
 @testset "native transformed density follows public inverse semantics" begin
