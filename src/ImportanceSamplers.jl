@@ -3,19 +3,25 @@ module ImportanceSamplers
 import DensityInterface
 import KernelAbstractions
 import KernelAbstractions: @index, @kernel
+import LinearAlgebra
 import LogDensityProblems
 import LogExpFunctions
 import MLDataDevices
 import Random
 
 export AbstractImportanceSampler,
+    AbstractProposalFamily,
+    AbstractRadialProposalFamily,
     AllZeroWeightsError,
+    DiagonalGaussian,
+    FactorGaussian,
     ImportanceSampling,
     LogTarget,
     SamplerAlreadyExecutedError,
     SamplerBusyError,
     SamplerDeviceError,
     SamplerExecutionError,
+    SphericalGaussian,
     WeightedSamples,
     WeightedSampleView,
     importance_sample,
@@ -24,6 +30,7 @@ export AbstractImportanceSampler,
     normalized_weights,
     prepare_sampler
 
+include("proposals.jl")
 include("methods/importance_sampling.jl")
 include("targets.jl")
 include("storage.jl")
