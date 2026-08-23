@@ -266,14 +266,81 @@ function _draw_gaussian(
     return location + scale.scale * Random.randn(rng, T)
 end
 
-function _draw_gaussian(
-    rng::Random.AbstractRNG,
-    location::Vector{T},
+@inline function _gaussian_coordinate(
+    location::T,
     scale::_SphericalGaussianScale{T},
+    normals,
+    offset,
+    coordinate,
 ) where {T<:_NativeGaussianFloat}
-    sample = Random.randn(rng, T, length(location))
-    for index in eachindex(sample, location)
-        sample[index] = location[index] + scale.scale * sample[index]
+    return location + scale.scale * @inbounds(normals[offset])
+end
+
+@inline function _gaussian_coordinate(
+    location::AbstractVector{T},
+    scale::_SphericalGaussianScale{T},
+    normals,
+    offset,
+    coordinate,
+) where {T<:_NativeGaussianFloat}
+    return @inbounds(location[coordinate]) +
+           scale.scale * @inbounds(normals[offset + coordinate - 1])
+end
+
+@inline function _gaussian_coordinate(
+    location::AbstractVector{T},
+    scale::_DiagonalGaussianScale,
+    normals,
+    offset,
+    coordinate,
+) where {T<:_NativeGaussianFloat}
+    return @inbounds(location[coordinate]) +
+           @inbounds(scale.scales[coordinate]) *
+           @inbounds(normals[offset + coordinate - 1])
+end
+
+@inline function _gaussian_coordinate(
+    location::AbstractVector{T},
+    scale::_FactorGaussianScale,
+    normals,
+    offset,
+    coordinate,
+) where {T<:_NativeGaussianFloat}
+    value = zero(T)
+    for source_coordinate in 1:coordinate
+        value += @inbounds(scale.factor[coordinate, source_coordinate]) *
+                 @inbounds(normals[offset + source_coordinate - 1])
+    end
+    return @inbounds(location[coordinate]) + value
+end
+
+@inline function _gaussian_logdensity_from_normal(proposal::_GaussianProposal, normals, offset)
+    squared_radius = zero(proposal.lognormalizer)
+    for coordinate in 1:_gaussian_dimension(proposal.location)
+        squared_radius += abs2(@inbounds normals[offset + coordinate - 1])
+    end
+    return proposal.lognormalizer -
+           oftype(proposal.lognormalizer, 0.5) * squared_radius
+end
+
+function _gaussian_from_normal(
+    location::AbstractVector{T},
+    scale,
+    normals::AbstractVector{T},
+) where {T<:_NativeGaussianFloat}
+    dimension = _gaussian_dimension(location)
+    length(normals) == dimension || throw(
+        DimensionMismatch("normal coordinates must match the Gaussian dimension"),
+    )
+    sample = similar(normals, dimension)
+    for coordinate in 1:dimension
+        sample[coordinate] = _gaussian_coordinate(
+            location,
+            scale,
+            normals,
+            firstindex(normals),
+            coordinate,
+        )
     end
     return sample
 end
@@ -281,26 +348,14 @@ end
 function _draw_gaussian(
     rng::Random.AbstractRNG,
     location::Vector{T},
-    scale::_DiagonalGaussianScale{Vector{T}},
+    scale::Union{
+        _SphericalGaussianScale{T},
+        _DiagonalGaussianScale{Vector{T}},
+        _FactorGaussianScale{Matrix{T}},
+    },
 ) where {T<:_NativeGaussianFloat}
-    sample = Random.randn(rng, T, length(location))
-    for index in eachindex(sample, location, scale.scales)
-        sample[index] = location[index] + scale.scales[index] * sample[index]
-    end
-    return sample
-end
-
-function _draw_gaussian(
-    rng::Random.AbstractRNG,
-    location::Vector{T},
-    scale::_FactorGaussianScale{Matrix{T}},
-) where {T<:_NativeGaussianFloat}
-    sample = Random.randn(rng, T, length(location))
-    LinearAlgebra.lmul!(LinearAlgebra.LowerTriangular(scale.factor), sample)
-    for index in eachindex(sample, location)
-        sample[index] += location[index]
-    end
-    return sample
+    normals = Random.randn(rng, T, length(location))
+    return _gaussian_from_normal(location, scale, normals)
 end
 
 function Random.rand(rng::Random.AbstractRNG, proposal::_GaussianProposal)

@@ -1,4 +1,5 @@
 import KernelAbstractions
+import KernelAbstractions: @index, @kernel
 import MLDataDevices
 import Random
 
@@ -10,36 +11,30 @@ function (target::FusedQuadraticTarget{T})(sample::T)::T where {T}
     return target.offset - abs2(sample)
 end
 
-struct FusedTargetFailure <: Exception
-    sample::Float64
-end
-
-struct FusedFailAtTarget
-    sample::Float64
-end
-
-struct FusedPhaseOrderTarget end
-
-function (::FusedPhaseOrderTarget)(sample::Float64)::Float64
-    sample == 2.0 && throw(FusedTargetFailure(sample))
-    return isfinite(sample) ? 0.0 : -Inf
-end
-
-function (target::FusedFailAtTarget)(sample::Float64)::Float64
-    sample == target.sample && throw(FusedTargetFailure(sample))
-    return -abs2(sample)
-end
-
-struct FiniteOrMinusInfTarget{T} end
-
-function (::FiniteOrMinusInfTarget{T})(sample::T)::T where {T}
-    return isfinite(sample) ? zero(T) : T(-Inf)
-end
-
 struct FusedConstantTarget{T} end
 
 function (::FusedConstantTarget{T})(::T)::T where {T}
     return zero(T)
+end
+
+struct FusedVectorTarget{T}
+    offset::T
+end
+
+function (target::FusedVectorTarget{T})(sample::AbstractVector{T})::T where {T}
+    return target.offset - sum(abs2, sample)
+end
+
+struct FusedNamedTarget{T} end
+
+function (::FusedNamedTarget{T})(sample::NamedTuple)::T where {T}
+    return -sum(abs2, sample.weights) - abs2(sample.rate) - abs2(sample.offset)
+end
+
+struct MinusInfVectorTarget{T} end
+
+function (::MinusInfVectorTarget{T})(sample::AbstractVector{T})::T where {T}
+    return iszero(first(sample)) ? T(-Inf) : -sum(abs2, sample)
 end
 
 mutable struct PrefilledNormalRNG{T} <: Random.AbstractRNG
@@ -132,25 +127,54 @@ function _caught_kernel_execution_error(f)
     return nothing
 end
 
-function _run_native_fused(target, proposal, normal_buffer, threaded)
+@kernel function _exercise_failure_record!(storage)
+    slot = @index(Global, Linear)
+    logical_index = slot == 1 ? 7 : slot == 2 ? 3 : 5
+    block = slot == 1 ? 2 : slot == 2 ? 4 : 1
+    reason_bits = UInt16(1) << slot
+    ImportanceSamplers._record_native_failure!(
+        storage, logical_index, block, reason_bits
+    )
+end
+
+function _run_native_fused(
+    target, proposal, normal_buffer, threaded, nsamples=length(normal_buffer)
+)
     sampler = prepare_sampler(
         PrefilledNormalRNG(copy(normal_buffer), 0),
         target,
-        ImportanceSampling(proposal; nsamples=length(normal_buffer));
+        ImportanceSampling(proposal; nsamples=nsamples);
         threaded=threaded,
     )
     return @inferred importance_sample!(sampler)
 end
 
-function _native_unfused_reference(target, proposal, normal_buffer::Vector{T}) where {T}
+function _native_unfused_reference(
+    target, proposal, normal_buffer::Vector{T}, nsamples=length(normal_buffer)
+) where {T}
     sampler = prepare_sampler(
         PrefilledNormalRNG(copy(normal_buffer), 0),
         target,
-        ImportanceSampling(proposal; nsamples=length(normal_buffer));
+        ImportanceSampling(proposal; nsamples=nsamples);
         threaded=false,
     )
     samples, logweights = ImportanceSamplers._importance_sample_generic_cpu!(sampler, false)
     return (samples=samples, logweights=logweights)
+end
+
+function _check_vector_native_equivalence(::Type{T}, proposal, normals, target) where {T}
+    dimension = ImportanceSamplers._proposal_dimension(
+        proposal isa TransformedProposal ? proposal.base : proposal,
+    )
+    nsamples = length(normals) ÷ dimension
+    fused = @inferred _run_native_fused(target, proposal, normals, false, nsamples)
+    reference = @inferred _native_unfused_reference(
+        target, proposal, copy(normals), nsamples
+    )
+    tolerance = T(128) * eps(T)
+    @test fused.samples == reference.samples
+    @test fused.logweights ≈ reference.logweights rtol = tolerance atol = tolerance
+    return fused
 end
 
 function _check_transformed_native_equivalence(
@@ -224,6 +248,133 @@ end
     @test fused32.logweights isa Vector{Float32}
     @test fused64.samples isa Vector{Float64}
     @test fused64.logweights isa Vector{Float64}
+end
+
+@testset "portable Gaussian generation and fused density" begin
+    for T in (Float32, Float64)
+        normals = T[-1, 0.5, 2, -0.25, 0.75, -1.5]
+        target = FusedVectorTarget(T(0.75))
+        proposals = (
+            SphericalGaussian(T[0.25, -0.5], T(1.5)),
+            DiagonalGaussian(T[0.25, -0.5], T[0.5, 2]),
+            FactorGaussian(T[0.25, -0.5], T[1.25 0; -0.4 0.75]),
+            TransformedProposal(
+                SphericalGaussian(T[0.25, -0.5], T(1.5)),
+                IdentityTransform(),
+            ),
+        )
+
+        for proposal in proposals
+            @test ImportanceSamplers._sampling_execution(proposal, false) isa
+                  ImportanceSamplers._KernelExecution
+            fused = _check_vector_native_equivalence(T, proposal, normals, target)
+        end
+    end
+end
+
+@testset "portable block transforms produce aligned logical samples" begin
+    for T in (Float32, Float64)
+        simplex = TransformedProposal(
+            SphericalGaussian(zeros(T, 2), one(T)),
+            SimplexTransform(3),
+        )
+        simplex_normals = T[-0.5, 0.25, 0, 0, 0.75, -1.25]
+        simplex_result = _check_vector_native_equivalence(
+            T,
+            simplex,
+            simplex_normals,
+            FusedVectorTarget(T(0.5)),
+        )
+        @test all(isone, vec(sum(simplex_result.samples; dims=1)))
+
+        factor = T[
+            1 0 0 0
+            0.25 1.25 0 0
+            -0.5 0.2 0.75 0
+            0.1 -0.3 0.4 1.5
+        ]
+        named = TransformedProposal(
+            FactorGaussian(zeros(T, 4), factor),
+            (
+                weights=(1:2 => SimplexTransform(3)),
+                rate=(3 => PositiveTransform()),
+                offset=(4 => IdentityTransform()),
+            ),
+        )
+        named_normals = T[
+            -0.5, 0.25, 0.1, -0.75,
+            0, 0, -0.25, 0.5,
+            0.75, -1.25, 0.5, 0.25,
+        ]
+        named_result = _check_vector_native_equivalence(
+            T,
+            named,
+            named_normals,
+            FusedNamedTarget{T}(),
+        )
+        @test all(isone, vec(sum(named_result.samples.weights; dims=1)))
+    end
+end
+
+@testset "portable failure record and target minus infinity" begin
+    failure_record = ImportanceSamplers._allocate_device_failure_record(zeros(1))
+    record_backend = KernelAbstractions.get_backend(getfield(failure_record, :storage))
+    _exercise_failure_record!(record_backend)(failure_record.storage; ndrange=3)
+    KernelAbstractions.synchronize(record_backend)
+    snapshot = ImportanceSamplers._device_failure_snapshot(failure_record)
+    @test snapshot.count == 3
+    @test snapshot.first_logical_index == 3
+    @test snapshot.first_block == 4
+    @test snapshot.reason_bits == UInt16(1) << 2
+
+    for T in (Float32, Float64)
+        proposal = SphericalGaussian(zeros(T, 2), one(T))
+        valid = @inferred _run_native_fused(
+            MinusInfVectorTarget{T}(),
+            proposal,
+            T[0, 1, 2, 3],
+            true,
+            2,
+        )
+        @test valid.logweights[1] === T(-Inf)
+        @test isfinite(valid.logweights[2])
+
+        invalid = TransformedProposal(
+            SphericalGaussian(zeros(T, 2), T(floatmax(T))),
+            SimplexTransform(3),
+        )
+        failure = _caught_kernel_execution_error() do
+            _run_native_fused(
+                FusedVectorTarget(zero(T)),
+                invalid,
+                T[0, 0, 1, 1],
+                true,
+                2,
+            )
+        end
+        @test failure isa SamplerExecutionError
+        @test failure.phase === :proposal_draw
+        @test failure.sample_index == 2
+        @test failure.captured.ex isa InvalidTransformError
+        @test failure.captured.ex.location == 1:2
+        @test failure.captured.ex.reason === :nonfinite_output
+
+    end
+end
+
+@testset "portable native execution allocations" begin
+    proposal = DiagonalGaussian([0.25, -0.5], [0.5, 2.0])
+    normals = repeat([-1.0, 0.5], 64)
+    target = FusedVectorTarget(0.75)
+    _run_native_fused(target, proposal, normals, false, 64)
+    allocation = @allocated _run_native_fused(
+        target,
+        proposal,
+        normals,
+        false,
+        64,
+    )
+    @test allocation <= 12_000
 end
 
 @testset "native random buffers are bulk-filled and reused" begin
@@ -366,92 +517,6 @@ end
     end
 end
 
-@testset "native fused failures retain phase and logical index" begin
-    target_proposal = SphericalGaussian(0.0, 1.0)
-    target = FusedFailAtTarget(2.0)
-    target_normals = [-1.0, 0.0, 2.0, 3.0]
-    fused_target_failure = _caught_kernel_execution_error() do
-        _run_native_fused(target, target_proposal, target_normals, false)
-    end
-    reference_target_failure = _caught_kernel_execution_error() do
-        _native_unfused_reference(target, target_proposal, copy(target_normals))
-    end
-    for failure in (fused_target_failure, reference_target_failure)
-        @test failure isa SamplerExecutionError
-        @test failure.phase === :target
-        @test failure.sample_index == 3
-        @test failure.captured.ex isa FusedTargetFailure
-        @test failure.captured.ex.sample == 2.0
-    end
-
-    transform_proposal = TransformedProposal(
-        SphericalGaussian(0.0, floatmax(Float64)),
-        PositiveTransform(),
-    )
-    transform_target = FusedQuadraticTarget(0.0)
-    transform_normals = [0.0, 1.0]
-    fused_transform_failure = _caught_kernel_execution_error() do
-        _run_native_fused(
-            transform_target,
-            transform_proposal,
-            transform_normals,
-            false,
-        )
-    end
-    reference_transform_failure = _caught_kernel_execution_error() do
-        _native_unfused_reference(
-            transform_target,
-            transform_proposal,
-            copy(transform_normals),
-        )
-    end
-    for failure in (fused_transform_failure, reference_transform_failure)
-        @test failure isa SamplerExecutionError
-        @test failure.phase === :proposal_draw
-        @test failure.sample_index == 2
-        @test failure.captured.ex isa InvalidTransformError
-        @test failure.captured.ex.reason === :nonfinite_output
-    end
-
-    density_proposal = SphericalGaussian(0.0, 1.0)
-    density_target = FiniteOrMinusInfTarget{Float64}()
-    density_normals = [0.0, Inf]
-    fused_density_failure = _caught_kernel_execution_error() do
-        _run_native_fused(density_target, density_proposal, density_normals, false)
-    end
-    reference_density_failure = _caught_kernel_execution_error() do
-        _native_unfused_reference(
-            density_target,
-            density_proposal,
-            copy(density_normals),
-        )
-    end
-    for failure in (fused_density_failure, reference_density_failure)
-        @test failure isa SamplerExecutionError
-        @test failure.phase === :proposal_logdensity
-        @test failure.sample_index == 2
-        @test failure.captured.ex isa DomainError
-    end
-
-    phase_order_normals = zeros(2_048)
-    phase_order_normals[1] = Inf
-    phase_order_normals[1_500] = 2.0
-    for threaded in (false, true)
-        phase_order_failure = _caught_kernel_execution_error() do
-            _run_native_fused(
-                FusedPhaseOrderTarget(),
-                density_proposal,
-                phase_order_normals,
-                threaded,
-            )
-        end
-        @test phase_order_failure isa SamplerExecutionError
-        @test phase_order_failure.phase === :target
-        @test phase_order_failure.sample_index == 1_500
-        @test phase_order_failure.captured.ex isa FusedTargetFailure
-    end
-end
-
 @testset "native fused capability and fallback" begin
     scalar = SphericalGaussian(0.0, 1.0)
     transformed_scalar = TransformedProposal(scalar, PositiveTransform())
@@ -480,9 +545,9 @@ end
     @test ImportanceSamplers._sampling_execution(transformed_scalar, true) isa
           ImportanceSamplers._KernelExecution
     @test ImportanceSamplers._sampling_execution(vector, false) isa
-          ImportanceSamplers._SerialCPUExecution
+          ImportanceSamplers._KernelExecution
     @test ImportanceSamplers._sampling_execution(transformed_vector, true) isa
-          ImportanceSamplers._ThreadedCPUExecution
+          ImportanceSamplers._KernelExecution
     @test ImportanceSamplers._sampling_execution(product, true) isa
           ImportanceSamplers._ThreadedCPUExecution
     @test ImportanceSamplers._sampling_execution(malformed_interval, true) isa

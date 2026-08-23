@@ -81,6 +81,97 @@ end
 
 const _TransformFloat = Union{Float32,Float64}
 
+const _NATIVE_TRANSFORM_NONFINITE_INPUT = UInt16(0x0001)
+const _NATIVE_TRANSFORM_NONFINITE_OUTPUT = UInt16(0x0002)
+const _NATIVE_TRANSFORM_NONFINITE_LOGJAC = UInt16(0x0004)
+const _NATIVE_TRANSFORM_OUTSIDE_SUPPORT = UInt16(0x0008)
+
+@inline _native_transform_success(x, logabsjac) = (x, logabsjac, UInt16(0))
+
+@inline function _native_checked_transform_result(x::T, logabsjac::T) where {T}
+    isfinite(x) || return (x, logabsjac, _NATIVE_TRANSFORM_NONFINITE_OUTPUT)
+    isfinite(logabsjac) || return (x, logabsjac, _NATIVE_TRANSFORM_NONFINITE_LOGJAC)
+    return _native_transform_success(x, logabsjac)
+end
+
+@inline function _native_transform_with_logjac(::IdentityTransform, z::T) where {T<:_TransformFloat}
+    isfinite(z) || return (z, zero(T), _NATIVE_TRANSFORM_NONFINITE_INPUT)
+    return _native_transform_success(z, zero(T))
+end
+
+@inline function _native_transform_with_logjac(::PositiveTransform, z::T) where {T<:_TransformFloat}
+    isfinite(z) || return (z, z, _NATIVE_TRANSFORM_NONFINITE_INPUT)
+    x = exp(z)
+    isfinite(x) || return (x, z, _NATIVE_TRANSFORM_NONFINITE_OUTPUT)
+    x > zero(T) || return (x, z, _NATIVE_TRANSFORM_OUTSIDE_SUPPORT)
+    return _native_transform_success(x, z)
+end
+
+@inline function _native_transform_with_logjac(::SoftplusTransform, z::T) where {T<:_TransformFloat}
+    isfinite(z) || return (z, z, _NATIVE_TRANSFORM_NONFINITE_INPUT)
+    x = _softplus(z)
+    logabsjac = z - x
+    isfinite(x) || return (x, logabsjac, _NATIVE_TRANSFORM_NONFINITE_OUTPUT)
+    isfinite(logabsjac) || return (x, logabsjac, _NATIVE_TRANSFORM_NONFINITE_LOGJAC)
+    x > zero(T) || return (x, logabsjac, _NATIVE_TRANSFORM_OUTSIDE_SUPPORT)
+    return _native_transform_success(x, logabsjac)
+end
+
+@inline function _native_transform_with_logjac(
+    transform::IntervalTransform{T,T,Nothing},
+    z::T,
+) where {T<:_TransformFloat}
+    distance, logabsjac, reason = _native_transform_with_logjac(PositiveTransform(), z)
+    iszero(reason) || return (distance, logabsjac, reason)
+    x = transform.lower + distance
+    isfinite(x) || return (x, logabsjac, _NATIVE_TRANSFORM_NONFINITE_OUTPUT)
+    x > transform.lower || return (x, logabsjac, _NATIVE_TRANSFORM_OUTSIDE_SUPPORT)
+    return _native_transform_success(x, logabsjac)
+end
+
+@inline function _native_inverse_with_logjac(
+    transform::IntervalTransform{T,T,T},
+    x::T,
+) where {T<:_TransformFloat}
+    isfinite(x) || return (x, x, _NATIVE_TRANSFORM_NONFINITE_INPUT)
+    transform.lower < x < transform.upper ||
+        return (x, x, _NATIVE_TRANSFORM_OUTSIDE_SUPPORT)
+    lower_logdistance = _log_positive_difference(x, transform.lower)
+    upper_logdistance = _log_positive_difference(transform.upper, x)
+    span_logdistance = _log_positive_difference(transform.upper, transform.lower)
+    z = lower_logdistance - upper_logdistance
+    logabsjac = lower_logdistance + upper_logdistance - span_logdistance
+    return _native_checked_transform_result(z, logabsjac)
+end
+
+@inline function _native_transform_with_logjac(
+    transform::IntervalTransform{T,Nothing,T},
+    z::T,
+) where {T<:_TransformFloat}
+    distance, logabsjac, reason = _native_transform_with_logjac(PositiveTransform(), z)
+    iszero(reason) || return (distance, logabsjac, reason)
+    x = transform.upper - distance
+    isfinite(x) || return (x, logabsjac, _NATIVE_TRANSFORM_NONFINITE_OUTPUT)
+    x < transform.upper || return (x, logabsjac, _NATIVE_TRANSFORM_OUTSIDE_SUPPORT)
+    return _native_transform_success(x, logabsjac)
+end
+
+@inline function _native_transform_with_logjac(
+    transform::IntervalTransform{T,T,T},
+    z::T,
+) where {T<:_TransformFloat}
+    isfinite(z) || return (z, z, _NATIVE_TRANSFORM_NONFINITE_INPUT)
+    probability = _logistic(z)
+    x = _bounded_interval_value(transform.lower, transform.upper, probability)
+    logabsjac = _log_positive_difference(transform.upper, transform.lower) +
+                _logsigmoid(z) + _logsigmoid(-z)
+    x, logabsjac, reason = _native_checked_transform_result(x, logabsjac)
+    iszero(reason) || return (x, logabsjac, reason)
+    transform.lower < x < transform.upper ||
+        return (x, logabsjac, _NATIVE_TRANSFORM_OUTSIDE_SUPPORT)
+    return _native_transform_success(x, logabsjac)
+end
+
 function _validated_interval_endpoint(bound::Nothing, name)
     return nothing
 end

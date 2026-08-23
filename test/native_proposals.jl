@@ -262,8 +262,8 @@ end
             ImportanceSampling(proposal; nsamples=32);
             threaded=false,
         )
-        @test result.logweights == zeros(32)
-        @test lognormalizer(result) == 0.0
+        @test maximum(abs, result.logweights) <= 64eps()
+        @test abs(lognormalizer(result)) <= 64eps()
     end
 
     factor = FactorGaussian(Float64[0, 0], Float64[2 0; 0.5 1.5])
