@@ -13,6 +13,7 @@ test_files = if isempty(ARGS)
         "failures",
         "kernel_execution",
         "native_proposals",
+        "transforms",
     ]
 else
     ARGS

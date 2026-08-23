@@ -12,16 +12,22 @@ import Random
 export AbstractImportanceSampler,
     AbstractProposalFamily,
     AbstractRadialProposalFamily,
+    AbstractSampleTransform,
     AllZeroWeightsError,
     DiagonalGaussian,
     FactorGaussian,
     ImportanceSampling,
+    IdentityTransform,
+    IntervalTransform,
+    InvalidTransformError,
     LogTarget,
     SamplerAlreadyExecutedError,
     SamplerBusyError,
     SamplerDeviceError,
     SamplerExecutionError,
     SphericalGaussian,
+    PositiveTransform,
+    SoftplusTransform,
     WeightedSamples,
     WeightedSampleView,
     importance_sample,
@@ -31,6 +37,7 @@ export AbstractImportanceSampler,
     prepare_sampler
 
 include("proposals.jl")
+include("transforms.jl")
 include("methods/importance_sampling.jl")
 include("targets.jl")
 include("storage.jl")
