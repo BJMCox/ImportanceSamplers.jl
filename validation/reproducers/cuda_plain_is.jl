@@ -64,8 +64,44 @@ end
     return total
 end
 
+@inline function factor_gaussian_logtarget(sample, p)
+    first_standardized = (sample[1] - p.location[1]) / p.factor[1, 1]
+    second_standardized = (
+        sample[2] - p.location[2] - p.factor[2, 1] * first_standardized
+    ) / p.factor[2, 2]
+    return p.lognormalizer[1] -
+           typeof(first_standardized)(0.5) *
+           (abs2(first_standardized) + abs2(second_standardized))
+end
+
+@inline function flat_layout_logtarget(sample, p)
+    T = eltype(sample.free)
+    lower_coordinate = log(sample.lower - p.lower[1])
+    upper_coordinate = log(p.upper[1] - sample.upper)
+    squared_radius = abs2(sample.free[1]) + abs2(sample.free[2]) +
+                     abs2(lower_coordinate) + abs2(upper_coordinate)
+    base = -T(2) * log(T(2) * T(pi)) - T(0.5) * squared_radius
+    return base - lower_coordinate - upper_coordinate
+end
+
 @inline function positive_gaussian_logtarget(sample, p)
     coordinate = log(sample)
+    return gaussian_logdensity(coordinate, p.location[1], p.scale[1]) - coordinate
+end
+
+@inline function softplus_gaussian_logtarget(sample, p)
+    coordinate = sample + log(-expm1(-sample))
+    return gaussian_logdensity(coordinate, p.location[1], p.scale[1]) -
+           coordinate + sample
+end
+
+@inline function lower_bounded_gaussian_logtarget(sample, p)
+    coordinate = log(sample - p.lower[1])
+    return gaussian_logdensity(coordinate, p.location[1], p.scale[1]) - coordinate
+end
+
+@inline function upper_bounded_gaussian_logtarget(sample, p)
+    coordinate = log(p.upper[1] - sample)
     return gaussian_logdensity(coordinate, p.location[1], p.scale[1]) - coordinate
 end
 
@@ -122,6 +158,11 @@ end
 
 scalar_summary(samples) = sum(samples) / length(samples)
 vector_summary(samples) = vec(sum(samples; dims=2)) / size(samples, 2)
+flat_layout_summary(samples) = vcat(
+    vector_summary(samples.free),
+    scalar_summary(samples.lower),
+    scalar_summary(samples.upper),
+)
 
 function lognormal_variance(mean, scale)
     variance = abs2(scale)
@@ -131,6 +172,7 @@ end
 function validation_case(
     ::Type{T}, label, proposal, target, context, summarize, expected, variance_trace;
     weight_multiplier=512,
+    sample_contract=nothing,
 ) where {T}
     standard_error = sqrt(variance_trace / T(VALIDATION_SAMPLES))
     return (;
@@ -138,6 +180,23 @@ function validation_case(
         summary_atol=T(5) * standard_error,
         difference_atol=T(5) * sqrt(T(2)) * standard_error,
         weight_atol=T(weight_multiplier) * eps(T),
+        sample_contract,
+    )
+end
+
+function support_validation_case(
+    ::Type{T}, label, proposal, target, context, sample_contract;
+    weight_multiplier=512,
+) where {T}
+    return (;
+        label, proposal, target, context,
+        summarize=nothing,
+        expected=nothing,
+        standard_error=nothing,
+        summary_atol=nothing,
+        difference_atol=nothing,
+        weight_atol=T(weight_multiplier) * eps(T),
+        sample_contract,
     )
 end
 
@@ -150,6 +209,41 @@ validation_case(::Type{T}, case, summarize, expected, variance_trace; kws...) wh
 # Vector tolerances use tr(Cov(X)); the interval variance is from deterministic
 # quadrature, and the simplex bound is tr(Cov(X)) <= 1 - ||E[X]||² = 2/3.
 function validation_cases(::Type{T}) where {T}
+    vector_spherical = SphericalGaussian(T[0.4, -0.3, 0.2], T(0.9))
+    factor = T[1.25 0; -0.4 0.75]
+    factor_proposal = FactorGaussian(T[0.25, -0.5], factor)
+    factor_lognormalizer = T[
+        -log(T(2) * T(pi)) - log(factor[1, 1]) - log(factor[2, 2]),
+    ]
+    identity = TransformedProposal(
+        SphericalGaussian(T[-0.2, 0.6], T(1.1)),
+        IdentityTransform(),
+    )
+    softplus = TransformedProposal(
+        SphericalGaussian(T(0.15), T(0.7)),
+        SoftplusTransform(),
+    )
+    lower = T(-1.25)
+    lower_bounded = TransformedProposal(
+        SphericalGaussian(T(0.1), T(0.65)),
+        IntervalTransform(lower, nothing),
+    )
+    upper = T(2.5)
+    upper_bounded = TransformedProposal(
+        SphericalGaussian(T(-0.2), T(0.75)),
+        IntervalTransform(nothing, upper),
+    )
+    flat_lower = T(-1)
+    flat_upper = T(2)
+    flat_layout = TransformedProposal(
+        SphericalGaussian(zeros(T, 4), one(T)),
+        (
+            free=(1:2 => IdentityTransform()),
+            lower=(3 => IntervalTransform(flat_lower, nothing)),
+            upper=(4 => IntervalTransform(nothing, flat_upper)),
+        ),
+    )
+    flat_variance = T(2) + T(2) * lognormal_variance(zero(T), one(T))
     return (
         validation_case(
             T, scalar_gaussian_case(T), scalar_summary, T(0.25), abs2(T(1.25)),
@@ -159,6 +253,57 @@ function validation_cases(::Type{T}) where {T}
             vector_gaussian_logtarget,
             (location=T[0.25, -0.5], scale=T[0.75, 1.25]),
             vector_summary, T[0.25, -0.5], abs2(T(0.75)) + abs2(T(1.25)),
+        ),
+        validation_case(
+            T, :vector_spherical, vector_spherical, vector_gaussian_logtarget,
+            (location=T[0.4, -0.3, 0.2], scale=fill(T(0.9), 3)),
+            vector_summary, T[0.4, -0.3, 0.2], T(3) * abs2(T(0.9)),
+            sample_contract=(kind=:vector, dimension=3),
+        ),
+        validation_case(
+            T, :factor, factor_proposal, factor_gaussian_logtarget,
+            (
+                location=T[0.25, -0.5],
+                factor,
+                lognormalizer=factor_lognormalizer,
+            ),
+            vector_summary, T[0.25, -0.5], sum(abs2, factor),
+            sample_contract=(kind=:vector, dimension=2),
+        ),
+        validation_case(
+            T, :identity, identity, vector_gaussian_logtarget,
+            (location=T[-0.2, 0.6], scale=fill(T(1.1), 2)),
+            vector_summary, T[-0.2, 0.6], T(2) * abs2(T(1.1)),
+            sample_contract=(kind=:vector, dimension=2),
+        ),
+        support_validation_case(
+            T, :softplus, softplus, softplus_gaussian_logtarget,
+            (location=T[0.15], scale=T[0.7]),
+            (kind=:scalar, lower=zero(T), upper=nothing),
+        ),
+        validation_case(
+            T, :lower_bounded, lower_bounded, lower_bounded_gaussian_logtarget,
+            (location=T[0.1], scale=T[0.65], lower=T[lower]),
+            scalar_summary,
+            lower + exp(T(0.1) + T(0.5) * abs2(T(0.65))),
+            lognormal_variance(T(0.1), T(0.65)),
+            sample_contract=(kind=:scalar, lower, upper=nothing),
+        ),
+        validation_case(
+            T, :upper_bounded, upper_bounded, upper_bounded_gaussian_logtarget,
+            (location=T[-0.2], scale=T[0.75], upper=T[upper]),
+            scalar_summary,
+            upper - exp(T(-0.2) + T(0.5) * abs2(T(0.75))),
+            lognormal_variance(T(-0.2), T(0.75)),
+            sample_contract=(kind=:scalar, lower=nothing, upper),
+        ),
+        validation_case(
+            T, :flat_layout, flat_layout, flat_layout_logtarget,
+            (lower=T[flat_lower], upper=T[flat_upper]),
+            flat_layout_summary,
+            T[zero(T), zero(T), flat_lower + exp(T(0.5)), flat_upper - exp(T(0.5))],
+            flat_variance,
+            sample_contract=(kind=:flat, lower=flat_lower, upper=flat_upper),
         ),
         validation_case(
             T, :positive,
@@ -192,6 +337,42 @@ function validation_cases(::Type{T}) where {T}
     )
 end
 
+function validate_sample_contract(samples, ::Type{T}, contract) where {T}
+    contract === nothing && return nothing
+    if contract.kind === :scalar
+        @test samples isa Vector{T}
+        @test length(samples) == VALIDATION_SAMPLES
+        @test all(isfinite, samples)
+        isnothing(contract.lower) || @test all(>(contract.lower), samples)
+        isnothing(contract.upper) || @test all(<(contract.upper), samples)
+    elseif contract.kind === :vector
+        @test samples isa Matrix{T}
+        @test size(samples) == (contract.dimension, VALIDATION_SAMPLES)
+        @test all(isfinite, samples)
+    elseif contract.kind === :flat
+        @test keys(samples) == (:free, :lower, :upper)
+        @test samples.free isa Matrix{T}
+        @test size(samples.free) == (2, VALIDATION_SAMPLES)
+        @test samples.lower isa Vector{T}
+        @test samples.upper isa Vector{T}
+        @test length(samples.lower) == VALIDATION_SAMPLES
+        @test length(samples.upper) == VALIDATION_SAMPLES
+        @test all(isfinite, samples.free)
+        @test all(>(contract.lower), samples.lower)
+        @test all(<(contract.upper), samples.upper)
+    else
+        error("unknown CUDA validation sample contract $(contract.kind)")
+    end
+    return nothing
+end
+
+_all_array_leaves(predicate, array::AbstractArray) = predicate(array)
+_all_array_leaves(predicate, arrays::NamedTuple) =
+    all(array -> _all_array_leaves(predicate, array), values(arrays))
+
+_explicit_array_transfer(array::AbstractArray) = Array(array)
+_explicit_array_transfer(arrays::NamedTuple) = map(_explicit_array_transfer, arrays)
+
 function validate_case(device, ::Type{T}, case, seed) where {T}
     algorithm = ImportanceSampling(case.proposal; nsamples=VALIDATION_SAMPLES)
     cpu = importance_sample(
@@ -208,17 +389,23 @@ function validate_case(device, ::Type{T}, case, seed) where {T}
         algorithm;
         threaded=true,
     ) |> device
-    @test all(value -> value isa CuArray, values(getfield(prepared.target, :context)))
+    @test ImportanceSamplers._backend_state_resident(
+        device,
+        (prepared.algorithm, prepared.target, prepared.random_buffers),
+    )
     gpu = importance_sample!(prepared)
 
-    @test gpu.samples isa CuArray
+    @test _all_array_leaves(array -> array isa CuArray, gpu.samples)
     @test gpu.logweights isa CuArray
-    @test eltype(gpu.samples) === T
+    @test _all_array_leaves(array -> eltype(array) === T, gpu.samples)
     @test eltype(gpu.logweights) === T
     @test transfer_tuple(gpu) == (1, 2sizeof(UInt64))
 
     resident_view = gpu[1:16]
-    @test MLDataDevices.get_device(resident_view.samples) isa MLDataDevices.CUDADevice
+    @test _all_array_leaves(
+        array -> MLDataDevices.get_device(array) isa MLDataDevices.CUDADevice,
+        resident_view.samples,
+    )
     @test MLDataDevices.get_device(resident_view.logweights) isa MLDataDevices.CUDADevice
     @test transfer_tuple(gpu) == (1, 2sizeof(UInt64))
 
@@ -228,9 +415,9 @@ function validate_case(device, ::Type{T}, case, seed) where {T}
     @test transfer_tuple(gpu) == (2, 2sizeof(UInt64) + 2sizeof(T))
 
     host = MLDataDevices.cpu_device()(gpu)
-    @test host.samples isa Array
+    @test _all_array_leaves(array -> array isa Array, host.samples)
     @test host.logweights isa Vector{T}
-    @test host.samples == Array(gpu.samples)
+    @test host.samples == _explicit_array_transfer(gpu.samples)
     @test host.logweights == Array(gpu.logweights)
     @test transfer_tuple(host) == transfer_tuple(gpu)
 
@@ -239,11 +426,16 @@ function validate_case(device, ::Type{T}, case, seed) where {T}
     @test abs(lognormalizer(cpu)) <= case.weight_atol
     @test abs(lognormalizer(host)) <= case.weight_atol
 
-    cpu_summary = case.summarize(cpu.samples)
-    gpu_summary = case.summarize(host.samples)
-    @test isapprox(cpu_summary, case.expected; atol=case.summary_atol, rtol=zero(T))
-    @test isapprox(gpu_summary, case.expected; atol=case.summary_atol, rtol=zero(T))
-    @test isapprox(cpu_summary, gpu_summary; atol=case.difference_atol, rtol=zero(T))
+    validate_sample_contract(cpu.samples, T, case.sample_contract)
+    validate_sample_contract(host.samples, T, case.sample_contract)
+
+    if !isnothing(case.summarize)
+        cpu_summary = case.summarize(cpu.samples)
+        gpu_summary = case.summarize(host.samples)
+        @test isapprox(cpu_summary, case.expected; atol=case.summary_atol, rtol=zero(T))
+        @test isapprox(gpu_summary, case.expected; atol=case.summary_atol, rtol=zero(T))
+        @test isapprox(cpu_summary, gpu_summary; atol=case.difference_atol, rtol=zero(T))
+    end
     return nothing
 end
 
@@ -534,7 +726,7 @@ function validate_failure_scratch_reuse_and_reset(device)
     @test failure_snapshot.failure.count == FAILURE_SAMPLES
     @test failure_snapshot.failure.first_logical_index == 1
     @test failure_snapshot.failure.first_block == 1
-    @test failure_snapshot.failure.reason_bits == UInt16(0x0001)
+    @test failure_snapshot.failure.reason_bits == UInt16(0x0800)
     @test failure_snapshot.transfers == (count=1, bytes=2 * sizeof(UInt64))
 
     fill!(prepared_scale, one(T))
