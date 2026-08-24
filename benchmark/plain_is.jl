@@ -8,6 +8,7 @@ const BENCHMARK_SEED = 0x2d861e0f73a9bc45
 const SAMPLE_COUNT = SMOKE_MODE ? 256 : 10_000
 const TRIAL_SAMPLES = SMOKE_MODE ? 3 : 30
 const TRIAL_SECONDS = SMOKE_MODE ? 0.2 : 5.0
+const PREPARATION_BATCH_SIZE = SMOKE_MODE ? 16 : 64
 const BENCHMARK_COMMAND =
     "julia --project=benchmark benchmark/plain_is.jl" *
     (SMOKE_MODE ? " --smoke" : "")
@@ -44,17 +45,27 @@ function run_trial(benchmark)
     )
 end
 
-function report_trial(label, trial; work_items=nothing)
+function report_trial(label, trial; work_items=nothing, divisor=1)
     estimate = median(trial)
     println(label)
-    println("  median time: ", BenchmarkTools.prettytime(estimate.time))
-    println("  allocations: ", estimate.allocs)
-    println("  allocated memory: ", BenchmarkTools.prettymemory(estimate.memory))
+    println("  median time: ", BenchmarkTools.prettytime(estimate.time / divisor))
+    println("  allocations: ", estimate.allocs / divisor)
+    println("  allocated memory: ", BenchmarkTools.prettymemory(estimate.memory / divisor))
     if work_items !== nothing
         seconds = estimate.time / 1.0e9
         println("  throughput: ", round(work_items / seconds; sigdigits=6), " samples/s")
     end
     return nothing
+end
+
+function prepare_batch(rng, target, algorithm, threaded)
+    sink = nothing
+    for _ in 1:PREPARATION_BATCH_SIZE
+        sink = Base.inferencebarrier(
+            prepare_sampler(rng, target, algorithm; threaded),
+        )
+    end
+    return sink
 end
 
 function main()
@@ -65,20 +76,22 @@ function main()
     println("smoke mode: ", SMOKE_MODE)
     println("sample count per execution: ", SAMPLE_COUNT)
     println("trial samples: ", TRIAL_SAMPLES)
+    println("preparations per timed evaluation: ", PREPARATION_BATCH_SIZE)
     println("No timing threshold is asserted; compare trials on controlled hardware.")
 
     preparation_rng = Xoshiro(BENCHMARK_SEED)
-    preparation_sink = Ref{Any}()
-    preparation = @benchmarkable $preparation_sink[] = Base.inferencebarrier(
-        prepare_sampler(
-            $preparation_rng,
-            logtarget,
-            ALGORITHM;
-            threaded=false,
-        ),
+    preparation = @benchmarkable prepare_batch(
+        $preparation_rng,
+        logtarget,
+        ALGORITHM,
+        false,
     )
     preparation_trial = run_trial(preparation)
-    report_trial("preparation", preparation_trial)
+    report_trial(
+        "preparation per prepared sampler",
+        preparation_trial;
+        divisor=PREPARATION_BATCH_SIZE,
+    )
 
     sampler = prepare_sampler(
         Xoshiro(BENCHMARK_SEED),
