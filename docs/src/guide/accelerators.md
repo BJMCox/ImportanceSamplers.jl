@@ -40,7 +40,7 @@ prepared = prepare_sampler(
     threaded=true,
 )
 
-device = MLDataDevices.gpu_device(nothing; force=true)
+device = MLDataDevices.gpu_device(nothing, nothing; force=true)
 prepared = device(prepared)
 # Equivalent replacement for the preceding line:
 # prepared = prepared |> device

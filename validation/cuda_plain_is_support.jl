@@ -20,7 +20,10 @@ end
 
 function cuda_device()
     CUDA.functional() || error("CUDA is not functional")
-    device = MLDataDevices.gpu_device(nothing; force=true)
+    default_policy = MLDataDevices.gpu_device(nothing; force=true)
+    eltype(default_policy) === Missing ||
+        error("default CUDA device does not retain the Missing scalar policy")
+    device = MLDataDevices.gpu_device(nothing, nothing; force=true)
     MLDataDevices.functional(device) || error("MLDataDevices CUDADevice is not functional")
     eltype(device) === Nothing || error("CUDA device does not preserve scalar types")
     CUDA.allowscalar(false)

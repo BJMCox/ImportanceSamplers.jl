@@ -280,7 +280,7 @@ end
           "prepared-sampler device transfer failed for " *
           "$(typeof(default_cuda)): the accelerator scalar policy is " *
           "unspecified; construct a preserving device with " *
-          "gpu_device(nothing; force=true) or " *
+          "gpu_device(nothing, nothing; force=true) or " *
           "gpu_device(device_id, nothing; force=true)"
 
     cpu = MLDataDevices.cpu_device()

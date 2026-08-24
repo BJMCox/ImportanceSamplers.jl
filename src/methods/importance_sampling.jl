@@ -80,7 +80,7 @@ function Base.showerror(io::IO, error::SamplerDeviceError)
         "accelerator random-buffer support is not available"
     elseif error.reason === :scalar_policy_unspecified
         "the accelerator scalar policy is unspecified; construct a preserving " *
-        "device with gpu_device(nothing; force=true) or " *
+        "device with gpu_device(nothing, nothing; force=true) or " *
         "gpu_device(device_id, nothing; force=true)"
     elseif error.reason === :generic_proposal_cpu_only
         "generic proposals are CPU-only"
@@ -177,8 +177,8 @@ device-adaptable callable state, and every numerical array in `p`; opaque
 closure captures cannot be moved reliably and are rejected for accelerator
 execution. An accelerator whose public `eltype(device)` is `Missing` is rejected
 as `:scalar_policy_unspecified`; construct a preserving device with
-`MLDataDevices.gpu_device(nothing; force=true)` or the device-id form. Native
-CUDA execution requires `threaded=true` and keeps returned arrays on the
+`MLDataDevices.gpu_device(nothing, nothing; force=true)` or the device-id form.
+Native CUDA execution requires `threaded=true` and keeps returned arrays on the
 device. Set `threaded=false` for serial CPU evaluation. On CPU,
 `threaded=true` falls back to serial execution when Julia has one default
 thread; accelerator launch policy does not depend on host thread count.
