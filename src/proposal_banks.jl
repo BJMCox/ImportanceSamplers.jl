@@ -71,11 +71,25 @@ function _prepare_active_proposal_bank(bank::ProposalBank)
     )
 
     proposal_ids = findall(!iszero, bank.masses)
+    sort!(
+        proposal_ids;
+        by=proposal_id -> bank.masses[proposal_id],
+        alg=Base.Sort.MergeSort,
+    )
     proposals = bank.proposals[proposal_ids]
     masses = bank.masses[proposal_ids]
     masses ./= sum(masses)
     cdf = cumsum(masses)
     cdf[end] = one(eltype(cdf))
+    previous = zero(eltype(cdf))
+    for boundary in cdf
+        boundary > previous || throw(
+            ArgumentError(
+                "every positive proposal mass must retain a positive assignment interval",
+            ),
+        )
+        previous = boundary
+    end
     return _ActiveProposalBank(
         proposals,
         log.(masses),

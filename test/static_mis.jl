@@ -174,6 +174,61 @@ end
     @test result.diagnostics.mis_scheme === :random_mixture
 end
 
+@testset "positive Float32 masses retain assignment intervals" begin
+    proposals = [
+        TransformedProposal(
+            SphericalGaussian(0.0f0, 1.0f0),
+            IntervalTransform(0.0f0, 1.0f0),
+        ),
+        TransformedProposal(
+            SphericalGaussian(0.0f0, 1.0f0),
+            IntervalTransform(2.0f0, 3.0f0),
+        ),
+    ]
+    schemes = (
+        StratifiedMixture(),
+        RandomMixture(),
+        StandardMIS(),
+        PartialDeterministicMixture(((1, 2),)),
+    )
+
+    for masses in (Float32[1, 1f-8], Float32[1f-8, 1])
+        small_id = argmin(masses)
+        large_id = 3 - small_id
+        small_proposal = proposals[small_id]
+        target = sample -> DensityInterface.logdensityof(small_proposal, sample)
+        supported_sample = rand(Random.Xoshiro(0x5308), small_proposal)
+        @test isfinite(target(supported_sample))
+        @test DensityInterface.logdensityof(
+            proposals[large_id],
+            supported_sample,
+        ) == -Inf
+
+        for scheme in schemes
+            sampler = @inferred prepare_sampler(
+                Random.Xoshiro(0x5309),
+                target,
+                ImportanceSampling(
+                    ProposalBank(proposals, masses);
+                    nsamples=8,
+                    mis_scheme=scheme,
+                );
+                threaded=false,
+            )
+            active_bank = sampler.method_state.bank
+            intervals = diff(vcat(0.0f0, active_bank.cdf))
+            small_slot = searchsortedfirst(
+                active_bank.cdf,
+                active_bank.cdf[1] / 2,
+            )
+
+            @test active_bank.proposal_ids == [small_id, large_id]
+            @test all(>(0.0f0), intervals)
+            @test active_bank.proposal_ids[small_slot] == small_id
+        end
+    end
+end
+
 @testset "standard MIS generating denominator" begin
     first_proposal = StaticMISGaussian(0.0)
     inert_proposal = StaticMISGaussian(50.0)
@@ -390,7 +445,8 @@ end
         @test sum(proposal.draw_count[] for proposal in proposals) == nsamples
 
         expected_rng = Random.Xoshiro(0x5202)
-        cdf = cumsum(bank.masses)
+        active_ids = sortperm(bank.masses; alg=Base.Sort.MergeSort)
+        cdf = cumsum(bank.masses[active_ids])
         cdf[end] = 1.0
         expected_slots = [
             searchsortedfirst(
@@ -400,9 +456,10 @@ end
             ) for sample_index in 1:nsamples
         ]
         expected_samples = [
-            proposals[slot].location + rand(expected_rng) for slot in expected_slots
+            proposals[active_ids[slot]].location + rand(expected_rng) for
+            slot in expected_slots
         ]
-        @test result.provenance.proposal_id == expected_slots
+        @test result.provenance.proposal_id == active_ids[expected_slots]
         @test result.samples == expected_samples
     end
 end
@@ -431,7 +488,7 @@ function static_mis_table_result(
     return sampler, proposals
 end
 
-function static_mis_scheme_table_result(
+function static_mis_denominator_table_result(
     proposal_logs::Matrix{T},
     target_logs::Vector{T},
     scheme;
@@ -457,7 +514,7 @@ function static_mis_scheme_table_result(
     )
 end
 
-@testset "static-MIS support conditions" begin
+@testset "static-MIS denominator algebra under support patterns" begin
     nproposals = 4
     target_logs = fill(-log(nproposals), nproposals)
     disjoint_logs = fill(-Inf, nproposals, nproposals)
@@ -465,17 +522,17 @@ end
         disjoint_logs[proposal_id, proposal_id] = 0.0
     end
 
-    aggregate = static_mis_scheme_table_result(
+    aggregate = static_mis_denominator_table_result(
         disjoint_logs,
         target_logs,
         StratifiedMixture(),
     )
-    partial_without_group_support = static_mis_scheme_table_result(
+    partial_group = static_mis_denominator_table_result(
         disjoint_logs,
         target_logs,
         PartialDeterministicMixture(((1, 2), (3, 4))),
     )
-    standard_without_generator_support = static_mis_scheme_table_result(
+    generating = static_mis_denominator_table_result(
         disjoint_logs,
         target_logs,
         StandardMIS(),
@@ -484,25 +541,48 @@ end
     @test all(isfinite, aggregate.logweights)
     @test maximum(abs, aggregate.logweights) <= 16eps(Float64)
     @test abs(lognormalizer(aggregate)) <= 16eps(Float64)
-    @test partial_without_group_support.logweights ≈ fill(-log(2), nproposals)
-    @test lognormalizer(partial_without_group_support) ≈ -log(2)
-    @test standard_without_generator_support.logweights ≈
-          fill(-log(nproposals), nproposals)
-    @test lognormalizer(standard_without_generator_support) ≈ -log(nproposals)
+    @test partial_group.logweights ≈ fill(-log(2), nproposals)
+    @test lognormalizer(partial_group) ≈ -log(2)
+    @test generating.logweights ≈ fill(-log(nproposals), nproposals)
+    @test lognormalizer(generating) ≈ -log(nproposals)
 
     common_logs = fill(-log(nproposals), nproposals, nproposals)
     for scheme in (
         StandardMIS(),
         PartialDeterministicMixture(((1, 2), (3, 4))),
     )
-        supported = static_mis_scheme_table_result(
+        common_density = static_mis_denominator_table_result(
             common_logs,
             target_logs,
             scheme,
         )
-        @test all(isfinite, supported.logweights)
-        @test maximum(abs, supported.logweights) <= 16eps(Float64)
-        @test abs(lognormalizer(supported)) <= 16eps(Float64)
+        @test all(isfinite, common_density.logweights)
+        @test maximum(abs, common_density.logweights) <= 16eps(Float64)
+        @test abs(lognormalizer(common_density)) <= 16eps(Float64)
+    end
+end
+
+@testset "standard and partial full-support estimator identity" begin
+    target = sample -> static_mis_gaussian_logdensity(0.0, sample)
+    for scheme in (
+        StandardMIS(),
+        PartialDeterministicMixture(((1, 2),)),
+    )
+        proposals = [StaticMISGaussian(0.0), StaticMISGaussian(0.0)]
+        result = importance_sample(
+            Random.Xoshiro(0x530a),
+            target,
+            ImportanceSampling(
+                ProposalBank(proposals, [1, 3]);
+                nsamples=1_001,
+                mis_scheme=scheme,
+            );
+            threaded=false,
+        )
+
+        @test all(isfinite, result.logweights)
+        @test maximum(abs, result.logweights) <= 16eps(Float64)
+        @test abs(lognormalizer(result)) <= 16eps(Float64)
     end
 end
 
@@ -512,7 +592,7 @@ end
         StandardMIS(),
         PartialDeterministicMixture(((1, 2),)),
     )
-        zero_weight = static_mis_scheme_table_result(
+        zero_weight = static_mis_denominator_table_result(
             generating_plus_inf,
             zeros(2),
             scheme,
@@ -522,7 +602,7 @@ end
 
         for invalid in ([-Inf 0.0; 0.0 0.0], [NaN 0.0; 0.0 0.0])
             failure = caught_static_mis_failure() do
-                static_mis_scheme_table_result(invalid, zeros(2), scheme)
+                static_mis_denominator_table_result(invalid, zeros(2), scheme)
             end
             @test failure isa SamplerExecutionError
             @test (failure.phase, failure.sample_index) ==
