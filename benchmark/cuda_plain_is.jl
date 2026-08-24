@@ -173,7 +173,7 @@ function benchmark_type(device, ::Type{T}) where {T}
     warm_benchmark = @benchmarkable synchronized(importance_sample!, $sampler)
     sustained_warm_benchmark = @benchmarkable synchronized_sustained_warm_execution(
         $sampler, $SUSTAINED_WARM_EXECUTIONS,
-    )
+    ) setup=(CUDA.synchronize()) gcsample=true
     rng_benchmark = @benchmarkable synchronized(Random.randn!, $rng, $normals)
     synthetic_proposal_benchmark = @benchmarkable synchronized(
         synthetic_proposal_generation!, $samples, $normals, $location, $scale,
@@ -208,7 +208,7 @@ function benchmark_type(device, ::Type{T}) where {T}
     CUDA.synchronize()
     return (
         scalar_type=T,
-        compile_and_first_execution=trial_record(cold),
+        first_measured_execution=trial_record(cold),
         measurements=merge(
             map(trial_record, trials),
             (
