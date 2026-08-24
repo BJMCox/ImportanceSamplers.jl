@@ -208,9 +208,11 @@ function _prepare_importance_sampler(rng, target, algorithm, threaded)
     threaded isa Bool || throw(ArgumentError("threaded must be Bool"))
     prepared_target = _resolve_prepared_target(target, algorithm.proposal)
     device = MLDataDevices.CPUDevice()
+    random_buffers =
+        _allocate_random_buffers(device, algorithm.proposal, algorithm.nsamples)
     return _PreparedImportanceSampler(
         rng,
-        _allocate_random_buffers(device, algorithm.proposal, algorithm.nsamples),
+        random_buffers,
         prepared_target,
         algorithm,
         device,
@@ -256,9 +258,11 @@ function _transfer_prepared_sampler(
         SamplerDeviceError(device, :opaque_host_closure),
     )
     algorithm = _copy_algorithm(device, sampler.algorithm)
+    random_buffers =
+        _allocate_random_buffers(device, algorithm.proposal, algorithm.nsamples)
     return _PreparedImportanceSampler(
         _clone_rng(device, sampler.rng),
-        _allocate_random_buffers(device, algorithm.proposal, algorithm.nsamples),
+        random_buffers,
         _transfer_prepared_target(device, sampler.target),
         algorithm,
         device,
@@ -405,6 +409,9 @@ function importance_sample!(sampler::_PreparedImportanceSampler)
     sampler.executed = true
     sampler.running = true
     try
+        _reset_native_failure_scratch!(
+            _native_failure_scratch(sampler.random_buffers),
+        )
         threaded = sampler.device isa MLDataDevices.AbstractAcceleratorDevice ||
                    sampler.threaded && Threads.nthreads(:default) > 1
         return _importance_sample_cpu!(sampler, threaded)

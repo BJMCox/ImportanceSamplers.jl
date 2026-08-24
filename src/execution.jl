@@ -8,13 +8,21 @@ end
 struct _NoSampleTransform end
 struct _NoRandomBuffers end
 
-struct _RandomBuffers{U,N}
+struct _RandomBuffers{U,N,F}
     uniform::U
     normal::N
+    failure_scratch::F
 end
 
 struct _DeviceFailureRecord{A}
     storage::A
+end
+
+struct _NoNativeFailureScratch end
+
+struct _NativeFailureScratch{R,F}
+    record::R
+    target_failures::F
 end
 
 struct _NoNativeTargetFailures end
@@ -99,8 +107,12 @@ function _allocate_random_buffers(device, proposal, nsamples)
     prototype = device(Vector{T}(undef, 0))
     uniform = similar(prototype, T, 0)
     normal = similar(prototype, T, _native_fused_dimension(proposal) * nsamples)
-    return _RandomBuffers(uniform, normal)
+    failure_scratch = _allocate_native_failure_scratch(normal, nsamples)
+    return _RandomBuffers(uniform, normal, failure_scratch)
 end
+
+_native_failure_scratch(::_NoRandomBuffers) = _NoNativeFailureScratch()
+_native_failure_scratch(buffers::_RandomBuffers) = buffers.failure_scratch
 
 function _fill_random_buffers!(rng, buffers::_RandomBuffers)
     isempty(buffers.uniform) || Random.rand!(rng, buffers.uniform)
@@ -138,12 +150,14 @@ function _importance_sample!(sampler, execution::_KernelExecution)
     end
     log_type = _resolve_native_logweight_type(target, base, typeof(binding_sample))
     logweights = similar(normal_buffer, log_type, nsamples)
-    failure_record = _allocate_device_failure_record(normal_buffer)
+    failure_scratch = sampler.random_buffers.failure_scratch
+    failure_record = failure_scratch.record
+    target_failures = failure_scratch.target_failures
     target_evaluator, target_failures = _native_target_evaluator(
         KernelAbstractions.get_backend(normal_buffer),
         target,
         log_type,
-        nsamples,
+        target_failures,
     )
     _launch_native_fused!(
         samples,
@@ -164,14 +178,18 @@ function _native_target_evaluator(
     ::KernelAbstractions.CPU,
     target,
     ::Type{L},
-    nsamples,
+    failures::Vector{Union{Nothing,SamplerExecutionError}},
 ) where {L}
-    failures = Vector{Union{Nothing,SamplerExecutionError}}(nothing, nsamples)
     return _NativeCPUTarget{L,typeof(target),typeof(failures)}(target, failures), failures
 end
 
-function _native_target_evaluator(backend, target, ::Type{L}, nsamples) where {L}
-    return _NativeDeviceTarget{L,typeof(target)}(target), _NoNativeTargetFailures()
+function _native_target_evaluator(
+    backend,
+    target,
+    ::Type{L},
+    failures::_NoNativeTargetFailures,
+) where {L}
+    return _NativeDeviceTarget{L,typeof(target)}(target), failures
 end
 
 function _preflight_native_kernel_target(
@@ -281,6 +299,36 @@ function _allocate_device_failure_record(prototype)
     storage = similar(prototype, UInt64, 2)
     fill!(storage, zero(UInt64))
     return _DeviceFailureRecord(storage)
+end
+
+function _allocate_native_failure_scratch(normal_buffer, nsamples)
+    backend = KernelAbstractions.get_backend(normal_buffer)
+    target_failures = _allocate_native_target_failures(backend, nsamples)
+    storage = similar(normal_buffer, UInt64, 2)
+    record = _DeviceFailureRecord(storage)
+    return _NativeFailureScratch(record, target_failures)
+end
+
+_allocate_native_target_failures(::KernelAbstractions.CPU, nsamples) =
+    Vector{Union{Nothing,SamplerExecutionError}}(nothing, nsamples)
+_allocate_native_target_failures(backend, nsamples) = _NoNativeTargetFailures()
+
+Base.@noinline _reset_native_failure_scratch!(::_NoNativeFailureScratch)::Nothing =
+    nothing
+
+Base.@noinline function _reset_native_failure_scratch!(
+    scratch::_NativeFailureScratch,
+)::Nothing
+    fill!(scratch.record.storage, zero(UInt64))
+    _reset_native_target_failures!(scratch.target_failures)
+    return nothing
+end
+
+_reset_native_target_failures!(::_NoNativeTargetFailures) = nothing
+
+function _reset_native_target_failures!(failures)
+    fill!(failures, nothing)
+    return nothing
 end
 
 @inline function _record_native_failure!(

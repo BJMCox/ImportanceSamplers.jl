@@ -60,6 +60,15 @@ function (::NativePhaseOrderTarget)(sample::Float64)::Float64
     return isfinite(sample) ? 0.0 : -Inf
 end
 
+mutable struct NativeResetTarget
+    fail::Bool
+end
+
+function (target::NativeResetTarget)(sample::Float64)::Float64
+    target.fail && sample == 1.0 && throw(NativeTargetFailure(sample))
+    return -abs2(sample)
+end
+
 mutable struct PrefilledNormalRNG{T} <: Random.AbstractRNG
     values::Vector{T}
     index::Int
@@ -490,9 +499,135 @@ end
     @test replay.logweights == first_result.logweights
 end
 
+@testset "native failure scratch is reused and results stay fresh" begin
+    for nsamples in (1_000, 100_000)
+        algorithm = ImportanceSampling(
+            SphericalGaussian(0.25, 1.5);
+            nsamples=nsamples,
+        )
+        sampler = prepare_sampler(
+            Random.Xoshiro(0x9150 + nsamples),
+            FusedQuadraticTarget(0.75),
+            algorithm;
+            threaded=false,
+        )
+        scratch = getfield(getfield(sampler, :random_buffers), :failure_scratch)
+        failure_storage = getfield(getfield(scratch, :record), :storage)
+        target_failures = getfield(scratch, :target_failures)
+
+        first_result = @inferred importance_sample!(sampler)
+        second_result = @inferred importance_sample!(sampler)
+
+        @test getfield(getfield(sampler, :random_buffers), :failure_scratch) ===
+              scratch
+        @test getfield(getfield(scratch, :record), :storage) === failure_storage
+        @test getfield(scratch, :target_failures) === target_failures
+        @test length(target_failures) == nsamples
+        @test first_result.samples !== second_result.samples
+        @test first_result.logweights !== second_result.logweights
+        @test first_result.diagnostics.transfers !==
+              second_result.diagnostics.transfers
+        @test first_result.provenance == second_result.provenance == NamedTuple()
+    end
+end
+
+@testset "native failure scratch resets after failed execution" begin
+    nsamples = 3
+    target = NativeResetTarget(true)
+    sampler = prepare_sampler(
+        PrefilledNormalRNG([0.0, 1.0, 2.0, 0.0, 1.0, 2.0], 0),
+        target,
+        ImportanceSampling(SphericalGaussian(0.0, 1.0); nsamples=nsamples);
+        threaded=false,
+    )
+    scratch = getfield(getfield(sampler, :random_buffers), :failure_scratch)
+    failure_storage = getfield(getfield(scratch, :record), :storage)
+    target_failures = getfield(scratch, :target_failures)
+
+    failure = _caught_kernel_execution_error() do
+        importance_sample!(sampler)
+    end
+    @test failure isa SamplerExecutionError
+    @test (failure.phase, failure.sample_index) == (:target, 2)
+    @test failure.captured.ex isa NativeTargetFailure
+    @test count(!isnothing, target_failures) == 1
+    @test target_failures[2] === failure
+
+    target.fail = false
+    result = @inferred importance_sample!(sampler)
+    @test length(result) == nsamples
+    @test getfield(getfield(sampler, :random_buffers), :failure_scratch) === scratch
+    @test getfield(getfield(scratch, :record), :storage) === failure_storage
+    @test getfield(scratch, :target_failures) === target_failures
+    @test all(isnothing, target_failures)
+    @test failure_storage == zeros(UInt64, 2)
+
+    transform_sampler = prepare_sampler(
+        PrefilledNormalRNG([Inf, 0.0], 0),
+        FusedConstantTarget{Float64}(),
+        ImportanceSampling(
+            TransformedProposal(
+                SphericalGaussian(0.0, 1.0),
+                IdentityTransform(),
+            );
+            nsamples=1,
+        );
+        threaded=false,
+    )
+    transform_scratch = getfield(
+        getfield(transform_sampler, :random_buffers),
+        :failure_scratch,
+    )
+    transform_storage = getfield(getfield(transform_scratch, :record), :storage)
+    transform_failure = _caught_kernel_execution_error() do
+        importance_sample!(transform_sampler)
+    end
+    @test transform_failure isa SamplerExecutionError
+    @test (transform_failure.phase, transform_failure.sample_index) ==
+          (:proposal_draw, 1)
+    @test transform_failure.captured.ex isa InvalidTransformError
+    @test transform_storage[1] == 1
+    @test transform_storage[2] & UInt64(0xffff) == UInt64(0x0001)
+
+    transform_result = @inferred importance_sample!(transform_sampler)
+    @test length(transform_result) == 1
+    @test transform_storage == zeros(UInt64, 2)
+end
+
+@testset "native serial and threaded prepared execution remain equivalent" begin
+    algorithm = ImportanceSampling(
+        DiagonalGaussian([0.25, -0.5], [0.5, 2.0]);
+        nsamples=1_000,
+    )
+    serial = prepare_sampler(
+        Random.Xoshiro(0x9151),
+        FusedVectorTarget(0.75),
+        algorithm;
+        threaded=false,
+    )
+    threaded = prepare_sampler(
+        Random.Xoshiro(0x9151),
+        FusedVectorTarget(0.75),
+        algorithm;
+        threaded=true,
+    )
+
+    serial_result = @inferred importance_sample!(serial)
+    threaded_result = @inferred importance_sample!(threaded)
+    @test serial_result.samples == threaded_result.samples
+    @test serial_result.logweights == threaded_result.logweights
+    @test serial_result.diagnostics.execution === :serial
+    @test threaded_result.diagnostics.execution ===
+          (Threads.nthreads(:default) > 1 ? :threaded : :serial)
+end
+
 @testset "random buffers use the standard bulk fill APIs" begin
     rng = BulkFillRecorder(Symbol[])
-    buffers = ImportanceSamplers._RandomBuffers(zeros(8), zeros(8))
+    buffers = ImportanceSamplers._RandomBuffers(
+        zeros(8),
+        zeros(8),
+        ImportanceSamplers._NoNativeFailureScratch(),
+    )
 
     @test ImportanceSamplers._fill_random_buffers!(rng, buffers) === buffers
     @test rng.calls == [:uniform, :normal]

@@ -414,6 +414,67 @@ function validate_public_rng_ownership_and_replay(device)
     return nothing
 end
 
+function validate_failure_scratch_reuse_and_reset(device)
+    T = Float32
+    proposal = TransformedProposal(
+        DiagonalGaussian(T[0.25], T[1]),
+        IdentityTransform(),
+    )
+    prepared = prepare_sampler(
+        Xoshiro(VALIDATION_SEED + UInt64(0x28)),
+        zero_logtarget,
+        ImportanceSampling(proposal; nsamples=FAILURE_SAMPLES);
+        threaded=true,
+    ) |> device
+    scratch = getfield(getfield(prepared, :random_buffers), :failure_scratch)
+    failure_storage = getfield(getfield(scratch, :record), :storage)
+    prepared_scale = getfield(
+        getfield(getfield(prepared, :algorithm), :proposal).base.scale,
+        :scales,
+    )
+
+    fill!(prepared_scale, T(Inf))
+    failure = try
+        importance_sample!(prepared)
+        nothing
+    catch error
+        error
+    end
+    @test failure isa SamplerExecutionError
+    @test failure.phase === :proposal_draw
+    failure_snapshot =
+        ImportanceSamplers._device_failure_snapshot(getfield(scratch, :record))
+    @test failure_snapshot.failure.count == FAILURE_SAMPLES
+    @test failure_snapshot.failure.first_logical_index == 1
+    @test failure_snapshot.failure.first_block == 1
+    @test failure_snapshot.failure.reason_bits == UInt16(0x0001)
+    @test failure_snapshot.transfers == (count=1, bytes=2 * sizeof(UInt64))
+
+    fill!(prepared_scale, one(T))
+    first_result = importance_sample!(prepared)
+    @test getfield(getfield(prepared, :random_buffers), :failure_scratch) ===
+          scratch
+    @test getfield(getfield(scratch, :record), :storage) === failure_storage
+    @test Array(failure_storage) == zeros(UInt64, 2)
+    @test (
+        first_result.diagnostics.transfers.count,
+        first_result.diagnostics.transfers.bytes,
+    ) == (1, 2 * sizeof(UInt64))
+
+    second_result = importance_sample!(prepared)
+    @test getfield(getfield(scratch, :record), :storage) === failure_storage
+    @test Array(failure_storage) == zeros(UInt64, 2)
+    @test (
+        second_result.diagnostics.transfers.count,
+        second_result.diagnostics.transfers.bytes,
+    ) == (1, 2 * sizeof(UInt64))
+    @test first_result.samples !== second_result.samples
+    @test first_result.logweights !== second_result.logweights
+    @test first_result.diagnostics.transfers !==
+          second_result.diagnostics.transfers
+    return nothing
+end
+
 function validate_callable_and_view_transfers(device, ::Type{T}) where {T}
     target = AdaptableCUDAFunction(T[0.25])
     prepared = prepare_sampler(
@@ -521,6 +582,7 @@ function main()
                 validate_callable_and_view_transfers(device, T)
             end
             validate_public_rng_ownership_and_replay(device)
+            validate_failure_scratch_reuse_and_reset(device)
         end
     end
     return environment_record()
