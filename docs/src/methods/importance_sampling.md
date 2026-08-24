@@ -152,6 +152,13 @@ concentration before trusting posterior summaries. More samples do not repair
 a proposal that almost never reaches the posterior; use a proposal adapted to
 the posterior geometry when collapse is material.
 
+## Transformed and product proposals
+
+[`TransformedProposal`](@ref) applies a normalized change of variables, while
+[`ProductProposal`](@ref) combines independent named blocks on CPU. See
+[Transforms](@ref) for the scalar, structured, and simplex contracts and
+[Accelerators](@ref) for the narrower CUDA-supported layout.
+
 ## Target contract
 
 A context-free target has one argument:
@@ -203,7 +210,7 @@ repair the estimator.
 Target and proposal densities must also use the same reference measure. For
 example, do not subtract a density with respect to Lebesgue measure from a
 density with respect to a transformed coordinate measure unless the required
-Jacobian is already included. This first slice has no transform API.
+Jacobian is already included.
 
 At every generated sample, proposal log density may be finite or `+Inf`, but
 not `NaN` or `-Inf`. A generating proposal assigning itself zero density is an
@@ -252,6 +259,8 @@ Ranges, integer index vectors, and Boolean masks return a
 [`WeightedSampleView`](@ref). A view supports aligned iteration and
 [`normalized_weights`](@ref), but not [`lognormalizer`](@ref): an arbitrary
 subset is not the complete estimator that produced the original normalizer.
+Apply an MLDataDevices device directly to a view to create an independent
+aligned copy, including an explicit CPU copy for scalar iteration.
 
 `normalized_weights(result)` derives a new same-device array that sums to one.
 The source of truth remains `result.logweights`. Results own their arrays, so a
@@ -289,6 +298,39 @@ single-owner sampler: do not draw from it elsewhere while relying on replay.
 Repeated results are separate, noncumulative estimators and own separate
 arrays.
 
+Preparation always returns CPU state. Before its first execution, apply an
+explicit MLDataDevices device to transfer the complete prepared sampler:
+
+```julia
+device = MLDataDevices.cpu_device()
+transferred = device(sampler)
+# Equivalent: transferred = sampler |> device
+```
+
+Transfer returns a distinct sampler. Its RNG, explicit context `p`, callable
+target structs, proposal state, and numerical arrays are independent of the
+source. Ordinary functions remain the same callable object; pass device data
+through `p` instead of capturing host arrays in a closure. The source remains
+valid. A named callable struct that subtypes `Function` is transferred only
+when it supplies an explicit standard Adapt rule; the generic compiler-closure
+reconstruction rule is never used. RNG state is cloned with the RNG's standard
+`copy` operation. An RNG
+whose copy is unavailable or aliases the source is rejected with
+[`SamplerDeviceError`](@ref). Callable target structs that contain reachable
+opaque closures are also rejected before transfer rather than allowing the
+standard traversal to inspect or reconstruct their captures. Once an execution
+has begun, later transfer throws [`SamplerAlreadyExecutedError`](@ref),
+including after a failed run.
+
+An accelerator destination is deliberately one-hop state. Only a CPU-origin
+prepared sampler can create an accelerator destination; applying any device to
+that destination fails as `:prepared_migration_unsupported`, even before its
+first execution. The original CPU source remains valid and may create another
+independent destination. Custom context or callable structs with array fields
+must register standard Adapt support for the accelerator kernel argument
+conversion; named tuples already do so. Unsupported representations fail at
+transfer as `:kernel_argument_unsupported` without advancing the source RNG.
+
 A prepared sampler is mutable and non-reentrant. Do not call
 `importance_sample!` concurrently on the same handle; prepare separate
 samplers with separate RNGs. Re-entry throws [`SamplerBusyError`](@ref). A
@@ -303,10 +345,12 @@ one-shot call or at preparation for an explicitly serial run:
 sampler = prepare_sampler(rng, logtarget, algorithm; threaded=false)
 ```
 
-The choice is bound into a prepared sampler and cannot be changed per run. If
-Julia has only one default thread, `threaded=true` falls back to serial
-execution. The result diagnostic distinguishes the requested policy
-(`diagnostics.threaded`) from the actual mode (`diagnostics.execution`).
+The choice is bound into a prepared sampler and cannot be changed per run. On
+CPU, if Julia has only one default thread, `threaded=true` falls back to serial
+execution. Accelerator execution uses its backend-parallel launch policy
+regardless of the host thread count. The result diagnostic distinguishes the
+requested policy (`diagnostics.threaded`) from the actual mode
+(`diagnostics.execution`).
 
 All proposal draws happen on the coordinator before worker tasks start.
 Threaded phases only evaluate the scalar target and proposal density over
@@ -314,19 +358,16 @@ already-drawn samples. Therefore those callables must be pure, deterministic,
 thread-safe, and free of hidden mutable scratch state. Worker tasks never draw
 from the prepared RNG.
 
-## CPU capability and future accelerator work
+## Devices
 
-This release supports `MLDataDevices.CPUDevice` only, with `Float32` and
-`Float64` log densities. Supplying another device fails during preparation; the
-package never silently transfers samples back to CPU.
-
-## Future accelerator work
-
-GPU execution is a future slice requiring native packed proposal kernels,
-device-resident RNG and result storage, scalar-indexing-disabled tests, and
-validation on real hardware. No CUDA, AMDGPU, Metal, or oneAPI support is
-implemented or promised by this CPU release. Return to
-[CPU capability and future accelerator work](@ref) for the current boundary.
+Preparation has no `device=` keyword and the one-shot form starts on CPU.
+Before first execution, apply an MLDataDevices device to the complete prepared
+sampler. CPU accepts generic and native proposals. CUDA accepts the documented
+native subset with a device-compatible target and `threaded=true`; AMDGPU and
+Metal are unclaimed. See [Accelerators](@ref) for the complete transfer example,
+public preserving-device construction, resident-result rules, and generated
+capability matrix. An accelerator whose public scalar policy is `Missing` is
+rejected as `:scalar_policy_unspecified` before the source RNG advances.
 
 ## Troubleshooting
 
@@ -345,8 +386,11 @@ target is finite.
 zero at every draw. The raw result remains inspectable, but normalized
 summaries are undefined.
 
-**Unsupported device.** Select the default CPU device. There is no host
-fallback inside an accelerator request; see [Future accelerator work](@ref).
+**Unsupported device.** Apply `cpu_device()` to the CPU-origin prepared sampler
+before first execution when an independent CPU copy is wanted. Accelerator
+destinations cannot be transferred again. CUDA requires the native proposal
+path, `threaded=true`, a functional backend, and a device-compatible target.
+There is no host fallback. See [Accelerators](@ref).
 
 **Unstable return types or shapes.** Make every proposal draw return the same
 scalar type, vector length, named-tuple keys, and numeric leaf types. Make every
@@ -363,8 +407,8 @@ lock or concurrent top-level execution mode.
 
 ## Analytic validation and local performance
 
-The [runnable analytic validation](@ref "Runnable analytic validation") at
-`validation/reproducers/plain_is.jl` labels and checks two analytic identities:
+The runnable `validation/reproducers/plain_is.jl` labels and checks two
+analytic identities:
 proposal equal to normalized target, and a Gaussian weighted-mean and
 normalizer identity. It records the fixed seed, Julia and dependency versions,
 scalar type, budgets, tolerances, rationale, and command, and exits with an

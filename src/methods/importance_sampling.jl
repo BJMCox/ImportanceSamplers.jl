@@ -16,7 +16,8 @@ Configure plain, single-proposal importance sampling.
 `proposal` must implement `rand(rng, proposal)` and
 `DensityInterface.logdensityof(proposal, sample)` for the same normalized
 measure. `nsamples` must be a positive `Int` and is the exact number of samples
-returned by every run.
+returned by every run. Generic proposals execute on CPU; the native Gaussian
+and transform subset also supports prepared CUDA execution.
 """
 struct ImportanceSampling{P} <: AbstractImportanceSampler
     proposal::P
@@ -41,10 +42,75 @@ function Base.showerror(io::IO, ::SamplerBusyError)
 end
 
 """
+    SamplerAlreadyExecutedError
+
+Exception thrown when device transfer is requested after a prepared sampler's
+first execution has begun. Device placement is fixed for the lifetime of an
+executed prepared sampler.
+"""
+struct SamplerAlreadyExecutedError <: Exception end
+
+function Base.showerror(io::IO, ::SamplerAlreadyExecutedError)
+    print(io, "a prepared sampler cannot be transferred after execution has begun")
+end
+
+"""
+    SamplerDeviceError
+
+Exception thrown when a requested device cannot execute a prepared sampler.
+The `reason` field identifies the rejected capability, such as an unavailable
+backend, unspecified scalar policy, opaque target closure, unsupported proposal,
+or missing device RNG.
+"""
+struct SamplerDeviceError{D} <: Exception
+    device::D
+    reason::Symbol
+end
+
+function Base.showerror(io::IO, error::SamplerDeviceError)
+    message = if error.reason === :serial_accelerator
+        "threaded=false has no accelerator execution contract"
+    elseif error.reason === :opaque_host_closure
+        "an opaque target closure reachable through target state cannot be " *
+        "transferred without inspecting or reconstructing its captures; " *
+        "pass numerical state through p"
+    elseif error.reason === :backend_unavailable
+        "the requested device backend is unavailable or nonfunctional"
+    elseif error.reason === :accelerator_rng_unavailable
+        "accelerator random-buffer support is not available"
+    elseif error.reason === :device_residency_mismatch
+        "prepared state is not resident on the requested device"
+    elseif error.reason === :scalar_policy_unspecified
+        "the accelerator scalar policy is unspecified; construct a preserving " *
+        "device whose eltype policy is Nothing, Float32, or Float64"
+    elseif error.reason === :generic_proposal_cpu_only
+        "generic proposals are CPU-only"
+    elseif error.reason === :product_proposal_cpu_only
+        "ProductProposal is CPU-only"
+    elseif error.reason === :kernel_argument_unsupported
+        "the target or context does not have a supported accelerator kernel " *
+        "argument representation"
+    elseif error.reason === :prepared_migration_unsupported
+        "accelerator-resident prepared samplers cannot be transferred"
+    elseif error.reason === :rng_not_cloneable
+        "the prepared RNG does not provide an independent copy"
+    else
+        "the requested device is unsupported"
+    end
+    print(
+        io,
+        "prepared-sampler device transfer failed for ",
+        typeof(error.device),
+        ": ",
+        message,
+    )
+end
+
+"""
     SamplerExecutionError
 
 Exception wrapping a failure from one logical sample during proposal drawing,
-target evaluation, or proposal-density evaluation.
+target evaluation, proposal-density evaluation, or log-weight construction.
 
 The `phase` and `sample_index` fields locate the failure. `captured` preserves
 the original exception and backtrace. A failed run never returns a partial
@@ -77,18 +143,20 @@ struct _ContextualPreparedTarget{T,P}
     context::P
 end
 
-mutable struct _PreparedImportanceSampler{R,T,A,D}
+mutable struct _PreparedImportanceSampler{R,B,T,A,D}
     rng::R
+    random_buffers::B
     target::T
     algorithm::A
     device::D
     threaded::Bool
     running::Bool
+    executed::Bool
 end
 
 """
-    prepare_sampler(rng, logtarget, algorithm; device=CPUDevice(), threaded=true)
-    prepare_sampler(rng, logtarget, p, algorithm; device=CPUDevice(), threaded=true)
+    prepare_sampler(rng, logtarget, algorithm; threaded=true)
+    prepare_sampler(rng, logtarget, p, algorithm; threaded=true)
 
 Bind a target, optional context `p`, algorithm, CPU execution policy, and RNG
 into a reusable prepared sampler.
@@ -103,19 +171,28 @@ owned by the sampler after preparation. A prepared sampler is mutable and
 non-reentrant. Repeated calls to [`importance_sample!`](@ref) create separate,
 noncumulative results that own their arrays.
 
-Only `MLDataDevices.CPUDevice` is supported. Set `threaded=false` for serial
-evaluation. With `threaded=true`, a one-thread Julia process falls back to the
-serial path.
+Preparation always produces a CPU sampler. Apply an explicit
+`MLDataDevices.AbstractDevice` value to the complete prepared sampler before
+its first execution to request transfer. Transfer recursively moves proposal,
+device-adaptable callable state, and every numerical array in `p`; opaque
+closure captures cannot be moved reliably and are rejected for accelerator
+execution. An accelerator whose public `eltype(device)` is `Missing` is rejected
+as `:scalar_policy_unspecified`; construct a preserving device with
+an explicit non-`Missing` scalar policy. The accelerator guide shows CUDA
+construction for the current or a selected physical device without auto-selection.
+Native CUDA execution requires `threaded=true` and keeps returned arrays on the
+device. Set `threaded=false` for serial CPU evaluation. On CPU,
+`threaded=true` falls back to serial execution when Julia has one default
+thread; accelerator launch policy does not depend on host thread count.
 """
 function prepare_sampler(
     rng::Random.AbstractRNG,
     logtarget,
     algorithm::ImportanceSampling;
-    device=MLDataDevices.CPUDevice(),
     threaded=true,
 )
     target = _ContextFreePreparedTarget(logtarget)
-    return _prepare_importance_sampler(rng, target, algorithm, device, threaded)
+    return _prepare_importance_sampler(rng, target, algorithm, threaded)
 end
 
 function prepare_sampler(
@@ -123,40 +200,173 @@ function prepare_sampler(
     logtarget,
     context,
     algorithm::ImportanceSampling;
-    device=MLDataDevices.CPUDevice(),
     threaded=true,
 )
     target = _ContextualPreparedTarget(logtarget, context)
-    return _prepare_importance_sampler(rng, target, algorithm, device, threaded)
+    return _prepare_importance_sampler(rng, target, algorithm, threaded)
 end
 
-function _prepare_importance_sampler(rng, target, algorithm, device, threaded)
-    device isa MLDataDevices.CPUDevice || throw(
-        ArgumentError(
-            "plain importance sampling currently supports only MLDataDevices.CPUDevice",
-        ),
-    )
+function _prepare_importance_sampler(rng, target, algorithm, threaded)
     threaded isa Bool || throw(ArgumentError("threaded must be Bool"))
     prepared_target = _resolve_prepared_target(target, algorithm.proposal)
+    device = MLDataDevices.CPUDevice()
+    random_buffers =
+        _allocate_random_buffers(device, algorithm.proposal, algorithm.nsamples)
     return _PreparedImportanceSampler(
         rng,
+        random_buffers,
         prepared_target,
         algorithm,
         device,
         threaded,
         false,
+        false,
     )
 end
 
+function _copy_to_device(device, value)
+    return device(deepcopy(value))
+end
+
+function _copy_algorithm(device, algorithm::ImportanceSampling)
+    proposal = _copy_to_device(device, algorithm.proposal)
+    return ImportanceSampling(proposal, algorithm.nsamples)
+end
+
+function _clone_rng(device, rng::Random.AbstractRNG)
+    cloned = try
+        copy(rng)
+    catch
+        throw(SamplerDeviceError(device, :rng_not_cloneable))
+    end
+    cloned isa Random.AbstractRNG && cloned !== rng || throw(
+        SamplerDeviceError(device, :rng_not_cloneable),
+    )
+    return cloned
+end
+
+_backend_functional(device) = MLDataDevices.functional(device)
+_with_backend_device(f, device) = f()
+_backend_state_resident(device, state) = true
+
+function _validate_backend_state(device, state)
+    _backend_state_resident(device, state) || throw(
+        SamplerDeviceError(device, :device_residency_mismatch),
+    )
+    return nothing
+end
+
+function _transfer_prepared_sampler(
+    device::MLDataDevices.AbstractCPUDevice,
+    sampler::_PreparedImportanceSampler,
+)
+    sampler.device isa MLDataDevices.AbstractAcceleratorDevice && throw(
+        SamplerDeviceError(device, :prepared_migration_unsupported),
+    )
+    sampler.executed && throw(SamplerAlreadyExecutedError())
+    _backend_functional(device) || throw(
+        SamplerDeviceError(device, :backend_unavailable),
+    )
+    _target_transfer_rewrites_opaque_closure(sampler.target) && throw(
+        SamplerDeviceError(device, :opaque_host_closure),
+    )
+    algorithm = _copy_algorithm(device, sampler.algorithm)
+    random_buffers =
+        _allocate_random_buffers(device, algorithm.proposal, algorithm.nsamples)
+    return _PreparedImportanceSampler(
+        _clone_rng(device, sampler.rng),
+        random_buffers,
+        _transfer_prepared_target(device, sampler.target),
+        algorithm,
+        device,
+        sampler.threaded,
+        false,
+        false,
+    )
+end
+
+function _transfer_prepared_sampler(
+    device::MLDataDevices.AbstractAcceleratorDevice,
+    sampler::_PreparedImportanceSampler,
+)
+    sampler.device isa MLDataDevices.AbstractAcceleratorDevice && throw(
+        SamplerDeviceError(device, :prepared_migration_unsupported),
+    )
+    if applicable(Base.eltype, device) && Base.eltype(device) === Missing
+        throw(SamplerDeviceError(device, :scalar_policy_unspecified))
+    end
+    sampler.executed && throw(SamplerAlreadyExecutedError())
+    sampler.threaded || throw(SamplerDeviceError(device, :serial_accelerator))
+    _target_has_opaque_host_closure(sampler.target, device) && throw(
+        SamplerDeviceError(device, :opaque_host_closure),
+    )
+    _backend_functional(device) || throw(
+        SamplerDeviceError(device, :backend_unavailable),
+    )
+    proposal_limit = _accelerator_proposal_limit(sampler.algorithm.proposal)
+    isnothing(proposal_limit) || throw(SamplerDeviceError(device, proposal_limit))
+    return _with_backend_device(device) do
+        algorithm = _copy_algorithm(device, sampler.algorithm)
+        target = _transfer_prepared_target(device, sampler.target)
+        random_buffers = _allocate_random_buffers(
+            device,
+            algorithm.proposal,
+            algorithm.nsamples,
+        )
+        random_buffers isa _RandomBuffers || throw(
+            SamplerDeviceError(device, :accelerator_rng_unavailable),
+        )
+        _validate_backend_state(device, (algorithm, target, random_buffers))
+        _preflight_native_kernel_target(
+            device,
+            target,
+            algorithm.proposal,
+            random_buffers,
+        )
+        _owned_backend_rng(device, zero(UInt64))
+        seed = try
+            Random.rand(sampler.rng, UInt64)
+        catch
+            throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
+        end
+        return _PreparedImportanceSampler(
+            _owned_backend_rng(device, seed),
+            random_buffers,
+            target,
+            algorithm,
+            device,
+            sampler.threaded,
+            false,
+            false,
+        )
+    end
+end
+
+function _transfer_prepared_sampler(
+    device::MLDataDevices.AbstractDevice,
+    sampler::_PreparedImportanceSampler,
+)
+    sampler.device isa MLDataDevices.AbstractAcceleratorDevice && throw(
+        SamplerDeviceError(device, :prepared_migration_unsupported),
+    )
+    sampler.executed && throw(SamplerAlreadyExecutedError())
+    throw(SamplerDeviceError(device, :unsupported_device))
+end
+
+function (device::MLDataDevices.AbstractDevice)(sampler::_PreparedImportanceSampler)
+    return _transfer_prepared_sampler(device, sampler)
+end
+
 """
-    importance_sample(rng, logtarget, algorithm; device=CPUDevice(), threaded=true)
-    importance_sample(rng, logtarget, p, algorithm; device=CPUDevice(), threaded=true)
+    importance_sample(rng, logtarget, algorithm; threaded=true)
+    importance_sample(rng, logtarget, p, algorithm; threaded=true)
 
 Run one complete plain-importance-sampling estimator.
 
 This is the one-shot form of [`prepare_sampler`](@ref) followed by
 [`importance_sample!`](@ref). `logtarget` returns a log density, not a linear
-density. The contextual overload calls `logtarget(sample, p)`.
+density. The contextual overload calls `logtarget(sample, p)`. The one-shot
+form executes on CPU; apply a device to a prepared sampler for CUDA execution.
 
 The result stores canonical raw log weights
 `logtarget(sample) - logdensityof(proposal, sample)`. Use
@@ -167,14 +377,12 @@ function importance_sample(
     rng::Random.AbstractRNG,
     logtarget,
     algorithm::ImportanceSampling;
-    device=MLDataDevices.CPUDevice(),
     threaded=true,
 )
     sampler = prepare_sampler(
         rng,
         logtarget,
         algorithm;
-        device=device,
         threaded=threaded,
     )
     return importance_sample!(sampler)
@@ -185,7 +393,6 @@ function importance_sample(
     logtarget,
     context,
     algorithm::ImportanceSampling;
-    device=MLDataDevices.CPUDevice(),
     threaded=true,
 )
     sampler = prepare_sampler(
@@ -193,7 +400,6 @@ function importance_sample(
         logtarget,
         context,
         algorithm;
-        device=device,
         threaded=threaded,
     )
     return importance_sample!(sampler)
@@ -205,23 +411,65 @@ end
 Execute one complete estimator run using a prepared sampler.
 
 The bang records that the sampler's RNG stream and running state are mutated.
+It also permanently fixes device placement when execution begins, whether the
+run succeeds or fails.
 Each returned [`WeightedSamples`](@ref) owns its storage and cannot be changed
-by later runs. Concurrent calls on the same sampler throw
-[`SamplerBusyError`](@ref); use separate prepared samplers and RNGs for
-concurrent top-level runs.
+by later runs. Concurrent use of one sampler is unsupported; use separate
+prepared samplers and RNGs. An entry that observes the sampler already busy,
+including recursive re-entry, throws [`SamplerBusyError`](@ref); this check does
+not synchronize simultaneous callers. CUDA results remain device-resident
+until an explicit transfer such as `result |> MLDataDevices.cpu_device()`.
 """
 function importance_sample!(sampler::_PreparedImportanceSampler)
     sampler.running && throw(SamplerBusyError())
+    sampler.executed = true
     sampler.running = true
     try
-        threaded = sampler.threaded && Threads.nthreads(:default) > 1
-        return _importance_sample_cpu!(sampler, threaded)
+        return _with_backend_device(sampler.device) do
+            _validate_backend_state(
+                sampler.device,
+                (
+                    sampler.algorithm,
+                    sampler.target,
+                    sampler.random_buffers,
+                    sampler.rng,
+                ),
+            )
+            _reset_native_failure_scratch!(
+                _native_failure_scratch(sampler.random_buffers),
+            )
+            threaded =
+                sampler.device isa MLDataDevices.AbstractAcceleratorDevice ||
+                sampler.threaded && Threads.nthreads(:default) > 1
+            return _importance_sample_cpu!(sampler, threaded)
+        end
     finally
         sampler.running = false
     end
 end
 
 function _importance_sample_cpu!(sampler, threaded)
+    execution = _sampling_execution(sampler.algorithm.proposal, threaded)
+    samples, logweights, transfers = _importance_sample!(sampler, execution)
+    diagnostics = (
+        method=:importance_sampling,
+        execution=_execution_name(execution),
+        threaded=sampler.threaded,
+        nsamples=sampler.algorithm.nsamples,
+        failures=0,
+        transfers=transfers,
+    )
+    if execution isa _KernelExecution
+        return _adopt_validated_weighted_samples(
+            samples,
+            logweights;
+            diagnostics=diagnostics,
+        )
+    end
+    return _adopt_weighted_samples(samples, logweights; diagnostics=diagnostics)
+end
+
+function _importance_sample_generic_cpu!(sampler, threaded)
     samples = _draw_prepared_batch(sampler)
     target = _bind_prepared_target(sampler.target, samples)
     log_type = _resolve_logweight_type(
@@ -244,15 +492,7 @@ function _importance_sample_cpu!(sampler, threaded)
             samples,
         )
     end
-    diagnostics = (
-        method=:importance_sampling,
-        execution=threaded ? :threaded : :serial,
-        threaded=sampler.threaded,
-        nsamples=sampler.algorithm.nsamples,
-        failures=0,
-        transfers=(count=0, bytes=0),
-    )
-    return _adopt_weighted_samples(samples, logweights; diagnostics=diagnostics)
+    return samples, logweights
 end
 
 function _evaluate_logweights_threaded(
@@ -408,7 +648,10 @@ function _bind_prepared_target(target, samples)
 end
 
 function _resolve_logweight_type(target, proposal, samples)
-    sample_type = typeof(_sample_at(samples, 1))
+    return _resolve_logweight_type(target, proposal, typeof(_sample_at(samples, 1)))
+end
+
+function _resolve_logweight_type(target, proposal, sample_type::Type)
     target_type = _capture_sampler_failure(:target, 1) do
         inferred = Base.promote_op(target, sample_type)
         _canonical_inferred_log_type(inferred, "target")
@@ -475,9 +718,27 @@ function _construct_logweights!(logweights::Vector{T}, target_logs::Vector{T}) w
         DimensionMismatch("target and proposal log arrays must be aligned"),
     )
     for sample_index in eachindex(logweights, target_logs)
-        logweights[sample_index] = target_logs[sample_index] - logweights[sample_index]
+        logweight, reason = _subtract_logweight(
+            target_logs[sample_index],
+            logweights[sample_index],
+        )
+        iszero(reason) || _throw_invalid_logweight(logweight, sample_index)
+        logweights[sample_index] = logweight
     end
     return logweights
+end
+
+@noinline function _throw_invalid_logweight(logweight, sample_index)
+    return _capture_sampler_failure(:logweight, sample_index) do
+        throw(DomainError(logweight, "derived log weight may not be NaN or +Inf"))
+    end
+end
+
+@inline function _subtract_logweight(target_log, proposal_log)
+    logweight = target_log - proposal_log
+    reason = (isnan(logweight) || logweight == Inf) ?
+             _NATIVE_LOGWEIGHT_INVALID : UInt16(0)
+    return logweight, reason
 end
 
 function _target_logdensity(target, sample, sample_index)

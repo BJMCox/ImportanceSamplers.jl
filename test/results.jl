@@ -20,7 +20,10 @@ end
     @test adopted.samples === samples
     @test adopted.logweights === logweights
     @test adopted.provenance === provenance
-    @test adopted.diagnostics === diagnostics
+    @test adopted.diagnostics.method === diagnostics.method
+    @test adopted.diagnostics.trace === diagnostics.trace
+    @test adopted.diagnostics.transfers.count == 0
+    @test adopted.diagnostics.transfers.bytes == 0
 
     public_result = WeightedSamples(
         samples,
@@ -33,6 +36,7 @@ end
     @test public_result.provenance !== provenance
     @test public_result.diagnostics !== diagnostics
     @test public_result.diagnostics.trace !== diagnostics.trace
+    @test public_result.diagnostics.transfers !== adopted.diagnostics.transfers
 
     @test_throws ArgumentError ImportanceSamplers._adopt_weighted_samples(
         [1.0],
@@ -54,7 +58,10 @@ end
     @test result.samples == [10.0, 20.0, 30.0]
     @test result.logweights == [-2.0, -1.0, 0.0]
     @test result.provenance == NamedTuple()
-    @test result.diagnostics == diagnostics
+    @test result.diagnostics.method === diagnostics.method
+    @test result.diagnostics.evaluations == diagnostics.evaluations
+    @test result.diagnostics.transfers.count == 0
+    @test result.diagnostics.transfers.bytes == 0
     @test result.samples !== source_samples
     @test result.logweights !== source_logweights
 

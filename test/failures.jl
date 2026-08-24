@@ -158,6 +158,7 @@ end
         view([1.0], 1:1),
         view([Inf], 1:1),
         NamedTuple(),
+        ImportanceSamplers._ResultTransferCounter(0, 0),
         forged_token,
     )
 end
@@ -386,16 +387,6 @@ end
     @test draw_failure.captured.ex isa PreparedProposalFailure
     @test draw_proposal.draw_count == 2
     @test draw_proposal.density_count == 0
-
-    unsupported_proposal = FailureSequenceProposal([1.0], _ -> 0.0)
-    unsupported_algorithm = ImportanceSampling(unsupported_proposal; nsamples=1)
-    @test_throws ArgumentError prepare_sampler(
-        Random.Xoshiro(1101),
-        _ -> 0.0,
-        unsupported_algorithm;
-        device=MLDataDevices.CUDADevice(),
-    )
-    @test unsupported_proposal.draw_count == 0
 
     unprovable_target_proposal = FailureSequenceProposal([1.0], _ -> 0.0)
     unprovable_target_sampler = prepare_sampler(

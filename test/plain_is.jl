@@ -83,57 +83,80 @@ IS._proposal_dimension(proposal::TestVectorProposal) = length(proposal.location)
     sample = IS._sample_at(sample_batch, 1)
 
     context_free = sample -> -sum(abs2, sample)
-    bound_context_free = IS._bind_target(context_free, proposal, sample_batch)
+    bound_context_free = IS._bind_prepared_target(
+        IS._prepare_target(context_free, proposal), sample_batch
+    )
     @test bound_context_free(sample) == -0.3125
 
     contextual = (sample, context) -> context.shift - sum(abs2, sample)
     context = (shift=2.0,)
-    bound_contextual = IS._bind_target(contextual, context, proposal, sample_batch)
+    bound_contextual = IS._bind_prepared_target(
+        IS._prepare_target(contextual, context, proposal), sample_batch
+    )
     @test bound_contextual(sample) == 1.6875
 
-    @test_throws ArgumentError IS._bind_target(
-        context_free, context, proposal, sample_batch
+    @test_throws SamplerExecutionError IS._bind_prepared_target(
+        IS._prepare_target(context_free, context, proposal), sample_batch
     )
 
-    @test_throws ArgumentError IS._bind_target(VectorOnlyTarget(), proposal, sample_batch)
-    @test_throws ArgumentError IS._bind_target(MatrixOnlyTarget(), proposal, sample_batch)
+    @test_throws SamplerExecutionError IS._bind_prepared_target(
+        IS._prepare_target(VectorOnlyTarget(), proposal), sample_batch
+    )
+    @test_throws SamplerExecutionError IS._bind_prepared_target(
+        IS._prepare_target(MatrixOnlyTarget(), proposal), sample_batch
+    )
 
     priority_target = PriorityTarget()
-    wrapped = IS._bind_target(LogTarget(priority_target), proposal, sample_batch)
+    wrapped = IS._bind_prepared_target(
+        IS._prepare_target(LogTarget(priority_target), proposal), sample_batch
+    )
     @test wrapped(sample) == 9.75
 
-    bound_ldp = IS._bind_target(priority_target, proposal, sample_batch)
+    bound_ldp = IS._bind_prepared_target(
+        IS._prepare_target(priority_target, proposal), sample_batch
+    )
     @test bound_ldp(sample) == 29.75
 
-    bound_density = IS._bind_target(DensityTarget(), proposal, sample_batch)
+    bound_density = IS._bind_prepared_target(
+        IS._prepare_target(DensityTarget(), proposal), sample_batch
+    )
     @test bound_density(sample) == 39.75
 
-    callable_density = IS._bind_target(
-        ThrowingCallableDensity(), proposal, sample_batch
+    callable_density = IS._bind_prepared_target(
+        IS._prepare_target(ThrowingCallableDensity(), proposal), sample_batch
     )
     @test callable_density(sample) == 49.75
 
-    throwing = IS._bind_target(
-        LogTarget(ThrowingCallableDensity()), proposal, sample_batch
+    throwing = IS._bind_prepared_target(
+        IS._prepare_target(LogTarget(ThrowingCallableDensity()), proposal), sample_batch
     )
     @test_throws TargetExecutionFailure throwing(sample)
 
-    @test_throws DimensionMismatch IS._bind_target(
-        WrongDimensionTarget(), proposal, sample_batch
+    @test_throws DimensionMismatch IS._bind_prepared_target(
+        IS._prepare_target(WrongDimensionTarget(), proposal), sample_batch
     )
+end
+
+function _draw_test_batch(rng, proposal, nsamples)
+    sampler = prepare_sampler(
+        rng,
+        identity,
+        ImportanceSampling(proposal; nsamples=nsamples);
+        threaded=false,
+    )
+    return IS._draw_prepared_batch(sampler)
 end
 
 @testset "generic batch storage" begin
     scalar_proposal = TestScalarProposal(1.0)
-    scalar_algorithm = ImportanceSampling(scalar_proposal; nsamples=5)
-    scalar_batch = IS._draw_batch(Random.Xoshiro(11), scalar_algorithm)
+    scalar_batch = _draw_test_batch(Random.Xoshiro(11), scalar_proposal, 5)
     @test scalar_batch isa Vector{Float64}
     @test scalar_proposal.draw_count[] == 5
     @test IS._sample_count(scalar_batch) == 5
     @test [IS._sample_at(scalar_batch, i) for i in 1:5] == scalar_proposal.history
 
     vector_proposal = TestVectorProposal(Float32[1, -1])
-    vector_batch = IS._draw_batch(Random.Xoshiro(22), vector_proposal, 4)
+    vector_batch = _draw_test_batch(Random.Xoshiro(22), vector_proposal, 4)
     @test vector_batch isa Matrix{Float32}
     @test size(vector_batch) == (2, 4)
     @test vector_proposal.draw_count[] == 4
@@ -141,11 +164,13 @@ end
     @test [copy(IS._sample_at(vector_batch, i)) for i in 1:4] == vector_proposal.history
 
     abstract_elements = TestAbstractElementVectorProposal()
-    @test_throws ArgumentError IS._draw_batch(Random.Xoshiro(23), abstract_elements, 2)
+    @test_throws SamplerExecutionError _draw_test_batch(
+        Random.Xoshiro(23), abstract_elements, 2
+    )
     @test abstract_elements.draw_count[] == 1
 
     named_proposal = TestNamedProposal(Float64)
-    named_batch = IS._draw_batch(Random.Xoshiro(33), named_proposal, 3)
+    named_batch = _draw_test_batch(Random.Xoshiro(33), named_proposal, 3)
     @test named_batch isa NamedTuple
     @test named_batch.location isa Vector{Float64}
     @test named_batch.state.position isa Matrix{Float64}
@@ -161,29 +186,37 @@ end
           [sample.state.scale for sample in named_proposal.history]
 
     leaf_mismatch = AlternatingLeafTypeProposal(Ref(0))
-    @test_throws ArgumentError IS._draw_batch(Random.Xoshiro(44), leaf_mismatch, 2)
+    @test_throws SamplerExecutionError _draw_test_batch(
+        Random.Xoshiro(44), leaf_mismatch, 2
+    )
     @test leaf_mismatch.draw_count[] == 2
 
     structure_mismatch = AlternatingStructureProposal(Ref(0))
-    @test_throws ArgumentError IS._draw_batch(Random.Xoshiro(55), structure_mismatch, 2)
+    @test_throws SamplerExecutionError _draw_test_batch(
+        Random.Xoshiro(55), structure_mismatch, 2
+    )
     @test structure_mismatch.draw_count[] == 2
 
     length_mismatch = TestChangingVectorLengthProposal()
-    @test_throws ArgumentError IS._draw_batch(Random.Xoshiro(66), length_mismatch, 2)
+    @test_throws SamplerExecutionError _draw_test_batch(
+        Random.Xoshiro(66), length_mismatch, 2
+    )
     @test length_mismatch.draw_count[] == 2
 
     empty_named = TestEmptyNamedProposal()
-    @test_throws ArgumentError IS._draw_batch(Random.Xoshiro(77), empty_named, 1)
+    @test_throws SamplerExecutionError _draw_test_batch(
+        Random.Xoshiro(77), empty_named, 1
+    )
     @test empty_named.draw_count[] == 1
 
     nested_empty_named = TestNestedEmptyNamedProposal()
-    @test_throws ArgumentError IS._draw_batch(
+    @test_throws SamplerExecutionError _draw_test_batch(
         Random.Xoshiro(88), nested_empty_named, 1
     )
     @test nested_empty_named.draw_count[] == 1
 
     reused_buffer = TestReusedVectorBufferProposal(zeros(2))
-    reused_batch = IS._draw_batch(Random.Xoshiro(99), reused_buffer, 3)
+    reused_batch = _draw_test_batch(Random.Xoshiro(99), reused_buffer, 3)
     @test reused_buffer.draw_count[] == 3
     @test [copy(IS._sample_at(reused_batch, i)) for i in 1:3] ==
           reused_buffer.history
@@ -249,14 +282,13 @@ end
     @test length(identity_result) == 8
     @test identity_result.logweights == zeros(Float64, 8)
     @test identity_result.logweights isa Vector{Float64}
-    @test identity_result.diagnostics == (
-        method=:importance_sampling,
-        execution=:serial,
-        threaded=false,
-        nsamples=8,
-        failures=0,
-        transfers=(count=0, bytes=0),
-    )
+    @test identity_result.diagnostics.method === :importance_sampling
+    @test identity_result.diagnostics.execution === :serial
+    @test identity_result.diagnostics.threaded === false
+    @test identity_result.diagnostics.nsamples == 8
+    @test identity_result.diagnostics.failures == 0
+    @test identity_result.diagnostics.transfers.count == 0
+    @test identity_result.diagnostics.transfers.bytes == 0
 
     @testset "preparation resolves known targets once" begin
         mismatched_proposal = TestVectorProposal(zeros(2))
@@ -380,10 +412,8 @@ end
     @test float32_result.logweights isa Vector{Float32}
 
     @testset "typed serial hot path inference" begin
-        inferred_float32_target = IS._bind_target(
-            identity,
-            float32_proposal,
-            Float32[1, 2],
+        inferred_float32_target = IS._bind_prepared_target(
+            IS._prepare_target(identity, float32_proposal), Float32[1, 2]
         )
         inferred_float32_weights = @inferred IS._evaluate_logweights(
             Float32,
@@ -397,10 +427,8 @@ end
             [1.0, 2.0],
             zeros(2),
         )
-        inferred_float64_target = IS._bind_target(
-            identity,
-            inference_float64_proposal,
-            [1.0, 2.0],
+        inferred_float64_target = IS._bind_prepared_target(
+            IS._prepare_target(identity, inference_float64_proposal), [1.0, 2.0]
         )
         inferred_float64_weights = @inferred IS._evaluate_logweights(
             Float64,
@@ -589,4 +617,26 @@ end
         threaded=false,
     )
     @test inferred_one_shot.logweights == zeros(4)
+end
+
+@testset "normalized positive transformed proposal through plain IS" begin
+    proposal = @inferred TransformedProposal(
+        SphericalGaussian(0.0, 1.0),
+        PositiveTransform(),
+    )
+    lognormal_target(x)::Float64 =
+        -0.5 * abs2(log(x)) - log(x) - 0.5 * log(2pi)
+    sampler = @inferred prepare_sampler(
+        Random.Xoshiro(0x7102),
+        lognormal_target,
+        ImportanceSampling(proposal; nsamples=64);
+        threaded=false,
+    )
+    result = @inferred importance_sample!(sampler)
+    @test maximum(abs, result.logweights) <= 4eps()
+    @test abs(lognormalizer(result)) <= 4eps()
+
+    logical_value = 1.25
+    DensityInterface.logdensityof(proposal, logical_value)
+    @test (@allocated DensityInterface.logdensityof(proposal, logical_value)) == 0
 end

@@ -1,139 +1,58 @@
 # ImportanceSamplers.jl
 
-`ImportanceSamplers.jl` provides a small, explicit CPU implementation of plain
-importance sampling. You supply a normalized proposal, an unnormalized target
-**log density**, an RNG, and an exact sample count. The result keeps the samples
-and the canonical raw log weights so that the estimator remains inspectable.
+ImportanceSamplers provides explicit plain importance sampling on CPU and a
+validated native CUDA path. Supply a normalized proposal, an RNG, and a target
+that returns an unnormalized **log density**. Results retain samples and the
+canonical raw log weights.
 
-## Five-minute quick start
-
-This complete example defines a normalized Gaussian proposal without
-`Distributions.jl`. The two required proposal operations are visible:
-`Random.rand` draws from the proposal, and
-`DensityInterface.logdensityof` evaluates the density of that same normalized
-measure.
+## Minimal CPU example
 
 ```jldoctest quickstart
-using DensityInterface
 using ImportanceSamplers
 using Random
 
-struct GaussianProposal{T<:AbstractFloat}
-    mean::T
-    scale::T
-end
+proposal = SphericalGaussian(0.0, 1.0)
+logtarget(x)::Float64 = -0.5 * abs2(x)
 
-function Random.rand(rng::Random.AbstractRNG, proposal::GaussianProposal{T}) where {T}
-    proposal.mean + proposal.scale * randn(rng, T)
-end
-
-function DensityInterface.logdensityof(proposal::GaussianProposal, x::Real)
-    z = (x - proposal.mean) / proposal.scale
-    -0.5 * abs2(z) - log(proposal.scale) - 0.5 * log(2pi)
-end
-
-proposal = GaussianProposal(0.0, 1.0)
-logtarget(x)::Float64 = DensityInterface.logdensityof(proposal, x)
-algorithm = ImportanceSampling(proposal; nsamples=1_000)
 result = importance_sample(
     Xoshiro(42),
     logtarget,
-    algorithm;
+    ImportanceSampling(proposal; nsamples=32);
     threaded=false,
 )
 
-(length(result), all(iszero, result.logweights), lognormalizer(result))
-
-# output
-
-(1000, true, 0.0)
-```
-
-The target above is normalized only to make the first result easy to check. A
-real target may be unnormalized. It must still return the **log** density; the
-sampler never applies `log` for you. `result.logweights` stores
-`logtarget(x) - logdensityof(proposal, x)`, not normalized probabilities. Call
-[`normalized_weights`](@ref) only when you need weights that sum to one.
-
-## A target with context
-
-Use `logtarget(x, p)` when data or constants belong in a separate concrete
-context. Pass that context between the target and algorithm arguments:
-
-```jldoctest quickstart
-context = (mean=0.5, scale=0.8)
-function contextual_target(x, p)::Float64
-    z = (x - p.mean) / p.scale
-    -0.5 * abs2(z) - log(p.scale) - 0.5 * log(2pi)
-end
-
-contextual_result = importance_sample(
-    Xoshiro(43),
-    contextual_target,
-    context,
-    ImportanceSampling(proposal; nsamples=256);
-    threaded=false,
+expected = 0.5 * log(2pi)
+(
+    length(result),
+    all(w -> isapprox(w, expected; atol=8eps()), result.logweights),
+    isapprox(lognormalizer(result), expected; atol=8eps()),
 )
 
-(length(contextual_result), contextual_result.diagnostics.execution)
-
 # output
 
-(256, :serial)
+(32, true, true)
 ```
 
-The context-free and contextual forms have identical estimator semantics. The
-proposal—not the context or the data—defines the sampled shape.
+The target omits the Gaussian normalizing constant, so every raw log weight and
+the estimated log normalizer equal that omitted constant. The sampler does not
+apply `log` to the target. Call [`normalized_weights`](@ref) only when you need
+weights that sum to one.
 
-## Choose the next page
+For data or constants, use `logtarget(sample, p)` and pass `p` between the
+target and algorithm arguments. The proposal alone determines sample shape.
 
-- Read [Plain importance sampling](@ref) for the mathematical contract,
-  prepared reuse, threading rules, result shapes, failure behavior, and
-  troubleshooting.
-- Run `validation/reproducers/plain_is.jl` for deterministic analytic
-  identities with recorded provenance.
-- Run `benchmark/plain_is.jl --smoke` for a fast benchmark wiring check, or
-  omit `--smoke` for the normal local run budget.
+## Where next
 
-## Checked capability
+- [Plain importance sampling](@ref) covers estimator semantics, generic CPU
+  proposals, prepared reuse, threading, results, and failures.
+- [Native proposals](@ref) explains the Gaussian scale and factor contracts.
+- [Transforms](@ref) covers constrained and structured parameters, including
+  the simplex reference measure.
+- [Accelerators](@ref) gives the complete CUDA example, transfer boundary,
+  exact support matrix, and runnable validation.
+- [Public API](@ref) lists every exported binding.
 
-This row is produced during the documentation build. The build constructs and
-runs both public preparation forms; it does not rely on a hand-maintained
-registry.
-
-```@eval
-Main.PLAIN_IS_CAPABILITY_TABLE
-```
-
-Only CPU execution is implemented today. See [Future accelerator work](@ref)
-for the deliberately deferred GPU boundary.
-
-## Runnable analytic validation
-
-From the package root, run the checked reproducer with:
-
-```sh
-julia --project=validation validation/reproducers/plain_is.jl
-```
-
-The source is `validation/reproducers/plain_is.jl`. It uses only local Gaussian
-math and fails loudly if either labeled analytic identity misses its recorded
-deterministic tolerance.
-
-## Public API
-
-```@docs
-AbstractImportanceSampler
-ImportanceSampling
-LogTarget
-prepare_sampler
-importance_sample
-importance_sample!
-WeightedSamples
-WeightedSampleView
-normalized_weights
-lognormalizer
-AllZeroWeightsError
-SamplerBusyError
-SamplerExecutionError
-```
+For mathematical background, see Elvira and Martino's open-access
+[“Advances in Importance Sampling”](https://arxiv.org/abs/2102.05407) and
+Agapiou et al.'s
+[“Importance Sampling: Intrinsic Dimension and Computational Cost”](https://arxiv.org/abs/1511.06196).

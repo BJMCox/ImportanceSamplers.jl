@@ -1,0 +1,434 @@
+struct _SerialCPUExecution end
+struct _ThreadedCPUExecution end
+
+struct _KernelExecution{E}
+    cpu_execution::E
+end
+
+struct _NoSampleTransform end
+struct _NoRandomBuffers end
+
+struct _RandomBuffers{U,N,F}
+    uniform::U
+    normal::N
+    failure_scratch::F
+end
+
+struct _DeviceFailureRecord{A}
+    storage::A
+end
+
+struct _NoNativeFailureScratch end
+
+struct _NativeFailureScratch{R,F}
+    record::R
+    target_failures::F
+end
+
+struct _NoNativeTargetFailures end
+
+struct _NativeCPUTargetFailures
+    slots::Vector{Union{Nothing,SamplerExecutionError}}
+    first_index::Threads.Atomic{Int}
+end
+
+struct _NativeDeviceTarget{L,T}
+    target::T
+end
+
+function Adapt.adapt_structure(to, evaluator::_NativeDeviceTarget{L}) where {L}
+    target = Adapt.adapt(to, evaluator.target)
+    return _NativeDeviceTarget{L,typeof(target)}(target)
+end
+
+struct _NativeCPUTarget{L,T,F}
+    target::T
+    failures::F
+end
+
+const _NativeFusedNonidentityScalarTransform = Union{
+    PositiveTransform,
+    SoftplusTransform,
+    IntervalTransform,
+}
+
+_execution_name(::_SerialCPUExecution) = :serial
+_execution_name(::_ThreadedCPUExecution) = :threaded
+_execution_name(execution::_KernelExecution) = _execution_name(execution.cpu_execution)
+
+_supports_native_fused_cpu(proposal) = false
+
+function _supports_native_fused_cpu(proposal::_GaussianProposal)
+    location = proposal.location
+    scale = proposal.scale
+    if location isa _NativeGaussianFloat
+        return scale isa _SphericalGaussianScale{typeof(location)}
+    elseif location isa AbstractVector{<:_NativeGaussianFloat}
+        T = eltype(location)
+        return scale isa _SphericalGaussianScale{T} ||
+               scale isa _DiagonalGaussianScale{<:AbstractVector{T}} ||
+               scale isa _FactorGaussianScale{<:AbstractMatrix{T}}
+    end
+    return false
+end
+
+_supports_native_transform(::IdentityTransform, dimension) = true
+_supports_native_transform(::SimplexTransform, dimension) = true
+_supports_native_transform(::_NativeScalarTransform, dimension) = dimension == 1
+
+function _supports_native_transform(layout::_FlatTransformLayout, dimension)
+    layout.dimension == dimension || return false
+    return all(values(layout.blocks)) do block
+        selected_dimension = length(_selector_indices(block.location))
+        _supports_native_transform(block.transform, selected_dimension)
+    end
+end
+
+_supports_native_transform(transform, dimension) = false
+
+function _supports_native_fused_cpu(proposal::TransformedProposal)
+    base = proposal.base
+    transform = proposal.transform
+    base isa _GaussianProposal || return false
+    _supports_native_fused_cpu(base) || return false
+    dimension = _gaussian_dimension(base.location)
+    _supports_native_transform(transform, dimension) || return false
+    transform isa IntervalTransform || return true
+    T = _native_fused_float_type(base)
+    return transform isa IntervalTransform{T,T,Nothing} ||
+           transform isa IntervalTransform{T,Nothing,T} ||
+           transform isa IntervalTransform{T,T,T}
+end
+
+function _sampling_execution(proposal, threaded::Bool)
+    cpu_execution = threaded ? _ThreadedCPUExecution() : _SerialCPUExecution()
+    return _supports_native_fused_cpu(proposal) ?
+           _KernelExecution(cpu_execution) : cpu_execution
+end
+
+function _allocate_random_buffers(device, proposal, nsamples)
+    _supports_native_fused_cpu(proposal) || return _NoRandomBuffers()
+    T = _native_fused_float_type(proposal)
+    prototype = device(Vector{T}(undef, 0))
+    uniform = similar(prototype, T, 0)
+    normal = similar(prototype, T, _native_fused_dimension(proposal) * nsamples)
+    failure_scratch = _allocate_native_failure_scratch(normal, nsamples)
+    return _RandomBuffers(uniform, normal, failure_scratch)
+end
+
+_native_failure_scratch(::_NoRandomBuffers) = _NoNativeFailureScratch()
+_native_failure_scratch(buffers::_RandomBuffers) = buffers.failure_scratch
+
+function _fill_random_buffers!(rng, buffers::_RandomBuffers)
+    isempty(buffers.uniform) || Random.rand!(rng, buffers.uniform)
+    isempty(buffers.normal) || Random.randn!(rng, buffers.normal)
+    return buffers
+end
+
+_owned_backend_rng(
+    device::MLDataDevices.AbstractAcceleratorDevice,
+    ::UInt64,
+) = throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
+
+function _importance_sample!(sampler, ::_SerialCPUExecution)
+    samples, logweights = _importance_sample_generic_cpu!(sampler, false)
+    return samples, logweights, (count=0, bytes=0)
+end
+
+function _importance_sample!(sampler, ::_ThreadedCPUExecution)
+    samples, logweights = _importance_sample_generic_cpu!(sampler, true)
+    return samples, logweights, (count=0, bytes=0)
+end
+
+function _importance_sample!(sampler, execution::_KernelExecution)
+    proposal = sampler.algorithm.proposal
+    nsamples = sampler.algorithm.nsamples
+    buffers = _capture_sampler_failure(:proposal_draw, 1) do
+        _fill_random_buffers!(sampler.rng, sampler.random_buffers)
+    end
+    normal_buffer = buffers.normal
+    base, transform = _native_fused_components(proposal)
+    samples = _allocate_native_samples(normal_buffer, proposal, nsamples)
+    binding_sample = _native_binding_sample(samples)
+    target = _capture_sampler_failure(:target, 1) do
+        _bind_resolved_target(sampler.target, binding_sample)
+    end
+    log_type = _resolve_native_logweight_type(target, base, typeof(binding_sample))
+    logweights = similar(normal_buffer, log_type, nsamples)
+    failure_scratch = sampler.random_buffers.failure_scratch
+    failure_record = failure_scratch.record
+    target_failures = failure_scratch.target_failures
+    target_evaluator, target_failures = _native_target_evaluator(
+        KernelAbstractions.get_backend(normal_buffer),
+        target,
+        log_type,
+        target_failures,
+    )
+    _launch_native_fused!(
+        samples,
+        logweights,
+        failure_record,
+        normal_buffer,
+        target_evaluator,
+        base,
+        transform,
+        execution.cpu_execution,
+    )
+    snapshot = _device_failure_snapshot(failure_record)
+    _throw_native_failures(snapshot.failure, target_failures, transform)
+    return samples, logweights, snapshot.transfers
+end
+
+function _native_target_evaluator(
+    ::KernelAbstractions.CPU,
+    target,
+    ::Type{L},
+    failures::_NativeCPUTargetFailures,
+) where {L}
+    return _NativeCPUTarget{L,typeof(target),typeof(failures)}(target, failures), failures
+end
+
+function _native_target_evaluator(
+    backend,
+    target,
+    ::Type{L},
+    failures::_NoNativeTargetFailures,
+) where {L}
+    return _NativeDeviceTarget{L,typeof(target)}(target), failures
+end
+
+function _preflight_native_kernel_target(
+    device,
+    target,
+    proposal,
+    buffers::_RandomBuffers,
+)
+    samples = _allocate_native_samples(buffers.normal, proposal, 1)
+    binding_sample = _native_binding_sample(samples)
+    bound_target = _bind_resolved_target(target, binding_sample)
+    base, _ = _native_fused_components(proposal)
+    log_type = _resolve_native_logweight_type(
+        bound_target,
+        base,
+        typeof(binding_sample),
+    )
+    target_argument =
+        _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
+    backend = KernelAbstractions.get_backend(buffers.normal)
+    kernel = _native_gaussian_fused_kernel!(backend)
+    converted = try
+        KernelAbstractions.argconvert(kernel, target_argument)
+    catch
+        throw(SamplerDeviceError(device, :kernel_argument_unsupported))
+    end
+    isbits(converted) || throw(
+        SamplerDeviceError(device, :kernel_argument_unsupported),
+    )
+    return nothing
+end
+
+_native_fused_components(proposal::_GaussianProposal) =
+    (proposal, _NoSampleTransform())
+_native_fused_components(proposal::TransformedProposal) =
+    (proposal.base, proposal.transform)
+
+function _native_fused_float_type(proposal)
+    base, _ = _native_fused_components(proposal)
+    return base.location isa _NativeGaussianFloat ?
+           typeof(base.location) : eltype(base.location)
+end
+
+function _native_fused_dimension(proposal)
+    base, _ = _native_fused_components(proposal)
+    return _gaussian_dimension(base.location)
+end
+
+function _resolve_native_logweight_type(target, base, sample_type::Type)
+    target_type = _capture_sampler_failure(:target, 1) do
+        _canonical_inferred_log_type(Base.promote_op(target, sample_type), "target")
+    end
+    proposal_type = _canonical_inferred_log_type(typeof(base.lognormalizer), "proposal")
+    return target_type === Float64 || proposal_type === Float64 ? Float64 : Float32
+end
+
+_native_binding_sample(samples::AbstractVector{T}) where {T} = zero(T)
+_native_binding_sample(samples::AbstractMatrix) = view(samples, :, 1)
+
+@generated function _native_binding_sample(samples::NamedTuple{Names}) where {Names}
+    leaves = map(Names) do name
+        :(_native_binding_sample(getfield(samples, $(QuoteNode(name)))))
+    end
+    return :(NamedTuple{$Names}(($(leaves...),)))
+end
+
+function _allocate_native_samples(
+    prototype,
+    base::_GaussianProposal{F,T},
+    nsamples,
+) where {F,T<:_NativeGaussianFloat}
+    return similar(prototype, T, nsamples)
+end
+
+function _allocate_native_samples(
+    prototype,
+    base::_GaussianProposal{F,<:AbstractVector{T}},
+    nsamples,
+) where {F,T<:_NativeGaussianFloat}
+    return similar(prototype, T, _gaussian_dimension(base.location), nsamples)
+end
+
+function _allocate_native_samples(prototype, proposal::TransformedProposal, nsamples)
+    base = proposal.base
+    transform = proposal.transform
+    T = _native_fused_float_type(base)
+    if transform isa _NativeScalarTransform &&
+       base.location isa _NativeGaussianFloat
+        return similar(prototype, T, nsamples)
+    elseif transform isa _FlatTransformLayout
+        return map(transform.blocks) do block
+            if block.location isa Int
+                similar(prototype, T, nsamples)
+            else
+                output_dimension = block.transform isa SimplexTransform ?
+                                   block.transform.dimension : length(block.location)
+                similar(prototype, T, output_dimension, nsamples)
+            end
+        end
+    end
+    output_dimension = transform isa SimplexTransform ?
+                       transform.dimension : _gaussian_dimension(base.location)
+    return similar(prototype, T, output_dimension, nsamples)
+end
+
+function _allocate_native_failure_scratch(normal_buffer, nsamples)
+    backend = KernelAbstractions.get_backend(normal_buffer)
+    target_failures = _allocate_native_target_failures(backend, nsamples)
+    storage = similar(normal_buffer, UInt64, 2)
+    record = _DeviceFailureRecord(storage)
+    return _NativeFailureScratch(record, target_failures)
+end
+
+function _allocate_native_target_failures(::KernelAbstractions.CPU, nsamples)
+    slots = Vector{Union{Nothing,SamplerExecutionError}}(nothing, nsamples)
+    return _NativeCPUTargetFailures(slots, Threads.Atomic{Int}(typemax(Int)))
+end
+_allocate_native_target_failures(backend, nsamples) = _NoNativeTargetFailures()
+
+Base.@noinline _reset_native_failure_scratch!(::_NoNativeFailureScratch)::Nothing =
+    nothing
+
+Base.@noinline function _reset_native_failure_scratch!(
+    scratch::_NativeFailureScratch,
+)::Nothing
+    fill!(scratch.record.storage, zero(UInt64))
+    _reset_native_target_failures!(scratch.target_failures)
+    return nothing
+end
+
+_reset_native_target_failures!(::_NoNativeTargetFailures) = nothing
+
+function _reset_native_target_failures!(failures::_NativeCPUTargetFailures)
+    failures.first_index[] == typemax(Int) && return nothing
+    fill!(failures.slots, nothing)
+    failures.first_index[] = typemax(Int)
+    return nothing
+end
+
+@inline function _record_native_failure!(
+    storage,
+    logical_index::Int,
+    block::Int,
+    reason_bits::UInt16,
+)
+    inverse_index = typemax(UInt32) - UInt32(logical_index) + one(UInt32)
+    inverse_block = typemax(UInt16) - UInt16(block) + one(UInt16)
+    packed = UInt64(inverse_index) << 32 |
+             UInt64(inverse_block) << 16 |
+             UInt64(reason_bits)
+    KernelAbstractions.@atomic storage[1] += UInt64(1)
+    KernelAbstractions.@atomic storage[2] max packed
+    return nothing
+end
+
+function _device_failure_snapshot(record::_DeviceFailureRecord)
+    values = Array(record.storage)
+    transfers = _is_host_storage(record.storage) ?
+                (count=0, bytes=0) : (count=1, bytes=sizeof(values))
+    count = values[1]
+    packed = values[2]
+    failure = iszero(count) ? (
+        count=count,
+        first_logical_index=0,
+        first_block=0,
+        reason_bits=UInt16(0),
+    ) : let
+        inverse_index = UInt32(packed >> 32)
+        inverse_block = UInt16((packed >> 16) & 0xffff)
+        (
+            count=count,
+            first_logical_index=Int(typemax(UInt32) - inverse_index + one(UInt32)),
+            first_block=Int(typemax(UInt16) - inverse_block + one(UInt16)),
+            reason_bits=UInt16(packed & 0xffff),
+        )
+    end
+    return (
+        failure=failure,
+        transfers=transfers,
+    )
+end
+
+const _NATIVE_TARGET_NAN = UInt16(0x0100)
+const _NATIVE_TARGET_POSITIVE_INFINITY = UInt16(0x0200)
+const _NATIVE_PROPOSAL_INVALID = UInt16(0x0400)
+const _NATIVE_GENERATED_NONFINITE = UInt16(0x0800)
+const _NATIVE_LOGWEIGHT_INVALID = UInt16(0x1000)
+const _NATIVE_TRANSFORM_REASONS = UInt16(0x000f)
+const _NATIVE_PROPOSAL_DRAW_REASONS =
+    _NATIVE_TRANSFORM_REASONS | _NATIVE_GENERATED_NONFINITE
+
+@inline function _native_target_reason(value)
+    isnan(value) && return _NATIVE_TARGET_NAN
+    value == Inf && return _NATIVE_TARGET_POSITIVE_INFINITY
+    return UInt16(0)
+end
+
+@inline function (evaluator::_NativeDeviceTarget{L})(sample, slot) where {L}
+    value = convert(L, evaluator.target(sample))
+    reason = _native_target_reason(value)
+    return value, reason, !iszero(reason)
+end
+
+@inline function _record_cpu_target_failure!(
+    evaluator::_NativeCPUTarget{L},
+    slot,
+    cause,
+    trace,
+) where {L}
+    failures = evaluator.failures
+    @inbounds failures.slots[slot] = SamplerExecutionError(
+        :target,
+        slot,
+        CapturedException(cause, trace),
+    )
+    Threads.atomic_min!(failures.first_index, slot)
+    return zero(L), UInt16(0), true
+end
+
+@inline function (evaluator::_NativeCPUTarget{L})(sample, slot) where {L}
+    try
+        value = convert(L, evaluator.target(sample))
+        reason = _native_target_reason(value)
+        if !iszero(reason)
+            cause = DomainError(value, "target log density may not be NaN or +Inf")
+            return _record_cpu_target_failure!(evaluator, slot, cause, backtrace())
+        end
+        return value, UInt16(0), false
+    catch error
+        return _record_cpu_target_failure!(evaluator, slot, error, catch_backtrace())
+    end
+end
+
+@inline function _native_proposal_reason(value)
+    (isnan(value) || value == -Inf) && return _NATIVE_PROPOSAL_INVALID
+    return UInt16(0)
+end
