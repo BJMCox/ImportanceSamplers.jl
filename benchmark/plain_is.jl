@@ -46,14 +46,23 @@ function run_trial(benchmark)
 end
 
 function report_trial(label, trial; work_items=nothing, divisor=1)
+    return report_trial(stdout, label, trial; work_items, divisor)
+end
+
+function report_trial(io::IO, label, trial; work_items=nothing, divisor=1)
     estimate = median(trial)
-    println(label)
-    println("  median time: ", BenchmarkTools.prettytime(estimate.time / divisor))
-    println("  allocations: ", estimate.allocs / divisor)
-    println("  allocated memory: ", BenchmarkTools.prettymemory(estimate.memory / divisor))
+    println(io, label)
+    if divisor != 1
+        println(io, "  raw batch median time (ns): ", estimate.time)
+        println(io, "  raw batch allocations: ", estimate.allocs)
+        println(io, "  raw batch allocated bytes: ", estimate.memory)
+    end
+    println(io, "  median time: ", BenchmarkTools.prettytime(estimate.time / divisor))
+    println(io, "  allocations: ", estimate.allocs / divisor)
+    println(io, "  allocated memory: ", BenchmarkTools.prettymemory(estimate.memory / divisor))
     if work_items !== nothing
         seconds = estimate.time / 1.0e9
-        println("  throughput: ", round(work_items / seconds; sigdigits=6), " samples/s")
+        println(io, "  throughput: ", round(work_items / seconds; sigdigits=6), " samples/s")
     end
     return nothing
 end
