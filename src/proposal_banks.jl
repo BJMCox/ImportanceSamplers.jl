@@ -30,7 +30,7 @@ struct ProposalBank{P<:AbstractVector,M<:AbstractVector} <: AbstractProposalPopu
         isconcretetype(mass_type) && mass_type <: Real && mass_type !== Bool || throw(
             ArgumentError("mass element type must be a concrete non-Bool real type"),
         )
-        floating_type = float(mass_type)
+        floating_type = promote_type(float(mass_type), Float32)
         isconcretetype(floating_type) && floating_type <: AbstractFloat || throw(
             ArgumentError("masses must promote to one concrete floating type"),
         )

@@ -28,6 +28,17 @@ using ImportanceSamplers
     integer_overflow = ProposalBank(proposals, fill(typemax(Int), 2))
     @test integer_overflow.masses == [0.5, 0.5]
 
+    low_precision_count = 70_000
+    low_precision = ProposalBank(
+        fill(first(proposals), low_precision_count),
+        fill(Float16(1), low_precision_count),
+    )
+    @test eltype(low_precision.masses) === Float32
+    @test all(>(0), low_precision.masses)
+    @test isapprox(sum(low_precision.masses), 1; rtol=4eps(Float32))
+    @test eltype(ProposalBank(proposals, Float64[1, 1]).masses) === Float64
+    @test eltype(ProposalBank(proposals, BigFloat[1, 1]).masses) === BigFloat
+
     @test_throws ArgumentError ProposalBank(typeof(proposals)())
     @test_throws ArgumentError ProposalBank(proposals, [1])
     @test_throws ArgumentError ProposalBank(proposals, Bool[true, false])
