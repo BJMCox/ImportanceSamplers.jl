@@ -78,10 +78,11 @@ function Base.showerror(io::IO, error::SamplerDeviceError)
         "the requested device backend is unavailable or nonfunctional"
     elseif error.reason === :accelerator_rng_unavailable
         "accelerator random-buffer support is not available"
+    elseif error.reason === :device_residency_mismatch
+        "prepared state is not resident on the requested device"
     elseif error.reason === :scalar_policy_unspecified
         "the accelerator scalar policy is unspecified; construct a preserving " *
-        "device with gpu_device(nothing, nothing; force=true) or " *
-        "gpu_device(device_id, nothing; force=true)"
+        "device whose eltype policy is Nothing, Float32, or Float64"
     elseif error.reason === :generic_proposal_cpu_only
         "generic proposals are CPU-only"
     elseif error.reason === :product_proposal_cpu_only
@@ -177,7 +178,8 @@ device-adaptable callable state, and every numerical array in `p`; opaque
 closure captures cannot be moved reliably and are rejected for accelerator
 execution. An accelerator whose public `eltype(device)` is `Missing` is rejected
 as `:scalar_policy_unspecified`; construct a preserving device with
-`MLDataDevices.gpu_device(nothing, nothing; force=true)` or the device-id form.
+an explicit non-`Missing` scalar policy. The accelerator guide shows CUDA
+construction for the current or a selected physical device without auto-selection.
 Native CUDA execution requires `threaded=true` and keeps returned arrays on the
 device. Set `threaded=false` for serial CPU evaluation. On CPU,
 `threaded=true` falls back to serial execution when Julia has one default
@@ -243,6 +245,17 @@ function _clone_rng(device, rng::Random.AbstractRNG)
     return cloned
 end
 
+_backend_functional(device) = MLDataDevices.functional(device)
+_with_backend_device(f, device) = f()
+_backend_state_resident(device, state) = true
+
+function _validate_backend_state(device, state)
+    _backend_state_resident(device, state) || throw(
+        SamplerDeviceError(device, :device_residency_mismatch),
+    )
+    return nothing
+end
+
 function _transfer_prepared_sampler(
     device::MLDataDevices.AbstractCPUDevice,
     sampler::_PreparedImportanceSampler,
@@ -251,7 +264,7 @@ function _transfer_prepared_sampler(
         SamplerDeviceError(device, :prepared_migration_unsupported),
     )
     sampler.executed && throw(SamplerAlreadyExecutedError())
-    MLDataDevices.functional(device) || throw(
+    _backend_functional(device) || throw(
         SamplerDeviceError(device, :backend_unavailable),
     )
     _target_transfer_rewrites_opaque_closure(sampler.target) && throw(
@@ -287,43 +300,46 @@ function _transfer_prepared_sampler(
     _target_has_opaque_host_closure(sampler.target, device) && throw(
         SamplerDeviceError(device, :opaque_host_closure),
     )
-    MLDataDevices.functional(device) || throw(
+    _backend_functional(device) || throw(
         SamplerDeviceError(device, :backend_unavailable),
     )
     proposal_limit = _accelerator_proposal_limit(sampler.algorithm.proposal)
     isnothing(proposal_limit) || throw(SamplerDeviceError(device, proposal_limit))
-    algorithm = _copy_algorithm(device, sampler.algorithm)
-    target = _transfer_prepared_target(device, sampler.target)
-    random_buffers = _allocate_random_buffers(
-        device,
-        algorithm.proposal,
-        algorithm.nsamples,
-    )
-    random_buffers isa _RandomBuffers || throw(
-        SamplerDeviceError(device, :accelerator_rng_unavailable),
-    )
-    _preflight_native_kernel_target(
-        device,
-        target,
-        algorithm.proposal,
-        random_buffers,
-    )
-    _owned_backend_rng(device, zero(UInt64))
-    seed = try
-        Random.rand(sampler.rng, UInt64)
-    catch
-        throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
+    return _with_backend_device(device) do
+        algorithm = _copy_algorithm(device, sampler.algorithm)
+        target = _transfer_prepared_target(device, sampler.target)
+        random_buffers = _allocate_random_buffers(
+            device,
+            algorithm.proposal,
+            algorithm.nsamples,
+        )
+        random_buffers isa _RandomBuffers || throw(
+            SamplerDeviceError(device, :accelerator_rng_unavailable),
+        )
+        _validate_backend_state(device, (algorithm, target, random_buffers))
+        _preflight_native_kernel_target(
+            device,
+            target,
+            algorithm.proposal,
+            random_buffers,
+        )
+        _owned_backend_rng(device, zero(UInt64))
+        seed = try
+            Random.rand(sampler.rng, UInt64)
+        catch
+            throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
+        end
+        return _PreparedImportanceSampler(
+            _owned_backend_rng(device, seed),
+            random_buffers,
+            target,
+            algorithm,
+            device,
+            sampler.threaded,
+            false,
+            false,
+        )
     end
-    return _PreparedImportanceSampler(
-        _owned_backend_rng(device, seed),
-        random_buffers,
-        target,
-        algorithm,
-        device,
-        sampler.threaded,
-        false,
-        false,
-    )
 end
 
 function _transfer_prepared_sampler(
@@ -409,12 +425,24 @@ function importance_sample!(sampler::_PreparedImportanceSampler)
     sampler.executed = true
     sampler.running = true
     try
-        _reset_native_failure_scratch!(
-            _native_failure_scratch(sampler.random_buffers),
-        )
-        threaded = sampler.device isa MLDataDevices.AbstractAcceleratorDevice ||
-                   sampler.threaded && Threads.nthreads(:default) > 1
-        return _importance_sample_cpu!(sampler, threaded)
+        return _with_backend_device(sampler.device) do
+            _validate_backend_state(
+                sampler.device,
+                (
+                    sampler.algorithm,
+                    sampler.target,
+                    sampler.random_buffers,
+                    sampler.rng,
+                ),
+            )
+            _reset_native_failure_scratch!(
+                _native_failure_scratch(sampler.random_buffers),
+            )
+            threaded =
+                sampler.device isa MLDataDevices.AbstractAcceleratorDevice ||
+                sampler.threaded && Threads.nthreads(:default) > 1
+            return _importance_sample_cpu!(sampler, threaded)
+        end
     finally
         sampler.running = false
     end

@@ -18,13 +18,11 @@ function scalar_gaussian_case(::Type{T}) where {T}
     )
 end
 
-function cuda_device()
+function cuda_device(device_id::Union{Nothing,Int}=nothing)
     CUDA.functional() || error("CUDA is not functional")
-    default_policy = MLDataDevices.gpu_device(nothing; force=true)
-    eltype(default_policy) === Missing ||
-        error("default CUDA device does not retain the Missing scalar policy")
-    device = MLDataDevices.gpu_device(nothing, nothing; force=true)
-    MLDataDevices.functional(device) || error("MLDataDevices CUDADevice is not functional")
+    physical =
+        device_id === nothing ? CUDA.device() : collect(CUDA.devices())[device_id]
+    device = MLDataDevices.CUDADevice{typeof(physical),Nothing}(physical)
     eltype(device) === Nothing || error("CUDA device does not preserve scalar types")
     CUDA.allowscalar(false)
     return device

@@ -1,5 +1,4 @@
 using CUDA
-using cuDNN
 using BenchmarkTools
 using ImportanceSamplers
 using MLDataDevices
@@ -252,7 +251,6 @@ function main()
                 "ImportanceSamplers",
                 "KernelAbstractions",
                 "MLDataDevices",
-                "cuDNN",
             )),
             seed=BENCHMARK_SEED,
             sample_count=SAMPLE_COUNT,

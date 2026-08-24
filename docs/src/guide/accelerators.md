@@ -13,7 +13,6 @@ in the explicit target context `p`:
 
 ```julia
 using CUDA
-using cuDNN
 using ImportanceSamplers
 using MLDataDevices
 using Random
@@ -40,7 +39,8 @@ prepared = prepare_sampler(
     threaded=true,
 )
 
-device = MLDataDevices.gpu_device(nothing, nothing; force=true)
+physical = CUDA.device()
+device = MLDataDevices.CUDADevice{typeof(physical),Nothing}(physical)
 prepared = device(prepared)
 # Equivalent replacement for the preceding line:
 # prepared = prepared |> device
@@ -49,13 +49,21 @@ result = importance_sample!(prepared)
 host_result = result |> cpu_device()
 ```
 
-Loading CUDA and cuDNN before calling `gpu_device` activates CUDA selection.
-Passing `nothing` as the public scalar policy preserves both `Float32` and
-`Float64` state. To select a specific one-indexed device, use
-`MLDataDevices.gpu_device(device_id, nothing; force=true)`. The default
-`gpu_device()` policy has `eltype(device) === Missing` and is rejected as
-`:scalar_policy_unspecified` before the source RNG advances; ImportanceSamplers
-does not rewrite that policy through MLDataDevices internals. Explicit
+The explicit `CUDADevice` construction avoids MLDataDevices backend
+auto-selection and needs no cuDNN dependency. The `Nothing` scalar policy
+preserves both `Float32` and `Float64` state. To select a specific one-indexed
+device, use:
+
+```julia
+device_id = 2
+physical = collect(CUDA.devices())[device_id]
+device = MLDataDevices.CUDADevice{typeof(physical),Nothing}(physical)
+```
+
+The default `MLDataDevices.CUDADevice()` policy has
+`eltype(device) === Missing` and is rejected as `:scalar_policy_unspecified`
+before the source RNG advances; ImportanceSamplers does not rewrite that policy
+through MLDataDevices internals. Explicit
 non-`Missing` conversion policies remain explicit user choices and must satisfy
 the proposal and target type checks below. Both
 `p.location` and `p.scale` are recursively transferred as the complete target

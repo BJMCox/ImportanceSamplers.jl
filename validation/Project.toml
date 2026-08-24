@@ -9,7 +9,6 @@ MLDataDevices = "7e8f7934-dd98-4c1a-8fe8-92b47a384d40"
 Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
-cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
 
 [sources]
 ImportanceSamplers = {path = ".."}
@@ -20,5 +19,4 @@ DensityInterface = "0.4"
 ImportanceSamplers = "0.0.1"
 MLDataDevices = "1.17.10"
 Test = "1.11.0"
-cuDNN = "6.2"
 julia = "1.12"

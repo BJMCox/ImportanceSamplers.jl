@@ -113,6 +113,41 @@ Adapt.adapt_storage(::KernelArgumentTestAccelerator, array::Array) =
         Random.Xoshiro(seed)
 end
 
+const HOOK_ACCELERATOR_CURRENT = Ref(:caller)
+
+struct HookAccelerator <: MLDataDevices.AbstractAcceleratorDevice
+    resident::Bool
+end
+
+Base.eltype(::HookAccelerator) = Nothing
+
+function Adapt.adapt_storage(::HookAccelerator, array::Array)
+    HOOK_ACCELERATOR_CURRENT[] === :selected || error("wrong active mock device")
+    return copy(array)
+end
+
+function hook_accelerator_target(sample, context)::Float64
+    HOOK_ACCELERATOR_CURRENT[] === :selected || error("wrong active mock device")
+    return context.shift[1] - abs2(sample) / 2
+end
+
+@eval ImportanceSamplers begin
+    _backend_functional(::Main.HookAccelerator) = true
+
+    function _with_backend_device(f, ::Main.HookAccelerator)
+        previous = Main.HOOK_ACCELERATOR_CURRENT[]
+        Main.HOOK_ACCELERATOR_CURRENT[] = :selected
+        try
+            return f()
+        finally
+            Main.HOOK_ACCELERATOR_CURRENT[] = previous
+        end
+    end
+
+    _backend_state_resident(device::Main.HookAccelerator, state) = device.resident
+    _owned_backend_rng(::Main.HookAccelerator, seed::UInt64) = Random.Xoshiro(seed)
+end
+
 struct UnadaptedKernelContext{A}
     shift::A
 end
@@ -342,9 +377,8 @@ end
     @test sprint(showerror, scalar_policy_error) ==
           "prepared-sampler device transfer failed for " *
           "$(typeof(default_cuda)): the accelerator scalar policy is " *
-          "unspecified; construct a preserving device with " *
-          "gpu_device(nothing, nothing; force=true) or " *
-          "gpu_device(device_id, nothing; force=true)"
+          "unspecified; construct a preserving device whose eltype policy is " *
+          "Nothing, Float32, or Float64"
 
     cpu = MLDataDevices.cpu_device()
     executed = make_transfer_sampler(2201; threaded=false)
@@ -529,4 +563,31 @@ end
         @test rand(getfield(accelerator, :rng), UInt64) ==
               rand(expected_accelerator_rng, UInt64)
     end
+end
+
+@testset "backend hooks own device scope and validate residency" begin
+    algorithm = ImportanceSampling(SphericalGaussian(0.0, 1.0); nsamples=16)
+    make_hook_sampler(seed) = prepare_sampler(
+        Random.Xoshiro(seed),
+        hook_accelerator_target,
+        (shift=(0.25,),),
+        algorithm;
+        threaded=true,
+    )
+
+    HOOK_ACCELERATOR_CURRENT[] = :caller
+    prepared = HookAccelerator(true)(make_hook_sampler(0x2216))
+    @test HOOK_ACCELERATOR_CURRENT[] === :caller
+
+    result = importance_sample!(prepared)
+    @test HOOK_ACCELERATOR_CURRENT[] === :caller
+    @test length(result) == 16
+
+    source = make_hook_sampler(0x2217)
+    expected_rng = copy(getfield(source, :rng))
+    residency_error = caught_device_error(() -> HookAccelerator(false)(source))
+    @test residency_error isa SamplerDeviceError
+    @test residency_error.reason === :device_residency_mismatch
+    @test HOOK_ACCELERATOR_CURRENT[] === :caller
+    @test rand(getfield(source, :rng), UInt64) == rand(expected_rng, UInt64)
 end

@@ -556,10 +556,12 @@ estimator. Device-resident complete results use a device reduction and transfer
 only its two-scalar log-sum-exp accumulator.
 """
 function lognormalizer(result::WeightedSamples)
-    logweight_sum = _logweight_sum(result)
-    logweight_sum == -Inf && return logweight_sum
-    T = eltype(result.logweights)
-    return logweight_sum - log(T(length(result)))
+    return _with_backend_device(_storage_device(result.logweights)) do
+        logweight_sum = _logweight_sum(result)
+        logweight_sum == -Inf && return logweight_sum
+        T = eltype(result.logweights)
+        return logweight_sum - log(T(length(result)))
+    end
 end
 
 function lognormalizer(::WeightedSampleView)
@@ -582,9 +584,11 @@ weights. For a device-resident result, the returned weight array stays on the
 same device.
 """
 function normalized_weights(result::_AbstractWeightedSamples)
-    logweight_sum = _logweight_sum(result)
-    logweight_sum == -Inf && throw(AllZeroWeightsError())
-    return exp.(result.logweights .- logweight_sum)
+    return _with_backend_device(_storage_device(result.logweights)) do
+        logweight_sum = _logweight_sum(result)
+        logweight_sum == -Inf && throw(AllZeroWeightsError())
+        return exp.(result.logweights .- logweight_sum)
+    end
 end
 
 function _logweight_sum(result::_AbstractWeightedSamples)

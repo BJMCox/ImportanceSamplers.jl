@@ -21,6 +21,29 @@ const result_backend_deepcopies = Ref(0)
 const result_backend_materializations = Ref(0)
 const result_backend_payload_bytes = Ref(0)
 const forbid_result_backend_scalar_access = Ref(true)
+const require_result_backend_scope = Ref(false)
+const result_backend_active_device = Ref(ResultTestDevice(0))
+
+function _require_result_scope(array::ResultBackendArray)
+    require_result_backend_scope[] || return nothing
+    result_backend_active_device[] == array.device ||
+        error("result operation used the wrong active device")
+    return nothing
+end
+
+@eval ImportanceSamplers function _with_backend_device(
+    f,
+    device::Main.ResultTestDevice,
+)
+    previous = Main.result_backend_active_device[]
+    Main.result_backend_active_device[] = device
+    try
+        return f()
+    finally
+        Main.result_backend_active_device[] = previous
+    end
+end
+
 Base.size(array::ResultBackendArray) = size(array.storage)
 Base.IndexStyle(::Type{<:ResultBackendArray}) = IndexLinear()
 function Base.getindex(array::ResultBackendArray{T}, indices::Int...)::T where {T}
@@ -32,12 +55,14 @@ function Base.iterate(array::ResultBackendArray, state...)
     return iterate(array.storage, state...)
 end
 function Base.mapreduce(f, op, array::ResultBackendArray; kwargs...)
+    _require_result_scope(array)
     result_backend_reductions[] += 1
     result = mapreduce(f, op, array.storage; kwargs...)
     result_backend_payload_bytes[] += sizeof(typeof(result))
     return result
 end
 function LogExpFunctions.logsumexp(array::ResultBackendArray)
+    _require_result_scope(array)
     result_backend_reductions[] += 1
     result = LogExpFunctions.logsumexp(array.storage)
     result_backend_payload_bytes[] += sizeof(typeof(result))
@@ -62,6 +87,7 @@ end
 _backend_selector(selector::ResultBackendArray) = selector.storage
 _backend_selector(selector) = selector
 function Base.Broadcast.broadcasted(f, array::ResultBackendArray, args...)
+    _require_result_scope(array)
     return ResultBackendArray(
         broadcast(f, array.storage, map(_backend_selector, args)...),
         array.device,
@@ -180,7 +206,14 @@ end
     )
     result_backend_payload_bytes[] = 0
     before = (result.diagnostics.transfers.count, result.diagnostics.transfers.bytes)
-    weights = @inferred normalized_weights(result)
+    original_device = result_backend_active_device[]
+    require_result_backend_scope[] = true
+    weights = try
+        @inferred normalized_weights(result)
+    finally
+        require_result_backend_scope[] = false
+    end
+    @test result_backend_active_device[] == original_device
     @test weights isa ResultBackendArray
     @test Array(weights) ≈ exp.([-2.0, -1.0, 0.0]) ./ sum(exp.([-2.0, -1.0, 0.0]))
     @test (result.diagnostics.transfers.count, result.diagnostics.transfers.bytes) .- before ==
@@ -188,8 +221,14 @@ end
     @test result_backend_payload_bytes[] == 2sizeof(Float64)
     result_backend_payload_bytes[] = 0
     before = (result.diagnostics.transfers.count, result.diagnostics.transfers.bytes)
-    @test (@inferred lognormalizer(result)) ≈
-          -1 + log(exp(-2.0) + exp(-1.0) + 1) - log(3.0)
+    require_result_backend_scope[] = true
+    normalizer = try
+        @inferred lognormalizer(result)
+    finally
+        require_result_backend_scope[] = false
+    end
+    @test result_backend_active_device[] == original_device
+    @test normalizer ≈ -1 + log(exp(-2.0) + exp(-1.0) + 1) - log(3.0)
     @test (result.diagnostics.transfers.count, result.diagnostics.transfers.bytes) .- before ==
           (1, result_backend_payload_bytes[])
     @test result_backend_payload_bytes[] == 2sizeof(Float64)

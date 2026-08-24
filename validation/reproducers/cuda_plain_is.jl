@@ -1,5 +1,4 @@
 using CUDA
-using cuDNN
 using DensityInterface
 using ImportanceSamplers
 using MLDataDevices
@@ -377,6 +376,94 @@ function validate_public_preserving_device(device, ::Type{T}) where {T}
     return nothing
 end
 
+function validate_explicit_physical_device()
+    physical_devices = collect(CUDA.devices())
+    length(physical_devices) >= 2 || return @test_skip "two CUDA devices required"
+    caller_device = physical_devices[1]
+    selected_device = physical_devices[2]
+    CUDA.device!(caller_device)
+    device = cuda_device(2)
+    @test CUDA.device() == caller_device
+    inherited_device = ImportanceSamplers._with_backend_device(device) do
+        @test CUDA.device() == selected_device
+        return fetch(Threads.@spawn CUDA.device())
+    end
+    @test inherited_device == caller_device
+    @test CUDA.device() == caller_device
+
+    cases = (
+        (
+            proposal=SphericalGaussian(0.0f0, 1.0f0),
+            target=AdaptableCUDAFunction(Float32[0.25]),
+            context=(shift=Float32[0.5],),
+        ),
+        (
+            proposal=DiagonalGaussian(
+                Float32[0.25, -0.5],
+                Float32[0.75, 1.25],
+            ),
+            target=vector_gaussian_logtarget,
+            context=(
+                location=Float32[0.25, -0.5],
+                scale=Float32[0.75, 1.25],
+            ),
+        ),
+    )
+
+    for (case_index, case) in enumerate(cases)
+        source = prepare_sampler(
+            Xoshiro(VALIDATION_SEED + UInt64(0x40 + case_index)),
+            case.target,
+            case.context,
+            ImportanceSampling(case.proposal; nsamples=2_048);
+            threaded=true,
+        )
+        prepared = device(source)
+        @test CUDA.device() == caller_device
+
+        algorithm = getfield(prepared, :algorithm)
+        prepared_target = getfield(prepared, :target)
+        buffers = getfield(prepared, :random_buffers)
+        scratch = getfield(buffers, :failure_scratch)
+        failure_storage = getfield(getfield(scratch, :record), :storage)
+        @test ImportanceSamplers._backend_state_resident(
+            device,
+            (algorithm, prepared_target, buffers),
+        )
+        for array in values(getfield(prepared_target, :context))
+            @test CUDA.device(array) == selected_device
+        end
+        prepared_proposal = getfield(algorithm, :proposal)
+        if case_index == 1
+            callable = getfield(prepared_target, :target)
+            @test CUDA.device(callable.offset) == selected_device
+        else
+            @test CUDA.device(prepared_proposal.location) == selected_device
+            @test CUDA.device(prepared_proposal.scale.scales) == selected_device
+        end
+        @test CUDA.device(buffers.uniform) == selected_device
+        @test CUDA.device(buffers.normal) == selected_device
+        @test CUDA.device(failure_storage) == selected_device
+
+        result = importance_sample!(prepared)
+        @test CUDA.device() == caller_device
+        @test CUDA.device(result.samples) == selected_device
+        @test CUDA.device(result.logweights) == selected_device
+
+        weights = normalized_weights(result)
+        @test CUDA.device() == caller_device
+        @test CUDA.device(weights) == selected_device
+        weight_sum = ImportanceSamplers._with_backend_device(device) do
+            return sum(weights)
+        end
+        @test weight_sum ≈ 1.0f0 atol = 32eps(Float32)
+        @test CUDA.device() == caller_device
+        @test isfinite(lognormalizer(result))
+        @test CUDA.device() == caller_device
+    end
+    return nothing
+end
+
 function validate_public_rng_ownership_and_replay(device)
     T = Float32
     algorithm = ImportanceSampling(
@@ -533,7 +620,6 @@ function environment_record()
             "ImportanceSamplers",
             "KernelAbstractions",
             "MLDataDevices",
-            "cuDNN",
         )),
         seed=VALIDATION_SEED,
         sample_count=VALIDATION_SAMPLES,
@@ -583,6 +669,9 @@ function main()
             end
             validate_public_rng_ownership_and_replay(device)
             validate_failure_scratch_reuse_and_reset(device)
+        end
+        @testset "explicit physical CUDA device" begin
+            validate_explicit_physical_device()
         end
     end
     return environment_record()

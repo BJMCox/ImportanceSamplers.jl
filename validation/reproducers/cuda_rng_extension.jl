@@ -6,17 +6,14 @@ using Test
 const IS = ImportanceSamplers
 
 @testset "public preserving device dispatch" begin
-    default_policy, preserving_policy = withenv(
-        "MLDATADEVICES_SILENCE_WARN_NO_GPU" => "1",
-    ) do
-        (
-            MLDataDevices.gpu_device(nothing; force=false),
-            MLDataDevices.gpu_device(nothing, nothing; force=false),
-        )
-    end
+    physical = CUDA.device()
+    default_policy = MLDataDevices.CUDADevice(physical)
+    preserving_policy =
+        MLDataDevices.CUDADevice{typeof(physical),Nothing}(physical)
 
     @test eltype(default_policy) === Missing
     @test eltype(preserving_policy) === Nothing
+    @test IS._backend_functional(preserving_policy) === CUDA.functional()
 end
 
 @testset "public CUDA RNG extension" begin
