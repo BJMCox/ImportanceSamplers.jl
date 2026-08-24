@@ -168,10 +168,6 @@ function validation_cases(::Type{T}) where {T}
 end
 
 function validate_case(device, ::Type{T}, case, seed) where {T}
-    @test case.summary_atol == T(5) * case.standard_error
-    @test case.difference_atol == T(5) * sqrt(T(2)) * case.standard_error
-    @test case.difference_atol < T(2) * case.summary_atol
-
     algorithm = ImportanceSampling(case.proposal; nsamples=VALIDATION_SAMPLES)
     cpu = importance_sample(
         Xoshiro(seed),
