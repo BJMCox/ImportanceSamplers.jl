@@ -295,12 +295,6 @@ function _allocate_native_samples(prototype, proposal::TransformedProposal, nsam
     return similar(prototype, T, output_dimension, nsamples)
 end
 
-function _allocate_device_failure_record(prototype)
-    storage = similar(prototype, UInt64, 2)
-    fill!(storage, zero(UInt64))
-    return _DeviceFailureRecord(storage)
-end
-
 function _allocate_native_failure_scratch(normal_buffer, nsamples)
     backend = KernelAbstractions.get_backend(normal_buffer)
     target_failures = _allocate_native_target_failures(backend, nsamples)

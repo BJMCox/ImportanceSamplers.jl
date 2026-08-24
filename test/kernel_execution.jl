@@ -254,18 +254,6 @@ function _check_scalar_native_equivalence(::Type{T}) where {T<:Union{Float32,Flo
     return fused
 end
 
-@testset "portable kernel smoke test" begin
-    output = zeros(Int, 4)
-    backend = KernelAbstractions.get_backend(output)
-
-    @test backend isa KernelAbstractions.CPU
-
-    ImportanceSamplers._kernel_smoke!(output)
-    KernelAbstractions.synchronize(backend)
-
-    @test output == collect(1:4)
-end
-
 @testset "native scalar fused execution" begin
     fused32 = _check_scalar_native_equivalence(Float32)
     fused64 = _check_scalar_native_equivalence(Float64)
@@ -365,7 +353,9 @@ end
 end
 
 @testset "portable failure record and target minus infinity" begin
-    failure_record = ImportanceSamplers._allocate_device_failure_record(zeros(1))
+    failure_scratch = ImportanceSamplers._allocate_native_failure_scratch(zeros(1), 3)
+    ImportanceSamplers._reset_native_failure_scratch!(failure_scratch)
+    failure_record = getfield(failure_scratch, :record)
     record_backend = KernelAbstractions.get_backend(getfield(failure_record, :storage))
     _exercise_failure_record!(record_backend)(failure_record.storage; ndrange=3)
     KernelAbstractions.synchronize(record_backend)

@@ -49,14 +49,4 @@ include("storage.jl")
 include("execution.jl")
 include("results.jl")
 
-@kernel function _kernel_smoke_kernel!(output)
-    index = @index(Global, Linear)
-    output[index] = index
-end
-
-function _kernel_smoke!(output)
-    backend = KernelAbstractions.get_backend(output)
-    return _kernel_smoke_kernel!(backend)(output; ndrange=length(output))
-end
-
 end # module ImportanceSamplers

@@ -270,16 +270,6 @@ function _prepare_target(target, context, proposal)
     return _ContextualPreparedTarget(target, context)
 end
 
-function _bind_target(target, proposal, samples)
-    prepared_target = _prepare_target(target, proposal)
-    return _bind_resolved_target(prepared_target, _sample_at(samples, 1))
-end
-
-function _bind_target(target, context, proposal, samples)
-    prepared_target = _prepare_target(target, context, proposal)
-    return _bind_resolved_target(prepared_target, _sample_at(samples, 1))
-end
-
 function _bind_context_free_callable(logdensity, sample)
     applicable(logdensity, sample) || throw(
         ArgumentError(

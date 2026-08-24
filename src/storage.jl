@@ -1,22 +1,3 @@
-function _draw_batch(rng::Random.AbstractRNG, algorithm::ImportanceSampling)
-    return _draw_batch(rng, algorithm.proposal, algorithm.nsamples)
-end
-
-function _draw_batch(rng::Random.AbstractRNG, proposal, nsamples::Int)
-    nsamples > 0 || throw(ArgumentError("batch sample count must be positive"))
-
-    first_sample = rand(rng, proposal)
-    batch = _allocate_batch(first_sample, nsamples)
-    _store_sample!(batch, first_sample, 1)
-
-    for sample_index in 2:nsamples
-        sample = rand(rng, proposal)
-        _store_sample!(batch, sample, sample_index)
-    end
-
-    return batch
-end
-
 _allocate_batch(sample::T, nsamples) where {T<:Number} = Vector{T}(undef, nsamples)
 
 function _allocate_batch(sample::AbstractVector{T}, nsamples) where {T<:Number}
