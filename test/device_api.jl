@@ -50,6 +50,20 @@ MLDataDevices.functional(::FunctionalAccelerator) = true
 struct NonfunctionalAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
 MLDataDevices.functional(::NonfunctionalAccelerator) = false
 
+struct BroadFunctionCPUDevice <: MLDataDevices.AbstractCPUDevice end
+MLDataDevices.functional(::BroadFunctionCPUDevice) = true
+Adapt.adapt_storage(::BroadFunctionCPUDevice, array::Array) = copy(array)
+Adapt.adapt_structure(::BroadFunctionCPUDevice, target::F) where {F<:Function} =
+    target
+
+struct BroadFunctionAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
+Base.eltype(::BroadFunctionAccelerator) = Nothing
+MLDataDevices.functional(::BroadFunctionAccelerator) = true
+Adapt.adapt_structure(
+    ::BroadFunctionAccelerator,
+    target::F,
+) where {F<:Function} = target
+
 struct KernelArgumentTestBackend <: KernelAbstractions.GPU end
 
 struct KernelArgumentTestArray{T,N} <: AbstractArray{T,N}
@@ -174,6 +188,30 @@ function caught_device_error(f)
         return error
     end
     return nothing
+end
+
+@testset "broad device Function rules do not opt closures in" begin
+    ordinary = let captured = [0.75]
+        (sample, p) -> p.shift[1] + captured[1] - abs2(sample) / 2
+    end
+    cpu_source = make_transfer_sampler(
+        0x2100;
+        threaded=false,
+        target=ordinary,
+    )
+    cpu_destination = BroadFunctionCPUDevice()(cpu_source)
+    @test prepared_parts(cpu_destination).callable === ordinary
+
+    accelerator_source = make_transfer_sampler(
+        0x2101;
+        threaded=true,
+        target=ordinary,
+    )
+    accelerator_error = caught_device_error(
+        () -> BroadFunctionAccelerator()(accelerator_source),
+    )
+    @test accelerator_error isa SamplerDeviceError
+    @test accelerator_error.reason === :opaque_host_closure
 end
 
 @testset "explicit prepared device transfer" begin

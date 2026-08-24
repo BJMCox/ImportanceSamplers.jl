@@ -47,12 +47,11 @@ Adapt.@adapt_structure _BoundDensityInterfaceTarget
 
 _bind_resolved_target(target::_BoundTarget, sample) = target
 
-const _GENERIC_FUNCTION_ADAPT_METHOD =
-    which(Adapt.adapt_structure, Tuple{Any,typeof(identity)})
-
 function _has_explicit_function_adapt_rule(device, ::Type{F}) where {F<:Function}
     method = which(Adapt.adapt_structure, Tuple{typeof(device),F})
-    return method !== _GENERIC_FUNCTION_ADAPT_METHOD
+    device_function_method =
+        which(Adapt.adapt_structure, Tuple{typeof(device),typeof(identity)})
+    return method !== device_function_method
 end
 
 function _copy_target_callable(
