@@ -31,6 +31,16 @@ function (target::TransferTarget)(sample, p)
     return p.shift[1] + target.offset[1] - abs2(sample) / 2
 end
 
+struct AdaptableFunction{A<:AbstractVector} <: Function
+    offset::A
+end
+
+Adapt.@adapt_structure AdaptableFunction
+
+function (target::AdaptableFunction)(sample, p)
+    return p.shift[1] + target.offset[1] - abs2(sample) / 2
+end
+
 struct UncopyableRNG <: Random.AbstractRNG end
 Base.copy(rng::UncopyableRNG) = rng
 
@@ -249,6 +259,21 @@ end
     ordinary_source = make_transfer_sampler(2105; threaded=false, target=ordinary)
     ordinary_destination = cpu(ordinary_source)
     @test prepared_parts(ordinary_destination).callable === ordinary
+
+    adaptable = AdaptableFunction([0.75])
+    adaptable_source = make_transfer_sampler(
+        2106;
+        threaded=false,
+        target=adaptable,
+    )
+    adaptable_destination = cpu32(adaptable_source)
+    adaptable_callable = prepared_parts(adaptable_destination).callable
+    @test adaptable_callable isa AdaptableFunction{Vector{Float32}}
+    @test adaptable_callable !== adaptable
+    @test adaptable_callable.offset !== adaptable.offset
+    @test adaptable_callable.offset == Float32[0.75]
+    adaptable.offset[1] = 9.0
+    @test adaptable_callable.offset == Float32[0.75]
 
     source_result = importance_sample!(source)
     destination_result = importance_sample!(

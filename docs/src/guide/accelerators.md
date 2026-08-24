@@ -80,7 +80,9 @@ or callable struct with array fields must also register standard Adapt support
 so KernelAbstractions can form its isbits kernel representation. Otherwise
 transfer fails as `:kernel_argument_unsupported`, before source RNG
 consumption. Named tuples such as `p` in the example already satisfy this
-conversion contract.
+conversion contract. This includes a named callable struct that subtypes
+`Function`: an explicit Adapt rule transfers its numerical state, while the
+generic compiler-closure reconstruction rule is not used.
 
 Julia does not expose a reliable general operation for inspecting and
 reconstructing an opaque closure's captured environment. A reachable closure
@@ -101,7 +103,7 @@ callers. Placement is fixed once execution begins.
 Device-resident `normalized_weights(result)`, `lognormalizer(result)`, and
 array slicing are supported. Scalar indexing, iteration, quantiles, and medians
 are deliberately unavailable because they imply scalar host access. Transfer
-the complete result to CPU first.
+the complete result or a sliced `WeightedSampleView` directly to CPU first.
 
 ## Checked support matrix
 

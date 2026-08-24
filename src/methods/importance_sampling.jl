@@ -280,7 +280,7 @@ function _transfer_prepared_sampler(
     end
     sampler.executed && throw(SamplerAlreadyExecutedError())
     sampler.threaded || throw(SamplerDeviceError(device, :serial_accelerator))
-    _target_has_opaque_host_closure(sampler.target) && throw(
+    _target_has_opaque_host_closure(sampler.target, device) && throw(
         SamplerDeviceError(device, :opaque_host_closure),
     )
     MLDataDevices.functional(device) || throw(

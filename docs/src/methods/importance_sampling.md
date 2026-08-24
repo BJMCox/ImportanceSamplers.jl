@@ -259,6 +259,8 @@ Ranges, integer index vectors, and Boolean masks return a
 [`WeightedSampleView`](@ref). A view supports aligned iteration and
 [`normalized_weights`](@ref), but not [`lognormalizer`](@ref): an arbitrary
 subset is not the complete estimator that produced the original normalizer.
+Apply an MLDataDevices device directly to a view to create an independent
+aligned copy, including an explicit CPU copy for scalar iteration.
 
 `normalized_weights(result)` derives a new same-device array that sums to one.
 The source of truth remains `result.logweights`. Results own their arrays, so a
@@ -309,7 +311,10 @@ Transfer returns a distinct sampler. Its RNG, explicit context `p`, callable
 target structs, proposal state, and numerical arrays are independent of the
 source. Ordinary functions remain the same callable object; pass device data
 through `p` instead of capturing host arrays in a closure. The source remains
-valid. RNG state is cloned with the RNG's standard `copy` operation. An RNG
+valid. A named callable struct that subtypes `Function` is transferred only
+when it supplies an explicit standard Adapt rule; the generic compiler-closure
+reconstruction rule is never used. RNG state is cloned with the RNG's standard
+`copy` operation. An RNG
 whose copy is unavailable or aliases the source is rejected with
 [`SamplerDeviceError`](@ref). Callable target structs that contain reachable
 opaque closures are also rejected before transfer rather than allowing the

@@ -47,7 +47,22 @@ Adapt.@adapt_structure _BoundDensityInterfaceTarget
 
 _bind_resolved_target(target::_BoundTarget, sample) = target
 
-_copy_target_callable(::MLDataDevices.AbstractDevice, target::Function) = target
+const _GENERIC_FUNCTION_ADAPT_METHOD =
+    which(Adapt.adapt_structure, Tuple{Any,typeof(identity)})
+
+function _has_explicit_function_adapt_rule(device, ::Type{F}) where {F<:Function}
+    method = which(Adapt.adapt_structure, Tuple{typeof(device),F})
+    return method !== _GENERIC_FUNCTION_ADAPT_METHOD
+end
+
+function _copy_target_callable(
+    device::MLDataDevices.AbstractDevice,
+    target::F,
+) where {F<:Function}
+    _has_explicit_function_adapt_rule(device, F) || return target
+    return _copy_to_device(device, target)
+end
+
 _copy_target_callable(device::MLDataDevices.AbstractDevice, target) =
     _copy_to_device(device, target)
 
@@ -75,9 +90,34 @@ function _target_has_opaque_host_closure(target::_ContextFreePreparedTarget)
     return _has_opaque_host_closure(target.target)
 end
 
+function _target_has_opaque_host_closure(
+    target::_ContextFreePreparedTarget,
+    device::MLDataDevices.AbstractDevice,
+)
+    return _target_callable_has_opaque_host_closure(target.target, device)
+end
+
 function _target_has_opaque_host_closure(target::_ContextualPreparedTarget)
     return _has_opaque_host_closure(target.target)
 end
+
+function _target_has_opaque_host_closure(
+    target::_ContextualPreparedTarget,
+    device::MLDataDevices.AbstractDevice,
+)
+    return _target_callable_has_opaque_host_closure(target.target, device)
+end
+
+function _target_callable_has_opaque_host_closure(
+    target::F,
+    device::MLDataDevices.AbstractDevice,
+) where {F<:Function}
+    _has_explicit_function_adapt_rule(device, F) && return false
+    return _has_opaque_host_closure(target)
+end
+
+_target_callable_has_opaque_host_closure(target, device) =
+    _has_opaque_host_closure(target)
 
 function _target_has_opaque_host_closure(target::_BoundLogDensityProblemsTarget)
     return _has_opaque_host_closure(target.target)
@@ -86,6 +126,11 @@ end
 function _target_has_opaque_host_closure(target::_BoundDensityInterfaceTarget)
     return _has_opaque_host_closure(target.target)
 end
+
+_target_has_opaque_host_closure(
+    target::_BoundTarget,
+    device::MLDataDevices.AbstractDevice,
+) = _target_has_opaque_host_closure(target)
 
 function _target_transfer_rewrites_opaque_closure(
     target::_ContextFreePreparedTarget,

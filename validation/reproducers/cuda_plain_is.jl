@@ -32,6 +32,16 @@ end
 
 ImportanceSamplers.Adapt.@adapt_structure AdaptedCUDAContext
 
+struct AdaptableCUDAFunction{A<:AbstractVector} <: Function
+    offset::A
+end
+
+ImportanceSamplers.Adapt.@adapt_structure AdaptableCUDAFunction
+
+@inline function (target::AdaptableCUDAFunction)(sample, context)
+    return context.shift[1] + target.offset[1] - abs2(sample) / 2
+end
+
 @inline function contextual_scalar_logtarget(sample, context)::Float32
     return context.shift[1] - abs2(sample) / 2
 end
@@ -404,6 +414,49 @@ function validate_public_rng_ownership_and_replay(device)
     return nothing
 end
 
+function validate_callable_and_view_transfers(device, ::Type{T}) where {T}
+    target = AdaptableCUDAFunction(T[0.25])
+    prepared = prepare_sampler(
+        Xoshiro(VALIDATION_SEED + UInt64(0x30) + UInt64(sizeof(T))),
+        target,
+        (shift=T[0.5],),
+        ImportanceSampling(
+            SphericalGaussian(zero(T), one(T));
+            nsamples=16,
+        );
+        threaded=true,
+    ) |> device
+    transferred_target = getfield(getfield(prepared, :target), :target)
+    @test transferred_target isa AdaptableCUDAFunction
+    @test transferred_target !== target
+    @test transferred_target.offset isa CuArray{T,1}
+    @test Array(transferred_target.offset) == T[0.25]
+    target.offset[1] = T(9)
+    @test Array(transferred_target.offset) == T[0.25]
+
+    result = importance_sample!(prepared)
+    resident_view = result[1:8]
+    host_view = MLDataDevices.cpu_device()(resident_view)
+    @test host_view isa WeightedSampleView
+    @test host_view.samples isa Array
+    @test host_view.logweights isa Vector{T}
+    @test host_view.samples == Array(resident_view.samples)
+    @test host_view.logweights == Array(resident_view.logweights)
+    @test collect(host_view) == [
+        (
+            sample=host_view.samples[index],
+            logweight=host_view.logweights[index],
+            provenance=NamedTuple(),
+        ) for index in eachindex(host_view.logweights)
+    ]
+    @test host_view.samples !== resident_view.samples
+    @test host_view.logweights !== resident_view.logweights
+    @test host_view.transfers !== resident_view.transfers
+    @test (host_view.transfers.count, host_view.transfers.bytes) ==
+          (resident_view.transfers.count, resident_view.transfers.bytes)
+    return nothing
+end
+
 function environment_record()
     gpu = CUDA.device()
     return (
@@ -465,6 +518,7 @@ function main()
         @testset "public preserving device and owned RNG" begin
             for T in CUDA_PLAIN_IS_A100_TYPES
                 validate_public_preserving_device(device, T)
+                validate_callable_and_view_transfers(device, T)
             end
             validate_public_rng_ownership_and_replay(device)
         end

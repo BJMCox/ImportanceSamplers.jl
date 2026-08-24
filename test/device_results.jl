@@ -301,3 +301,68 @@ end
     @test cpu_destination.diagnostics.trace !== cpu_source.diagnostics.trace
     @test cpu_destination.diagnostics.transfers !== cpu_source.diagnostics.transfers
 end
+
+@testset "explicit view transfer" begin
+    source = ImportanceSamplers._adopt_weighted_samples(
+        ResultBackendArray([10.0, 20.0, 30.0]),
+        ResultBackendArray([-3.0, -2.0, -1.0]);
+        provenance=(proposal_id=ResultBackendArray([1, 2, 3]),),
+    )
+    source_view = source[ResultBackendArray([3, 1])]
+    destination = @inferred MLDataDevices.cpu_device()(source_view)
+
+    @test destination isa WeightedSampleView
+    @test destination.samples == [30.0, 10.0]
+    @test destination.logweights == [-1.0, -3.0]
+    @test destination.provenance.proposal_id == [3, 1]
+    @test collect(destination) == [
+        (sample=30.0, logweight=-1.0, provenance=(proposal_id=3,)),
+        (sample=10.0, logweight=-3.0, provenance=(proposal_id=1,)),
+    ]
+    @test destination.transfers !== source_view.transfers
+    @test (destination.transfers.count, destination.transfers.bytes) ==
+          (source_view.transfers.count, source_view.transfers.bytes)
+    @test destination.samples !== source_view.samples
+    @test destination.logweights !== source_view.logweights
+    @test destination.provenance.proposal_id !==
+          source_view.provenance.proposal_id
+
+    same_device = ResultTestDevice(1)(source_view)
+    @test same_device.samples !== source_view.samples
+    @test same_device.logweights !== source_view.logweights
+    @test same_device.provenance.proposal_id !==
+          source_view.provenance.proposal_id
+    @test same_device.transfers !== source_view.transfers
+
+    source.samples.storage[3] = 300.0
+    source.logweights.storage[3] = -10.0
+    source.provenance.proposal_id.storage[3] = 30
+    @test destination.samples == [30.0, 10.0]
+    @test destination.logweights == [-1.0, -3.0]
+    @test destination.provenance.proposal_id == [3, 1]
+    forbid_result_backend_scalar_access[] = false
+    @test same_device.samples == [30.0, 10.0]
+    @test same_device.logweights == [-1.0, -3.0]
+    @test same_device.provenance.proposal_id == [3, 1]
+    forbid_result_backend_scalar_access[] = true
+
+    cpu_source = WeightedSamples(
+        [10.0, 20.0, 30.0],
+        [-3.0, -2.0, -1.0];
+        provenance=(proposal_id=[1, 2, 3],),
+    )
+    cpu_view = cpu_source[2:3]
+    cpu_destination = MLDataDevices.cpu_device()(cpu_view)
+    @test cpu_destination.samples !== cpu_view.samples
+    @test cpu_destination.logweights !== cpu_view.logweights
+    @test cpu_destination.provenance.proposal_id !==
+          cpu_view.provenance.proposal_id
+    @test cpu_destination.transfers !== cpu_view.transfers
+    cpu_destination.samples[1] = 200.0
+    cpu_destination.logweights[1] = -20.0
+    cpu_destination.provenance.proposal_id[1] = 20
+    @test collect(cpu_view) == [
+        (sample=20.0, logweight=-2.0, provenance=(proposal_id=2,)),
+        (sample=30.0, logweight=-1.0, provenance=(proposal_id=3,)),
+    ]
+end

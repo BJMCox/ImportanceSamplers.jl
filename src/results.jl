@@ -117,8 +117,9 @@ An aligned descriptive view of a subset of weighted samples.
 Views support indexing, iteration, and [`normalized_weights`](@ref), but not
 [`lognormalizer`](@ref), because an arbitrary subset is not a complete
 estimator result. Construct views by indexing a [`WeightedSamples`](@ref).
-Device-resident views retain device storage and require CPU transfer before
-scalar indexing or iteration.
+Device-resident views retain device storage. Apply an
+`MLDataDevices.AbstractDevice` directly to create an independent aligned copy;
+transfer to CPU before scalar indexing or iteration.
 """
 struct WeightedSampleView{R,S,W<:AbstractVector,P<:NamedTuple} <:
        _AbstractWeightedSamples{R}
@@ -242,6 +243,25 @@ function (device::MLDataDevices.AbstractDevice)(result::WeightedSamples)
     provenance = _transfer_result_storage(device, result.provenance)
     diagnostics = _transfer_result_storage(device, result.diagnostics)
     return _new_weighted_samples(samples, logweights, provenance, diagnostics)
+end
+
+function (device::MLDataDevices.AbstractDevice)(result::WeightedSampleView)
+    samples = _transfer_result_storage(device, result.samples)
+    logweights = _transfer_result_storage(device, result.logweights)
+    provenance = _transfer_result_storage(device, result.provenance)
+    transfers = _transfer_result_storage(device, result.transfers)
+    return _new_weighted_sample_view(samples, logweights, provenance, transfers)
+end
+
+function _new_weighted_sample_view(samples, logweights, provenance, transfers)
+    R = _result_record_type(samples, logweights, provenance)
+    return WeightedSampleView{R}(
+        samples,
+        logweights,
+        provenance,
+        transfers,
+        _VALIDATED_RESULT_TOKEN,
+    )
 end
 
 function _transfer_result_storage(device, storage::AbstractArray)
@@ -497,13 +517,11 @@ function _weighted_sample_view(result, sample_indices)
     viewed_samples = _sample_view(result.samples, sample_indices)
     viewed_logweights = view(result.logweights, sample_indices)
     viewed_provenance = _provenance_view(result.provenance, sample_indices)
-    R = _result_record_type(viewed_samples, viewed_logweights, viewed_provenance)
-    return WeightedSampleView{R}(
+    return _new_weighted_sample_view(
         viewed_samples,
         viewed_logweights,
         viewed_provenance,
         _result_transfers(result),
-        _VALIDATED_RESULT_TOKEN,
     )
 end
 
