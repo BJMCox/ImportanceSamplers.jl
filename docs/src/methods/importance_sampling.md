@@ -360,7 +360,9 @@ Before first execution, apply an MLDataDevices device to the complete prepared
 sampler. CPU accepts generic and native proposals. CUDA accepts the documented
 native subset with a device-compatible target and `threaded=true`; AMDGPU and
 Metal are unclaimed. See [Accelerators](@ref) for the complete transfer example,
-resident-result rules, and generated capability matrix.
+public preserving-device construction, resident-result rules, and generated
+capability matrix. An accelerator whose public scalar policy is `Missing` is
+rejected as `:scalar_policy_unspecified` before the source RNG advances.
 
 ## Troubleshooting
 

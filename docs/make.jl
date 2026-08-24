@@ -3,10 +3,9 @@ using Documenter
 using ImportanceSamplers
 using Markdown
 using Random
+import MLDataDevices
 
 include(joinpath(@__DIR__, "..", "validation", "cuda_plain_is_capabilities.jl"))
-
-const MLDataDevices = ImportanceSamplers.MLDataDevices
 
 struct CapabilityGaussian end
 

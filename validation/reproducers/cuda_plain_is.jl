@@ -338,6 +338,72 @@ function validate_context_execution(device)
     return nothing
 end
 
+function validate_public_preserving_device(device, ::Type{T}) where {T}
+    proposal = DiagonalGaussian(T[0.25, -0.5], T[0.75, 1.25])
+    context = (location=T[0.25, -0.5], scale=T[0.75, 1.25])
+    source = prepare_sampler(
+        Xoshiro(VALIDATION_SEED + UInt64(sizeof(T))),
+        vector_gaussian_logtarget,
+        context,
+        ImportanceSampling(proposal; nsamples=16);
+        threaded=true,
+    )
+    prepared = device(source)
+    prepared_proposal = getfield(getfield(prepared, :algorithm), :proposal)
+    prepared_context = getfield(getfield(prepared, :target), :context)
+    buffers = getfield(prepared, :random_buffers)
+
+    @test eltype(device) === Nothing
+    @test eltype(prepared_proposal.location) === T
+    @test eltype(prepared_proposal.scale) === T
+    @test eltype(prepared_context.location) === T
+    @test eltype(prepared_context.scale) === T
+    @test eltype(buffers.uniform) === T
+    @test eltype(buffers.normal) === T
+
+    result = importance_sample!(prepared)
+    @test eltype(result.samples) === T
+    @test eltype(result.logweights) === T
+    return nothing
+end
+
+function validate_public_rng_ownership_and_replay(device)
+    T = Float32
+    algorithm = ImportanceSampling(
+        SphericalGaussian(zero(T), one(T));
+        nsamples=32,
+    )
+    make_prepared() = prepare_sampler(
+        Xoshiro(VALIDATION_SEED + UInt64(0x20)),
+        zero_logtarget,
+        algorithm;
+        threaded=true,
+    ) |> device
+
+    first_prepared = make_prepared()
+    second_prepared = make_prepared()
+    first_rng = getfield(first_prepared, :rng)
+    second_rng = getfield(second_prepared, :rng)
+    default_rng = CUDA.default_rng()
+    @test first_rng isa CUDA.RNG
+    @test second_rng isa CUDA.RNG
+    @test first_rng !== second_rng
+    @test first_rng !== default_rng
+    @test second_rng !== default_rng
+
+    first_result = importance_sample!(first_prepared)
+    second_result = importance_sample!(second_prepared)
+    @test Array(first_result.samples) == Array(second_result.samples)
+    @test Array(first_result.logweights) == Array(second_result.logweights)
+
+    first_advanced = importance_sample!(first_prepared)
+    second_advanced = importance_sample!(second_prepared)
+    @test Array(first_advanced.samples) == Array(second_advanced.samples)
+    @test Array(first_advanced.logweights) == Array(second_advanced.logweights)
+    @test Array(first_advanced.samples) != Array(first_result.samples)
+    return nothing
+end
+
 function environment_record()
     gpu = CUDA.device()
     return (
@@ -395,6 +461,12 @@ function main()
         end
         @testset "context and one-thread launch contracts" begin
             validate_context_execution(device)
+        end
+        @testset "public preserving device and owned RNG" begin
+            for T in CUDA_PLAIN_IS_A100_TYPES
+                validate_public_preserving_device(device, T)
+            end
+            validate_public_rng_ownership_and_replay(device)
         end
     end
     return environment_record()

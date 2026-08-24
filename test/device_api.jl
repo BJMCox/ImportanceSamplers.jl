@@ -37,6 +37,9 @@ Base.copy(rng::UncopyableRNG) = rng
 struct FunctionalAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
 MLDataDevices.functional(::FunctionalAccelerator) = true
 
+struct NonfunctionalAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
+MLDataDevices.functional(::NonfunctionalAccelerator) = false
+
 struct KernelArgumentTestBackend <: KernelAbstractions.GPU end
 
 struct KernelArgumentTestArray{T,N} <: AbstractArray{T,N}
@@ -257,10 +260,28 @@ end
 
 @testset "device transfer lifecycle and accelerator limits" begin
     default_cuda = MLDataDevices.CUDADevice()
-    preserving_cuda = IS._preserving_accelerator_device(default_cuda)
     @test Base.eltype(default_cuda) === Missing
-    @test Base.eltype(preserving_cuda) === Nothing
-    @test getfield(preserving_cuda, :device) === getfield(default_cuda, :device)
+
+    scalar_policy_source = prepare_sampler(
+        Random.Xoshiro(0x2200),
+        product_transfer_target,
+        ImportanceSampling(SphericalGaussian(0.0, 1.0); nsamples=4);
+        threaded=true,
+    )
+    expected_scalar_policy_rng = copy(getfield(scalar_policy_source, :rng))
+    scalar_policy_error = caught_device_error(
+        () -> default_cuda(scalar_policy_source),
+    )
+    @test scalar_policy_error isa SamplerDeviceError
+    @test scalar_policy_error.reason === :scalar_policy_unspecified
+    @test rand(getfield(scalar_policy_source, :rng), UInt64) ==
+          rand(expected_scalar_policy_rng, UInt64)
+    @test sprint(showerror, scalar_policy_error) ==
+          "prepared-sampler device transfer failed for " *
+          "$(typeof(default_cuda)): the accelerator scalar policy is " *
+          "unspecified; construct a preserving device with " *
+          "gpu_device(nothing; force=true) or " *
+          "gpu_device(device_id, nothing; force=true)"
 
     cpu = MLDataDevices.cpu_device()
     executed = make_transfer_sampler(2201; threaded=false)
@@ -278,7 +299,7 @@ end
     @test getfield(failed, :running) === false
     @test_throws SamplerAlreadyExecutedError cpu(failed)
 
-    unavailable = MLDataDevices.CUDADevice()
+    unavailable = NonfunctionalAccelerator()
     unavailable_error = caught_device_error(
         () -> unavailable(make_transfer_sampler(2202; threaded=true)),
     )

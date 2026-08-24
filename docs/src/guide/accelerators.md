@@ -40,7 +40,7 @@ prepared = prepare_sampler(
     threaded=true,
 )
 
-device = MLDataDevices.CUDADevice()
+device = MLDataDevices.gpu_device(nothing; force=true)
 prepared = device(prepared)
 # Equivalent replacement for the preceding line:
 # prepared = prepared |> device
@@ -49,7 +49,15 @@ result = importance_sample!(prepared)
 host_result = result |> cpu_device()
 ```
 
-Loading CUDA before constructing `CUDADevice()` activates the backend. Both
+Loading CUDA and cuDNN before calling `gpu_device` activates CUDA selection.
+Passing `nothing` as the public scalar policy preserves both `Float32` and
+`Float64` state. To select a specific one-indexed device, use
+`MLDataDevices.gpu_device(device_id, nothing; force=true)`. The default
+`gpu_device()` policy has `eltype(device) === Missing` and is rejected as
+`:scalar_policy_unspecified` before the source RNG advances; ImportanceSamplers
+does not rewrite that policy through MLDataDevices internals. Explicit
+non-`Missing` conversion policies remain explicit user choices and must satisfy
+the proposal and target type checks below. Both
 `p.location` and `p.scale` are recursively transferred as the complete target
 context, together with the proposal state and random buffers; the target
 indexes both arrays on the device. `prepared = device(prepared)` and
@@ -81,7 +89,9 @@ accelerator execution. Global host arrays are likewise not transferred with a
 callable. Use a top-level function or an isbits callable, and pass every
 numerical array through `p` as in the example.
 
-The prepared sampler owns its RNG stream and advances it on each run. Treat it
+The CUDA extension constructs each prepared sampler's device RNG with public
+`CUDA.RNG(seed)`; it neither retains nor seeds `CUDA.default_rng()`. The
+prepared sampler owns its RNG stream and advances it on each run. Treat it
 as a mutable, single-owner, non-reentrant handle. Concurrent use of one handle
 is unsupported; prepare independent samplers with independent RNGs. An entry
 that observes the handle already busy, including recursive re-entry, throws

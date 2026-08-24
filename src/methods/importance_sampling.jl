@@ -59,7 +59,8 @@ end
 
 Exception thrown when a requested device cannot execute a prepared sampler.
 The `reason` field identifies the rejected capability, such as an unavailable
-backend, opaque target closure, unsupported proposal, or missing device RNG.
+backend, unspecified scalar policy, opaque target closure, unsupported proposal,
+or missing device RNG.
 """
 struct SamplerDeviceError{D} <: Exception
     device::D
@@ -77,6 +78,10 @@ function Base.showerror(io::IO, error::SamplerDeviceError)
         "the requested device backend is unavailable or nonfunctional"
     elseif error.reason === :accelerator_rng_unavailable
         "accelerator random-buffer support is not available"
+    elseif error.reason === :scalar_policy_unspecified
+        "the accelerator scalar policy is unspecified; construct a preserving " *
+        "device with gpu_device(nothing; force=true) or " *
+        "gpu_device(device_id, nothing; force=true)"
     elseif error.reason === :generic_proposal_cpu_only
         "generic proposals are CPU-only"
     elseif error.reason === :product_proposal_cpu_only
@@ -170,8 +175,11 @@ Preparation always produces a CPU sampler. Apply an explicit
 its first execution to request transfer. Transfer recursively moves proposal,
 device-adaptable callable state, and every numerical array in `p`; opaque
 closure captures cannot be moved reliably and are rejected for accelerator
-execution. Native CUDA execution requires `threaded=true` and keeps returned
-arrays on the device. Set `threaded=false` for serial CPU evaluation. On CPU,
+execution. An accelerator whose public `eltype(device)` is `Missing` is rejected
+as `:scalar_policy_unspecified`; construct a preserving device with
+`MLDataDevices.gpu_device(nothing; force=true)` or the device-id form. Native
+CUDA execution requires `threaded=true` and keeps returned arrays on the
+device. Set `threaded=false` for serial CPU evaluation. On CPU,
 `threaded=true` falls back to serial execution when Julia has one default
 thread; accelerator launch policy does not depend on host thread count.
 """
@@ -267,7 +275,9 @@ function _transfer_prepared_sampler(
     sampler.device isa MLDataDevices.AbstractAcceleratorDevice && throw(
         SamplerDeviceError(device, :prepared_migration_unsupported),
     )
-    device = _preserving_accelerator_device(device)
+    if applicable(Base.eltype, device) && Base.eltype(device) === Missing
+        throw(SamplerDeviceError(device, :scalar_policy_unspecified))
+    end
     sampler.executed && throw(SamplerAlreadyExecutedError())
     sampler.threaded || throw(SamplerDeviceError(device, :serial_accelerator))
     _target_has_opaque_host_closure(sampler.target) && throw(
@@ -310,15 +320,6 @@ function _transfer_prepared_sampler(
         false,
         false,
     )
-end
-
-function _preserving_accelerator_device(device)
-    if applicable(Base.eltype, device) &&
-       Base.eltype(device) === Missing &&
-       applicable(MLDataDevices.with_eltype, device, nothing)
-        return MLDataDevices.with_eltype(device, nothing)
-    end
-    return device
 end
 
 function _transfer_prepared_sampler(

@@ -113,38 +113,6 @@ _owned_backend_rng(
     ::UInt64,
 ) = throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
 
-function _owned_backend_rng(device::MLDataDevices.CUDADevice, seed::UInt64)
-    # MLDataDevices delegates to CUDA.default_rng(), a mutable task-local cache
-    # shared by samplers created on the same task. Use it only as a concrete type
-    # witness; never retain or seed that shared object.
-    shared = try
-        MLDataDevices.default_device_rng(device)
-    catch
-        throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
-    end
-    R = typeof(shared)
-    isconcretetype(R) &&
-        ismutabletype(R) &&
-        fieldnames(R) == (:seed, :counter) &&
-        fieldtypes(R) == (UInt64, UInt64) || throw(
-        SamplerDeviceError(device, :accelerator_rng_unavailable),
-    )
-    owned = try
-        R(seed)
-    catch
-        throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
-    end
-    independent = try
-        R(seed)
-    catch
-        throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
-    end
-    owned isa Random.AbstractRNG && owned !== shared && owned !== independent || throw(
-        SamplerDeviceError(device, :accelerator_rng_unavailable),
-    )
-    return owned
-end
-
 function _importance_sample!(sampler, ::_SerialCPUExecution)
     samples, logweights = _importance_sample_generic_cpu!(sampler, false)
     return samples, logweights, (count=0, bytes=0)
