@@ -13,9 +13,12 @@ const BENCHMARK_SEED = 0x6e6174697665626d
 const SAMPLE_COUNT = SMOKE_MODE ? 4_096 : 1_048_576
 const TRIAL_SAMPLES = SMOKE_MODE ? 3 : 20
 const TRIAL_SECONDS = SMOKE_MODE ? 0.2 : 5.0
-const BENCHMARK_COMMAND =
+const BENCHMARK_COMMAND = if SMOKE_MODE
     "Kaimon ex: empty!(ARGS); push!(ARGS, \"--smoke\"); " *
     "include(\"cuda_plain_is.jl\") in the benchmark project"
+else
+    "Kaimon ex: empty!(ARGS); include(\"cuda_plain_is.jl\") in the benchmark project"
+end
 
 function proposal_generation!(samples, normals, location, scale)
     @. samples = muladd(scale, normals, location)
