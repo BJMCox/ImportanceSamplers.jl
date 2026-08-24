@@ -48,5 +48,10 @@ Runnable checks include
 [`simplex_transform.jl`](validation/reproducers/simplex_transform.jl), and the
 real-CUDA matrix
 [`cuda_plain_is.jl`](validation/reproducers/cuda_plain_is.jl).
+The runnable
+[`logistic_regression.jl`](examples/logistic_regression.jl) example performs
+end-to-end Bayesian inference for an intercept and two regression slopes. It
+uses a prior pilot to fit an inflated Gaussian proposal, then draws an
+independent final importance sample.
 For background, see the open-access survey
 [“Advances in Importance Sampling”](https://arxiv.org/abs/2102.05407).
