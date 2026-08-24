@@ -13,6 +13,7 @@ include(joinpath(@__DIR__, "..", "cuda_plain_is_capabilities.jl"))
 const VALIDATION_SEED = 0x6e61746976656770
 const VALIDATION_SAMPLES = 65_536
 const FAILURE_SAMPLES = 4_096
+const ONE_THREAD_LAUNCH_MODE = "--one-thread-launch" in ARGS
 const VALIDATION_COMMAND =
     "Kaimon ex: include(\"reproducers/cuda_plain_is.jl\") in the validation project"
 
@@ -331,7 +332,6 @@ function validate_context_execution(device)
         threaded=true,
     ) |> device
     named_result = importance_sample!(named)
-    @test Threads.nthreads(:default) == 1
     @test named_result.samples isa CuArray
     @test named_result.logweights isa CuArray
     @test length(named_result) == 2_048
@@ -360,6 +360,8 @@ function environment_record()
         failure_sample_count=FAILURE_SAMPLES,
         scalar_types=CUDA_PLAIN_IS_A100_TYPES,
         cases=CUDA_PLAIN_IS_A100_CASES,
+        mode=ONE_THREAD_LAUNCH_MODE ? :one_thread_launch : :full_matrix,
+        default_threads=Threads.nthreads(:default),
         tolerances=(
             summaries="5 standard errors from analytic variance or trace-variance bounds",
             cpu_cuda_difference="5sqrt(2) standard errors for independent streams",
@@ -372,6 +374,13 @@ end
 
 function main()
     device = cuda_device()
+    if ONE_THREAD_LAUNCH_MODE
+        @testset "CUDA one-thread launch contract" begin
+            @test Threads.nthreads(:default) == 1
+            validate_context_execution(device)
+        end
+        return environment_record()
+    end
     @testset "CUDA plain importance sampling" begin
         for T in CUDA_PLAIN_IS_A100_TYPES
             cases = validation_cases(T)
