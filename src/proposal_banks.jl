@@ -84,6 +84,25 @@ function _prepare_active_proposal_bank(bank::ProposalBank)
     )
 end
 
+function _proposal_dimension(bank::ProposalBank)
+    dimension = nothing
+    for proposal_id in eachindex(bank.proposals, bank.masses)
+        iszero(bank.masses[proposal_id]) && continue
+        proposal_dimension = _proposal_dimension(bank.proposals[proposal_id])
+        proposal_dimension === nothing && return nothing
+        if dimension === nothing
+            dimension = proposal_dimension
+        elseif proposal_dimension != dimension
+            throw(
+                DimensionMismatch(
+                    "positive-mass proposals must have one common dimension",
+                ),
+            )
+        end
+    end
+    return dimension
+end
+
 function ProposalBank(proposals::AbstractVector)
     isempty(proposals) && throw(ArgumentError("a proposal bank cannot be empty"))
     return ProposalBank(proposals, ones(Float64, length(proposals)))

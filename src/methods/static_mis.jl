@@ -11,9 +11,8 @@ struct _PreparedStaticMIS{B,D}
     design::D
 end
 
-struct _StaticMISRandomBuffers{A,F}
+struct _StaticMISRandomBuffers{A}
     assignments::A
-    failures::F
 end
 
 struct _StaticMISDenominatorEvaluator{T,B,A,D}
@@ -63,8 +62,7 @@ function _allocate_random_buffers(
     nsamples,
 )
     assignments = Vector{Int}(undef, nsamples)
-    failures = Vector{Union{Nothing,SamplerExecutionError}}(nothing, nsamples)
-    return _StaticMISRandomBuffers(assignments, failures)
+    return _StaticMISRandomBuffers(assignments)
 end
 
 _native_failure_scratch(::_StaticMISRandomBuffers) = _NoNativeFailureScratch()
@@ -72,8 +70,13 @@ _native_failure_scratch(::_StaticMISRandomBuffers) = _NoNativeFailureScratch()
 function _compile_assignments!(rng, assignments, ::_StratifiedAssignment, cdf)
     nsamples = length(assignments)
     for sample_index in eachindex(assignments)
-        uniform = ((sample_index - 1) + rand(rng)) / nsamples
-        assignments[sample_index] = searchsortedfirst(cdf, uniform)
+        assignments[sample_index] = _capture_sampler_failure(
+            :proposal_draw,
+            sample_index,
+        ) do
+            uniform = ((sample_index - 1) + rand(rng)) / nsamples
+            searchsortedfirst(cdf, uniform)
+        end
     end
     return assignments
 end
@@ -81,14 +84,12 @@ end
 function _draw_static_mis_batch!(sampler, method_state::_PreparedStaticMIS)
     bank = method_state.bank
     assignments = sampler.random_buffers.assignments
-    _capture_sampler_failure(:proposal_draw, 1) do
-        _compile_assignments!(
-            sampler.rng,
-            assignments,
-            method_state.design.assignment,
-            bank.cdf,
-        )
-    end
+    _compile_assignments!(
+        sampler.rng,
+        assignments,
+        method_state.design.assignment,
+        bank.cdf,
+    )
 
     first_slot = assignments[1]
     first_sample = _capture_sampler_failure(:proposal_draw, 1) do
@@ -214,67 +215,30 @@ function _validate_reduced_mis_denominator(value)
     return nothing
 end
 
-function _evaluate_static_mis_logs_threaded!(
-    logs,
-    evaluator,
-    samples,
-    phase,
-    failures,
-)
-    fill!(failures, nothing)
-    ntasks = min(Threads.nthreads(:default), length(logs))
-    chunk_size = cld(length(logs), ntasks)
-    tasks = Task[]
-    for first_index in 1:chunk_size:length(logs)
-        last_index = min(first_index + chunk_size - 1, length(logs))
-        let indices = first_index:last_index
-            task = Threads.@spawn _evaluate_log_chunk!(
-                logs,
-                evaluator,
-                samples,
-                indices,
-                phase,
-            )
-            push!(tasks, task)
-        end
-    end
-    for task in tasks
-        failure = fetch(task)::Union{Nothing,SamplerExecutionError}
-        failure === nothing || (failures[failure.sample_index] = failure)
-    end
-    failure_index = findfirst(!isnothing, failures)
-    failure_index === nothing || throw(failures[failure_index])
-    return logs
-end
-
 function _evaluate_static_mis_logweights!(
     ::Type{T},
     target,
     denominator,
     samples,
-    buffers,
     threaded,
 ) where {T<:AbstractFloat}
     nsamples = _sample_count(samples)
     target_logs = Vector{T}(undef, nsamples)
     logweights = Vector{T}(undef, nsamples)
     if threaded
-        _evaluate_static_mis_logs_threaded!(
+        _evaluate_logs_threaded!(
             target_logs,
             target,
             samples,
             Val(:target),
-            buffers.failures,
         )
-        _evaluate_static_mis_logs_threaded!(
+        _evaluate_logs_threaded!(
             logweights,
             denominator,
             samples,
             Val(:proposal_logdensity),
-            buffers.failures,
         )
     else
-        fill!(buffers.failures, nothing)
         _evaluate_target_logs!(target_logs, target, samples)
         _evaluate_proposal_logs!(logweights, denominator, samples)
     end
@@ -302,7 +266,6 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedStaticMIS, thre
         target,
         denominator,
         samples,
-        sampler.random_buffers,
         threaded,
     )
     diagnostics = (

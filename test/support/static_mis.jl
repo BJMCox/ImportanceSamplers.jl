@@ -1,6 +1,32 @@
 import DensityInterface
+import LogDensityProblems
 import Random
 import Random: rand
+
+struct StaticMISDimensionTarget{D} end
+
+LogDensityProblems.capabilities(::Type{<:StaticMISDimensionTarget}) =
+    LogDensityProblems.LogDensityOrder{0}()
+LogDensityProblems.dimension(::StaticMISDimensionTarget{D}) where {D} = D
+LogDensityProblems.logdensity(::StaticMISDimensionTarget, sample) = -sum(abs2, sample)
+
+struct StaticMISAssignmentFailure <: Exception
+    sample_index::Int
+end
+
+mutable struct StaticMISFailingAssignmentRNG{R<:Random.AbstractRNG} <: Random.AbstractRNG
+    inner::R
+    uniform_count::Int
+    fail_at::Int
+end
+
+function rand(rng::StaticMISFailingAssignmentRNG)
+    rng.uniform_count += 1
+    rng.uniform_count == rng.fail_at && throw(
+        StaticMISAssignmentFailure(rng.uniform_count),
+    )
+    return rand(rng.inner)
+end
 
 mutable struct StaticMISGaussian{T<:AbstractFloat}
     location::T

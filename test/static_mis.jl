@@ -7,6 +7,15 @@ include("support/static_mis.jl")
 
 const IS = ImportanceSamplers
 
+function caught_static_mis_failure(f)
+    try
+        f()
+    catch error
+        return error
+    end
+    return nothing
+end
+
 @testset "proposal-bank configuration" begin
     proposals = [
         SphericalGaussian(-1.0, 1.0),
@@ -100,7 +109,6 @@ end
     @test sampler.method_state.design.denominator isa IS._FullMixtureDenominator
 
     assignment_storage = sampler.random_buffers.assignments
-    failure_storage = sampler.random_buffers.failures
     first_samples = copy(result.samples)
     first_weights = copy(result.logweights)
     first_ids = copy(result.provenance.proposal_id)
@@ -110,7 +118,6 @@ end
     @test result.logweights !== second_result.logweights
     @test result.provenance.proposal_id !== second_result.provenance.proposal_id
     @test sampler.random_buffers.assignments === assignment_storage
-    @test sampler.random_buffers.failures === failure_storage
     @test result.samples == first_samples
     @test result.logweights == first_weights
     @test result.provenance.proposal_id == first_ids
@@ -139,6 +146,65 @@ end
         threaded=false,
     )
     @test first_proposal.draw_count[] + third_proposal.draw_count[] == draws_before
+end
+
+@testset "static-MIS active proposal dimension" begin
+    bank = ProposalBank(
+        [
+            SphericalGaussian(zeros(2), 1.0),
+            SphericalGaussian(ones(2), 1.0),
+            SphericalGaussian(zeros(7), 1.0),
+        ],
+        [1, 1, 0],
+    )
+    algorithm = ImportanceSampling(bank; nsamples=8)
+
+    @test_throws DimensionMismatch prepare_sampler(
+        Random.Xoshiro(0x5200),
+        StaticMISDimensionTarget{3}(),
+        algorithm;
+        threaded=false,
+    )
+
+    sampler = @inferred prepare_sampler(
+        Random.Xoshiro(0x5201),
+        StaticMISDimensionTarget{2}(),
+        algorithm;
+        threaded=false,
+    )
+    result = @inferred importance_sample!(sampler)
+    @test size(result.samples) == (2, 8)
+    @test all(id -> id in (1, 2), result.provenance.proposal_id)
+
+    external_bank = ProposalBank(
+        [StaticMISGaussian(-1.0), StaticMISGaussian(1.0)],
+    )
+    unknown_dimension = @inferred prepare_sampler(
+        Random.Xoshiro(0x5202),
+        StaticMISDimensionTarget{3}(),
+        ImportanceSampling(external_bank; nsamples=4);
+        threaded=false,
+    )
+    @test length(importance_sample!(unknown_dimension)) == 4
+end
+
+@testset "stratified assignment failure location" begin
+    proposals = [StaticMISGaussian(-1.0), StaticMISGaussian(1.0)]
+    rng = StaticMISFailingAssignmentRNG(Random.Xoshiro(0x5207), 0, 3)
+    sampler = prepare_sampler(
+        rng,
+        _ -> 0.0,
+        ImportanceSampling(ProposalBank(proposals); nsamples=8);
+        threaded=false,
+    )
+    failure = caught_static_mis_failure(() -> importance_sample!(sampler))
+
+    @test failure isa SamplerExecutionError
+    @test (failure.phase, failure.sample_index) == (:proposal_draw, 3)
+    @test failure.captured.ex isa StaticMISAssignmentFailure
+    @test failure.captured.ex.sample_index == 3
+    @test rng.uniform_count == 3
+    @test all(iszero(proposal.draw_count[]) for proposal in proposals)
 end
 
 @testset "stratified assignments precede proposal draws" begin
@@ -198,15 +264,6 @@ function static_mis_table_result(
         threaded,
     )
     return sampler, proposals
-end
-
-function caught_static_mis_failure(f)
-    try
-        f()
-    catch error
-        return error
-    end
-    return nothing
 end
 
 @testset "stratified static-MIS log-value truth table" begin
