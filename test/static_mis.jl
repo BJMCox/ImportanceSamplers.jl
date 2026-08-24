@@ -123,21 +123,6 @@ end
     @test result.provenance.proposal_id == first_ids
 
     draws_before = first_proposal.draw_count[] + third_proposal.draw_count[]
-    for scheme in (
-        RandomMixture(),
-        StandardMIS(),
-        PartialDeterministicMixture(((1, 2, 3),)),
-    )
-        unsupported = ImportanceSampling(bank; nsamples=3, mis_scheme=scheme)
-        @test_throws ArgumentError prepare_sampler(
-            Random.Xoshiro(43),
-            mixture_logtarget,
-            unsupported;
-            threaded=false,
-        )
-    end
-    @test first_proposal.draw_count[] + third_proposal.draw_count[] == draws_before
-
     abstract_bank = ProposalBank(Any[first_proposal, third_proposal])
     @test_throws ArgumentError prepare_sampler(
         Random.Xoshiro(44),
@@ -146,6 +131,181 @@ end
         threaded=false,
     )
     @test first_proposal.draw_count[] + third_proposal.draw_count[] == draws_before
+end
+
+@testset "random-mixture assignment and identity" begin
+    first_proposal = StaticMISGaussian(-1.0)
+    inert_proposal = StaticMISGaussian(50.0)
+    third_proposal = StaticMISGaussian(1.0)
+    bank = ProposalBank(
+        [first_proposal, inert_proposal, third_proposal],
+        [1, 0, 3],
+    )
+    mixture_logtarget = sample -> log(
+        0.25 * exp(static_mis_gaussian_logdensity(-1.0, sample)) +
+        0.75 * exp(static_mis_gaussian_logdensity(1.0, sample)),
+    )
+    nsamples = 20_000
+    sampler = @inferred prepare_sampler(
+        Random.Xoshiro(0x5301),
+        mixture_logtarget,
+        ImportanceSampling(
+            bank;
+            nsamples,
+            mis_scheme=RandomMixture(),
+        );
+        threaded=false,
+    )
+    result = @inferred importance_sample!(sampler)
+
+    first_frequency = count(==(1), result.provenance.proposal_id) / nsamples
+    @test length(result) == nsamples
+    @test abs(first_frequency - 0.25) < 0.02
+    @test all(id -> id in (1, 3), result.provenance.proposal_id)
+    @test maximum(abs, result.logweights) <= 4096eps(Float64)
+    @test abs(lognormalizer(result)) <= 4096eps(Float64)
+    @test first_proposal.draw_count[] + third_proposal.draw_count[] == nsamples
+    @test first_proposal.density_count[] == nsamples
+    @test third_proposal.density_count[] == nsamples
+    @test inert_proposal.draw_count[] == 0
+    @test inert_proposal.density_count[] == 0
+    @test sampler.method_state.design.assignment isa IS._RandomAssignment
+    @test sampler.method_state.design.denominator isa IS._FullMixtureDenominator
+    @test result.diagnostics.mis_scheme === :random_mixture
+end
+
+@testset "standard MIS generating denominator" begin
+    first_proposal = StaticMISGaussian(0.0)
+    inert_proposal = StaticMISGaussian(50.0)
+    third_proposal = StaticMISGaussian(0.0)
+    bank = ProposalBank(
+        [first_proposal, inert_proposal, third_proposal],
+        [1, 0, 3],
+    )
+    target = sample -> static_mis_gaussian_logdensity(0.0, sample)
+    nsamples = 1_001
+    sampler = @inferred prepare_sampler(
+        Random.Xoshiro(0x5302),
+        target,
+        ImportanceSampling(
+            bank;
+            nsamples,
+            mis_scheme=StandardMIS(),
+        );
+        threaded=false,
+    )
+    result = @inferred importance_sample!(sampler)
+
+    @test length(result) == nsamples
+    @test all(id -> id in (1, 3), result.provenance.proposal_id)
+    @test maximum(abs, result.logweights) <= 16eps(Float64)
+    @test first_proposal.density_count[] + third_proposal.density_count[] == nsamples
+    @test first_proposal.density_count[] == count(==(1), result.provenance.proposal_id)
+    @test third_proposal.density_count[] == count(==(3), result.provenance.proposal_id)
+    @test inert_proposal.draw_count[] == 0
+    @test inert_proposal.density_count[] == 0
+    @test sampler.method_state.design.assignment isa IS._StratifiedAssignment
+    @test sampler.method_state.design.denominator isa IS._GeneratingDenominator
+    @test result.diagnostics.mis_scheme === :standard_mis
+end
+
+@testset "partial deterministic-mixture validation" begin
+    proposals = [StaticMISGaussian(Float64(id)) for id in 1:5]
+    bank = ProposalBank(proposals, [1, 2, 3, 4, 0])
+    target = _ -> 0.0
+    invalid_groups = (
+        (),
+        ((1, 2), (), (3, 4, 5)),
+        ((1, 2), (2, 3, 4, 5)),
+        ((1, 2), (3, 4)),
+        ((1, 2), (3, 4, 5, 6)),
+    )
+
+    for groups in invalid_groups
+        events = Symbol[]
+        rng = StaticMISRecordingRNG(Random.Xoshiro(0x5303), events)
+        algorithm = ImportanceSampling(
+            bank;
+            nsamples=8,
+            mis_scheme=PartialDeterministicMixture(groups),
+        )
+        @test_throws ArgumentError prepare_sampler(
+            rng,
+            target,
+            algorithm;
+            threaded=false,
+        )
+        @test isempty(events)
+    end
+
+    sampler = @inferred prepare_sampler(
+        Random.Xoshiro(0x5304),
+        target,
+        ImportanceSampling(
+            bank;
+            nsamples=16,
+            mis_scheme=PartialDeterministicMixture(
+                ((1, 2), (5,), (3, 4)),
+            ),
+        );
+        threaded=false,
+    )
+    denominator = sampler.method_state.design.denominator
+    result = @inferred importance_sample!(sampler)
+
+    @test denominator isa IS._PartialMixtureDenominator
+    @test denominator.group_of_slot == [1, 1, 2, 2]
+    @test denominator.offsets == [1, 3, 5]
+    @test denominator.members == [1, 2, 3, 4]
+    @test exp.(denominator.logcoefficients) ≈ [1 / 3, 2 / 3, 3 / 7, 4 / 7]
+    @test all(id -> id in (1, 2, 3, 4), result.provenance.proposal_id)
+    @test proposals[5].draw_count[] == 0
+    @test proposals[5].density_count[] == 0
+end
+
+@testset "partial deterministic-mixture brute-force denominator" begin
+    proposal_logs = [
+        -0.1 -0.7 -1.2 -1.8
+        -0.4 -0.2 -1.5 -1.1
+        -1.4 -1.0 -0.3 -0.8
+        -1.7 -1.3 -0.6 -0.05
+    ]
+    proposals = [
+        StaticMISTableProposal(id, Float64(id), proposal_logs) for id in 1:4
+    ]
+    nominal_masses = [1.0, 2.0, 3.0, 4.0]
+    groups = ((1, 2), (3, 4))
+    nsamples = 101
+    sampler = @inferred prepare_sampler(
+        Random.Xoshiro(0x5305),
+        StaticMISTableTarget(zeros(4)),
+        ImportanceSampling(
+            ProposalBank(proposals, nominal_masses);
+            nsamples,
+            mis_scheme=PartialDeterministicMixture(groups),
+        );
+        threaded=false,
+    )
+    result = @inferred importance_sample!(sampler)
+
+    for sample_index in eachindex(result.logweights)
+        proposal_id = result.provenance.proposal_id[sample_index]
+        group = proposal_id <= 2 ? groups[1] : groups[2]
+        sample = Int(result.samples[sample_index])
+        group_masses = nominal_masses[collect(group)]
+        coefficients = group_masses ./ sum(group_masses)
+        expected_denominator = log(sum(
+            coefficients[group_index] * exp(proposal_logs[member, sample])
+            for (group_index, member) in enumerate(group)
+        ))
+        @test -result.logweights[sample_index] ≈ expected_denominator
+    end
+    first_group_count = count(<=(2), result.provenance.proposal_id)
+    @test proposals[1].density_count[] == first_group_count
+    @test proposals[2].density_count[] == first_group_count
+    @test proposals[3].density_count[] == nsamples - first_group_count
+    @test proposals[4].density_count[] == nsamples - first_group_count
+    @test result.diagnostics.mis_scheme === :partial_deterministic_mixture
 end
 
 @testset "static-MIS active proposal dimension" begin
@@ -207,39 +367,44 @@ end
     @test all(iszero(proposal.draw_count[]) for proposal in proposals)
 end
 
-@testset "stratified assignments precede proposal draws" begin
+@testset "static-MIS assignments precede proposal draws" begin
     nsamples = 17
-    events = Symbol[]
-    proposals = [
-        StaticMISUniformProposal(-1.0, Ref(0), events),
-        StaticMISUniformProposal(1.0, Ref(0), events),
-    ]
-    bank = ProposalBank(proposals, [1, 3])
-    rng = StaticMISRecordingRNG(Random.Xoshiro(0x5202), events)
-    result = importance_sample(
-        rng,
-        _ -> 0.0,
-        ImportanceSampling(bank; nsamples=nsamples);
-        threaded=false,
-    )
+    for scheme in (StratifiedMixture(), RandomMixture())
+        events = Symbol[]
+        proposals = [
+            StaticMISUniformProposal(-1.0, Ref(0), events),
+            StaticMISUniformProposal(1.0, Ref(0), events),
+        ]
+        bank = ProposalBank(proposals, [1, 3])
+        rng = StaticMISRecordingRNG(Random.Xoshiro(0x5202), events)
+        result = importance_sample(
+            rng,
+            _ -> 0.0,
+            ImportanceSampling(bank; nsamples, mis_scheme=scheme);
+            threaded=false,
+        )
 
-    @test length(result) == nsamples
-    @test events[1:nsamples] == fill(:random, nsamples)
-    @test events[(nsamples + 1):end] == repeat([:draw, :random], nsamples)
-    @test sum(proposal.draw_count[] for proposal in proposals) == nsamples
+        @test length(result) == nsamples
+        @test events[1:nsamples] == fill(:random, nsamples)
+        @test events[(nsamples + 1):end] == repeat([:draw, :random], nsamples)
+        @test sum(proposal.draw_count[] for proposal in proposals) == nsamples
 
-    expected_rng = Random.Xoshiro(0x5202)
-    cdf = cumsum(bank.masses)
-    cdf[end] = 1.0
-    expected_slots = [
-        searchsortedfirst(cdf, ((sample_index - 1) + rand(expected_rng)) / nsamples)
-        for sample_index in 1:nsamples
-    ]
-    expected_samples = [
-        proposals[slot].location + rand(expected_rng) for slot in expected_slots
-    ]
-    @test result.provenance.proposal_id == expected_slots
-    @test result.samples == expected_samples
+        expected_rng = Random.Xoshiro(0x5202)
+        cdf = cumsum(bank.masses)
+        cdf[end] = 1.0
+        expected_slots = [
+            searchsortedfirst(
+                cdf,
+                scheme isa RandomMixture ? rand(expected_rng) :
+                ((sample_index - 1) + rand(expected_rng)) / nsamples,
+            ) for sample_index in 1:nsamples
+        ]
+        expected_samples = [
+            proposals[slot].location + rand(expected_rng) for slot in expected_slots
+        ]
+        @test result.provenance.proposal_id == expected_slots
+        @test result.samples == expected_samples
+    end
 end
 
 function static_mis_table_result(
@@ -264,6 +429,107 @@ function static_mis_table_result(
         threaded,
     )
     return sampler, proposals
+end
+
+function static_mis_scheme_table_result(
+    proposal_logs::Matrix{T},
+    target_logs::Vector{T},
+    scheme;
+    threaded=false,
+) where {T<:AbstractFloat}
+    nproposals = size(proposal_logs, 1)
+    proposals = [
+        StaticMISTableProposal(
+            proposal_id,
+            T(proposal_id),
+            proposal_logs,
+        ) for proposal_id in 1:nproposals
+    ]
+    return importance_sample(
+        Random.Xoshiro(0x5306),
+        StaticMISTableTarget(target_logs),
+        ImportanceSampling(
+            ProposalBank(proposals);
+            nsamples=nproposals,
+            mis_scheme=scheme,
+        );
+        threaded,
+    )
+end
+
+@testset "static-MIS support conditions" begin
+    nproposals = 4
+    target_logs = fill(-log(nproposals), nproposals)
+    disjoint_logs = fill(-Inf, nproposals, nproposals)
+    for proposal_id in 1:nproposals
+        disjoint_logs[proposal_id, proposal_id] = 0.0
+    end
+
+    aggregate = static_mis_scheme_table_result(
+        disjoint_logs,
+        target_logs,
+        StratifiedMixture(),
+    )
+    partial_without_group_support = static_mis_scheme_table_result(
+        disjoint_logs,
+        target_logs,
+        PartialDeterministicMixture(((1, 2), (3, 4))),
+    )
+    standard_without_generator_support = static_mis_scheme_table_result(
+        disjoint_logs,
+        target_logs,
+        StandardMIS(),
+    )
+
+    @test all(isfinite, aggregate.logweights)
+    @test maximum(abs, aggregate.logweights) <= 16eps(Float64)
+    @test abs(lognormalizer(aggregate)) <= 16eps(Float64)
+    @test partial_without_group_support.logweights ≈ fill(-log(2), nproposals)
+    @test lognormalizer(partial_without_group_support) ≈ -log(2)
+    @test standard_without_generator_support.logweights ≈
+          fill(-log(nproposals), nproposals)
+    @test lognormalizer(standard_without_generator_support) ≈ -log(nproposals)
+
+    common_logs = fill(-log(nproposals), nproposals, nproposals)
+    for scheme in (
+        StandardMIS(),
+        PartialDeterministicMixture(((1, 2), (3, 4))),
+    )
+        supported = static_mis_scheme_table_result(
+            common_logs,
+            target_logs,
+            scheme,
+        )
+        @test all(isfinite, supported.logweights)
+        @test maximum(abs, supported.logweights) <= 16eps(Float64)
+        @test abs(lognormalizer(supported)) <= 16eps(Float64)
+    end
+end
+
+@testset "remaining static-MIS denominator truth values" begin
+    generating_plus_inf = [Inf 0.0; 0.0 Inf]
+    for scheme in (
+        StandardMIS(),
+        PartialDeterministicMixture(((1, 2),)),
+    )
+        zero_weight = static_mis_scheme_table_result(
+            generating_plus_inf,
+            zeros(2),
+            scheme,
+        )
+        @test zero_weight.logweights == fill(-Inf, 2)
+        @test lognormalizer(zero_weight) == -Inf
+
+        for invalid in ([-Inf 0.0; 0.0 0.0], [NaN 0.0; 0.0 0.0])
+            failure = caught_static_mis_failure() do
+                static_mis_scheme_table_result(invalid, zeros(2), scheme)
+            end
+            @test failure isa SamplerExecutionError
+            @test (failure.phase, failure.sample_index) ==
+                  (:proposal_logdensity, 1)
+            @test failure.captured.ex isa DomainError
+        end
+    end
 end
 
 @testset "stratified static-MIS log-value truth table" begin
@@ -416,6 +682,45 @@ end
     else
         @test all(==(caller_task), threaded_state.target_tasks)
         @test all(==(caller_task), threaded_state.density_tasks)
+    end
+end
+
+@testset "remaining static-MIS schemes serial and threaded" begin
+    proposals = [
+        SphericalGaussian(-3.0, 1.0),
+        SphericalGaussian(-1.0, 1.0),
+        SphericalGaussian(1.0, 1.0),
+        SphericalGaussian(3.0, 1.0),
+    ]
+    bank = ProposalBank(proposals, [1, 2, 3, 4])
+    target = sample -> -abs2(sample) / 2
+    nsamples = 257
+
+    for scheme in (
+        RandomMixture(),
+        StandardMIS(),
+        PartialDeterministicMixture(((1, 2), (3, 4))),
+    )
+        algorithm = ImportanceSampling(bank; nsamples, mis_scheme=scheme)
+        serial = @inferred importance_sample(
+            Random.Xoshiro(0x5307),
+            target,
+            algorithm;
+            threaded=false,
+        )
+        threaded = @inferred importance_sample(
+            Random.Xoshiro(0x5307),
+            target,
+            algorithm;
+            threaded=true,
+        )
+
+        @test serial.samples == threaded.samples
+        @test serial.logweights == threaded.logweights
+        @test serial.provenance == threaded.provenance
+        @test serial.diagnostics.execution === :serial
+        expected_execution = Threads.nthreads(:default) > 1 ? :threaded : :serial
+        @test threaded.diagnostics.execution === expected_execution
     end
 end
 
