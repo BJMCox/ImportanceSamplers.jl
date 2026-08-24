@@ -8,6 +8,36 @@ mutable struct _ResultTransferCounter
     bytes::Int
 end
 
+struct _LogSumExpAccumulator{T<:AbstractFloat}
+    maximum::T
+    scaled_sum::T
+end
+
+@inline _logsumexp_accumulator(value::T) where {T<:AbstractFloat} =
+    _LogSumExpAccumulator(value, value == -Inf ? zero(T) : one(T))
+
+@inline function _merge_logsumexp_accumulators(
+    left::_LogSumExpAccumulator{T},
+    right::_LogSumExpAccumulator{T},
+) where {T}
+    if left.maximum >= right.maximum
+        left.maximum == -Inf && return left
+        return _LogSumExpAccumulator(
+            left.maximum,
+            left.scaled_sum + right.scaled_sum * exp(right.maximum - left.maximum),
+        )
+    end
+    return _LogSumExpAccumulator(
+        right.maximum,
+        right.scaled_sum + left.scaled_sum * exp(left.maximum - right.maximum),
+    )
+end
+
+@inline function _finish_logsumexp(accumulator::_LogSumExpAccumulator)
+    accumulator.maximum == -Inf && return accumulator.maximum
+    return accumulator.maximum + log(accumulator.scaled_sum)
+end
+
 function _record_scalar_transfer!(counter::_ResultTransferCounter, ::Type{T}) where {T}
     counter.count += 1
     counter.bytes += sizeof(T)
@@ -214,7 +244,7 @@ end
 
 function _transfer_result_storage(device, storage::AbstractArray)
     transferred = device(storage)
-    return _storage_device(storage) == device ? copy(transferred) : transferred
+    return transferred === storage ? copy(transferred) : transferred
 end
 
 function _transfer_result_storage(device, storage::NamedTuple)
@@ -536,16 +566,19 @@ function normalized_weights(result::_AbstractWeightedSamples)
 end
 
 function _logweight_sum(result::_AbstractWeightedSamples)
-    logweight_sum = LogExpFunctions.logsumexp(result.logweights)
-    accumulator_type = Base.promote_op(
-        LogExpFunctions._logsumexp_onepass_op,
-        eltype(result.logweights),
-        eltype(result.logweights),
+    _is_host_storage(result.logweights) &&
+        return LogExpFunctions.logsumexp(result.logweights)
+    T = eltype(result.logweights)
+    accumulator = mapreduce(
+        _logsumexp_accumulator,
+        _merge_logsumexp_accumulators,
+        result.logweights;
+        init=_LogSumExpAccumulator(T(-Inf), zero(T)),
     )
     _record_device_scalar_transfer!(
         _result_transfers(result),
         result.logweights,
-        accumulator_type,
+        typeof(accumulator),
     )
-    return logweight_sum
+    return _finish_logsumexp(accumulator)
 end

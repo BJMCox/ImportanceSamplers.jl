@@ -1,9 +1,13 @@
 using Test
 using ImportanceSamplers
 import MLDataDevices
+import LogExpFunctions
 import Statistics
 struct ResultTestDevice <: MLDataDevices.AbstractAcceleratorDevice
     id::Int
+end
+mutable struct ResultMutableNumber <: Number
+    value::Int
 end
 struct ResultBackendArray{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
     storage::A
@@ -15,6 +19,7 @@ const result_backend_reductions = Ref(0)
 const result_backend_copies = Ref(0)
 const result_backend_deepcopies = Ref(0)
 const result_backend_materializations = Ref(0)
+const result_backend_payload_bytes = Ref(0)
 const forbid_result_backend_scalar_access = Ref(true)
 Base.size(array::ResultBackendArray) = size(array.storage)
 Base.IndexStyle(::Type{<:ResultBackendArray}) = IndexLinear()
@@ -28,11 +33,15 @@ function Base.iterate(array::ResultBackendArray, state...)
 end
 function Base.mapreduce(f, op, array::ResultBackendArray; kwargs...)
     result_backend_reductions[] += 1
-    return mapreduce(f, op, array.storage; kwargs...)
+    result = mapreduce(f, op, array.storage; kwargs...)
+    result_backend_payload_bytes[] += sizeof(typeof(result))
+    return result
 end
-function Base.reduce(op, array::ResultBackendArray; kwargs...)
+function LogExpFunctions.logsumexp(array::ResultBackendArray)
     result_backend_reductions[] += 1
-    return reduce(op, array.storage; kwargs...)
+    result = LogExpFunctions.logsumexp(array.storage)
+    result_backend_payload_bytes[] += sizeof(typeof(result))
+    return result
 end
 function Base.copy(array::ResultBackendArray)
     result_backend_copies[] += 1
@@ -108,8 +117,10 @@ end
     failure_record = ImportanceSamplers._DeviceFailureRecord(
         ResultBackendArray(zeros(UInt64, 2)),
     )
-    failure_payload_bytes = sizeof(Array(failure_record.storage))
     result_backend_materializations[] = 0
+    failure_payload_bytes =
+        length(failure_record.storage) * sizeof(eltype(failure_record.storage))
+    @test result_backend_materializations[] == 0
     failure_snapshot = ImportanceSamplers._device_failure_snapshot(failure_record)
     cpu_failure_snapshot = ImportanceSamplers._device_failure_snapshot(
         ImportanceSamplers._DeviceFailureRecord(zeros(UInt64, 2)),
@@ -167,23 +178,36 @@ end
         ResultBackendArray([1.0, 2.0, 3.0]),
         ResultBackendArray([-3.0, -2.0, -1.0]),
     )
+    result_backend_payload_bytes[] = 0
+    before = (result.diagnostics.transfers.count, result.diagnostics.transfers.bytes)
     weights = @inferred normalized_weights(result)
     @test weights isa ResultBackendArray
     @test Array(weights) ≈ exp.([-2.0, -1.0, 0.0]) ./ sum(exp.([-2.0, -1.0, 0.0]))
-    @test (result.diagnostics.transfers.count, result.diagnostics.transfers.bytes) ==
-          (2, sizeof(Tuple{Float64,Float64}) + sizeof(Bool))
+    @test (result.diagnostics.transfers.count, result.diagnostics.transfers.bytes) .- before ==
+          (1, result_backend_payload_bytes[])
+    @test result_backend_payload_bytes[] == 2sizeof(Float64)
+    result_backend_payload_bytes[] = 0
+    before = (result.diagnostics.transfers.count, result.diagnostics.transfers.bytes)
     @test (@inferred lognormalizer(result)) ≈
           -1 + log(exp(-2.0) + exp(-1.0) + 1) - log(3.0)
-    @test (result.diagnostics.transfers.count, result.diagnostics.transfers.bytes) ==
-          (3, 2sizeof(Tuple{Float64,Float64}) + sizeof(Bool))
+    @test (result.diagnostics.transfers.count, result.diagnostics.transfers.bytes) .- before ==
+          (1, result_backend_payload_bytes[])
+    @test result_backend_payload_bytes[] == 2sizeof(Float64)
     float32 = ImportanceSamplers._adopt_weighted_samples(
         ResultBackendArray(Float32[1, 2]),
         ResultBackendArray(Float32[-2, -1]),
     )
+    result_backend_payload_bytes[] = 0
     normalized_weights(float32)
     lognormalizer(float32)
     @test (float32.diagnostics.transfers.count, float32.diagnostics.transfers.bytes) ==
-          (3, 2sizeof(Tuple{Float32,Float32}) + sizeof(Bool))
+          (3, result_backend_payload_bytes[] + sizeof(Bool))
+    @test result_backend_payload_bytes[] == 4sizeof(Float32)
+    stable = ImportanceSamplers._adopt_weighted_samples(
+        ResultBackendArray([1.0, 2.0]),
+        ResultBackendArray([-1000.0, 0.0]),
+    )
+    @test lognormalizer(stable) ≈ LogExpFunctions.logsumexp([-1000.0, 0.0]) - log(2)
     all_zero = ImportanceSamplers._adopt_weighted_samples(
         ResultBackendArray([1.0, 2.0]),
         ResultBackendArray([-Inf, -Inf]),
@@ -236,6 +260,26 @@ end
         @test actual !== original
     end
     @test same_device.diagnostics.transfers !== source.diagnostics.transfers
+    referent = ResultMutableNumber(1)
+    shallow_source = ImportanceSamplers._adopt_weighted_samples(
+        ResultBackendArray([referent]),
+        ResultBackendArray([-1.0]),
+    )
+    shallow_destination = ResultTestDevice(1)(shallow_source)
+    @test shallow_destination.samples !== shallow_source.samples
+    @test shallow_destination.samples.storage[1] === referent
+
+    same_eltype_source = WeightedSamples(
+        Float32[1, 2],
+        Float32[-2, -1];
+        diagnostics=(trace=Float32[2, 1],),
+    )
+    same_eltype_destination = @inferred MLDataDevices.cpu_device(Float32)(same_eltype_source)
+    same_eltype_destination.samples[1] = same_eltype_destination.logweights[1] = 99
+    same_eltype_destination.diagnostics.trace[1] = 99
+    @test same_eltype_source.samples == Float32[1, 2]
+    @test same_eltype_source.logweights == Float32[-2, -1]
+    @test same_eltype_source.diagnostics.trace == Float32[2, 1]
 
     destination.samples[1] = destination.logweights[1] = -10.0
     destination.provenance.proposal_id[1] = destination.diagnostics.trace[1] = -1
@@ -253,5 +297,7 @@ end
     @test cpu_destination.logweights == Float32[-2, -1]
     @test cpu_destination.diagnostics.trace == Float32[2, 1]
     @test cpu_destination.samples !== cpu_source.samples
+    @test cpu_destination.logweights !== cpu_source.logweights
+    @test cpu_destination.diagnostics.trace !== cpu_source.diagnostics.trace
     @test cpu_destination.diagnostics.transfers !== cpu_source.diagnostics.transfers
 end
