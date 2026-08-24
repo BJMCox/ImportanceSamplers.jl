@@ -1,9 +1,9 @@
 # ImportanceSamplers.jl
 
 `ImportanceSamplers.jl` provides explicit plain importance sampling for Julia.
-It supports ordinary normalized proposals on CPU plus native Gaussian and
-transformed proposals on CPU and CUDA. The package keeps estimator inputs,
-device placement, and raw log weights visible.
+It supports ordinary normalized proposals on CPU, and the documented native
+Gaussian and transform subset on CPU and CUDA. The package keeps estimator
+inputs, device placement, and raw log weights visible.
 
 ## Minimal CPU example
 

@@ -74,10 +74,11 @@ Use a top-level function or an isbits callable, and pass every numerical array
 through `p` as in the example.
 
 The prepared sampler owns its RNG stream and advances it on each run. Treat it
-as a mutable, single-owner, non-reentrant handle. Concurrent or recursive use
-of one handle throws [`SamplerBusyError`](@ref); prepare independent samplers
-with independent RNGs for concurrent top-level runs. Placement is fixed once
-execution begins.
+as a mutable, single-owner, non-reentrant handle. Concurrent use of one handle
+is unsupported; prepare independent samplers with independent RNGs. An entry
+that observes the handle already busy, including recursive re-entry, throws
+[`SamplerBusyError`](@ref). This check does not synchronize simultaneous
+callers. Placement is fixed once execution begins.
 
 Device-resident `normalized_weights(result)`, `lognormalizer(result)`, and
 array slicing are supported. Scalar indexing, iteration, quantiles, and medians
@@ -87,23 +88,20 @@ the complete result to CPU first.
 ## Checked support matrix
 
 The table is generated during every strict documentation build. Its CPU rows
-execute public sampling calls across the listed proposal/transform families,
-and its rejection rows exercise the typed accelerator errors. CUDA status comes
-from the linked real-hardware matrix; the docs build verifies that the runnable
-entry point remains present.
+execute public sampling calls, and its rejection rows check the typed device
+errors. The A100 cells come from one small metadata file that the real Task 12
+reproducer also consumes when constructing and recording its matrix.
 
 ```@eval
 Main.NATIVE_PLAIN_IS_CAPABILITY_TABLE
 ```
 
-CPU supports generic normalized proposals, native proposals, and product
-proposals. CUDA support is narrower: it requires `threaded=true`, a native
-spherical/diagonal/factor Gaussian (optionally with the listed native
-transforms), and a target that compiles for the device. `Float32` and `Float64`
-scalar, vector, positive, bounded, and simplex cases have been validated.
-Generic proposal RNGs and `ProductProposal` are not CUDA-supported. AMDGPU and
-Metal have not been validated and are unclaimed; the presence of a
-KernelAbstractions backend is not a package support guarantee.
+CUDA execution requires `threaded=true`, a supported native Gaussian and
+transform layout, and a target that compiles for the device. Only the table row
+labeled A100 execution has real-hardware evidence from Task 12; the other
+native row was not A100-validated. Generic proposal RNGs and `ProductProposal`
+are rejected. AMDGPU and Metal remain unclaimed; a KernelAbstractions backend
+alone is not a package support guarantee.
 
 ## Backend documentation and reproducer
 

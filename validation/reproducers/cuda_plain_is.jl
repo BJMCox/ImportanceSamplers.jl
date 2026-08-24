@@ -8,6 +8,7 @@ using Random
 using Test
 
 include(joinpath(@__DIR__, "..", "cuda_plain_is_support.jl"))
+include(joinpath(@__DIR__, "..", "cuda_plain_is_capabilities.jl"))
 
 const VALIDATION_SEED = 0x6e61746976656770
 const VALIDATION_SAMPLES = 65_536
@@ -287,8 +288,8 @@ function environment_record()
         seed=VALIDATION_SEED,
         sample_count=VALIDATION_SAMPLES,
         failure_sample_count=FAILURE_SAMPLES,
-        scalar_types=(Float32, Float64),
-        cases=(:scalar, :vector, :positive, :interval, :simplex),
+        scalar_types=CUDA_PLAIN_IS_A100_TYPES,
+        cases=CUDA_PLAIN_IS_A100_CASES,
         tolerances=(
             summaries="5 standard errors from analytic variance or trace-variance bounds",
             cpu_cuda_difference="5sqrt(2) standard errors for independent streams",
@@ -302,9 +303,11 @@ end
 function main()
     device = cuda_device()
     @testset "CUDA plain importance sampling" begin
-        for T in (Float32, Float64)
-            @testset "$T $(case.label)" for (case_index, case) in
-                                               enumerate(validation_cases(T))
+        for T in CUDA_PLAIN_IS_A100_TYPES
+            cases = validation_cases(T)
+            Tuple(case.label for case in cases) == CUDA_PLAIN_IS_A100_CASES ||
+                error("CUDA validation cases do not match capability metadata")
+            @testset "$T $(case.label)" for (case_index, case) in enumerate(cases)
                 validate_case(device, T, case, VALIDATION_SEED + UInt64(case_index))
             end
         end

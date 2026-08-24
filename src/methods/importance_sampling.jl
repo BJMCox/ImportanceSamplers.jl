@@ -368,10 +368,11 @@ The bang records that the sampler's RNG stream and running state are mutated.
 It also permanently fixes device placement when execution begins, whether the
 run succeeds or fails.
 Each returned [`WeightedSamples`](@ref) owns its storage and cannot be changed
-by later runs. Concurrent calls on the same sampler throw
-[`SamplerBusyError`](@ref); use separate prepared samplers and RNGs for
-concurrent top-level runs. CUDA results remain device-resident until an explicit
-device transfer such as `result |> MLDataDevices.cpu_device()`.
+by later runs. Concurrent use of one sampler is unsupported; use separate
+prepared samplers and RNGs. An entry that observes the sampler already busy,
+including recursive re-entry, throws [`SamplerBusyError`](@ref); this check does
+not synchronize simultaneous callers. CUDA results remain device-resident
+until an explicit transfer such as `result |> MLDataDevices.cpu_device()`.
 """
 function importance_sample!(sampler::_PreparedImportanceSampler)
     sampler.running && throw(SamplerBusyError())
