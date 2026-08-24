@@ -718,18 +718,20 @@ function _construct_logweights!(logweights::Vector{T}, target_logs::Vector{T}) w
         DimensionMismatch("target and proposal log arrays must be aligned"),
     )
     for sample_index in eachindex(logweights, target_logs)
-        logweights[sample_index] = _capture_sampler_failure(:logweight, sample_index) do
-            logweight, reason = _subtract_logweight(
-                target_logs[sample_index],
-                logweights[sample_index],
-            )
-            iszero(reason) || throw(
-                DomainError(logweight, "derived log weight may not be NaN or +Inf"),
-            )
-            logweight
-        end
+        logweight, reason = _subtract_logweight(
+            target_logs[sample_index],
+            logweights[sample_index],
+        )
+        iszero(reason) || _throw_invalid_logweight(logweight, sample_index)
+        logweights[sample_index] = logweight
     end
     return logweights
+end
+
+@noinline function _throw_invalid_logweight(logweight, sample_index)
+    return _capture_sampler_failure(:logweight, sample_index) do
+        throw(DomainError(logweight, "derived log weight may not be NaN or +Inf"))
+    end
 end
 
 @inline function _subtract_logweight(target_log, proposal_log)

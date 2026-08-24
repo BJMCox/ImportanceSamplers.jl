@@ -19,7 +19,12 @@ struct IdentityTransform <: AbstractSampleTransform end
     PositiveTransform()
 
 Map an unconstrained scalar `z` to `exp(z)` on the positive real line, with
-forward log Jacobian `z`.
+forward log Jacobian `z`. With a Gaussian base, this induces a lognormal upper
+tail, versus the Gaussian-like upper tail from [`SoftplusTransform`](@ref).
+Proposal tails must cover target tails for stable importance weights; neither
+transform alone guarantees finite weight variance. Both Gaussian-based
+transforms can still be too light near zero for targets with substantial
+boundary mass.
 """
 struct PositiveTransform <: AbstractSampleTransform end
 
@@ -27,7 +32,12 @@ struct PositiveTransform <: AbstractSampleTransform end
     SoftplusTransform()
 
 Map an unconstrained scalar smoothly to the positive real line with `softplus`
-and its stable forward log Jacobian.
+and its stable forward log Jacobian. With a Gaussian base, this induces a
+Gaussian-like upper tail, lighter than the lognormal upper tail from
+[`PositiveTransform`](@ref). Proposal tails must cover target tails for stable
+importance weights; neither transform alone guarantees finite weight variance.
+Both Gaussian-based transforms can still be too light near zero for targets
+with substantial boundary mass.
 """
 struct SoftplusTransform <: AbstractSampleTransform end
 

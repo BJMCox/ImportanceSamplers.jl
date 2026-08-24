@@ -264,13 +264,13 @@ function validation_cases(::Type{T}) where {T}
             vector_summary, T[0.25, -0.5], abs2(T(0.75)) + abs2(T(1.25)),
         ),
         validation_case(
-            T, :vector_spherical, vector_spherical, vector_gaussian_logtarget,
+            T, :spherical_vector, vector_spherical, vector_gaussian_logtarget,
             (location=T[0.4, -0.3, 0.2], scale=fill(T(0.9), 3)),
             vector_summary, T[0.4, -0.3, 0.2], T(3) * abs2(T(0.9)),
             sample_contract=(kind=:vector, dimension=3),
         ),
         validation_case(
-            T, :factor, factor_proposal, factor_gaussian_logtarget,
+            T, :factor_vector, factor_proposal, factor_gaussian_logtarget,
             (
                 location=T[0.25, -0.5],
                 factor,
@@ -293,7 +293,7 @@ function validation_cases(::Type{T}) where {T}
             sample_contract=(kind=:scalar, lower=zero(T), upper=nothing),
         ),
         validation_case(
-            T, :lower_bounded, lower_bounded, lower_bounded_gaussian_logtarget,
+            T, :lower_interval, lower_bounded, lower_bounded_gaussian_logtarget,
             (location=T[0.1], scale=T[0.65], lower=T[lower]),
             scalar_summary,
             lower + exp(T(0.1) + T(0.5) * abs2(T(0.65))),
@@ -301,7 +301,7 @@ function validation_cases(::Type{T}) where {T}
             sample_contract=(kind=:scalar, lower, upper=nothing),
         ),
         validation_case(
-            T, :upper_bounded, upper_bounded, upper_bounded_gaussian_logtarget,
+            T, :upper_interval, upper_bounded, upper_bounded_gaussian_logtarget,
             (location=T[-0.2], scale=T[0.75], upper=T[upper]),
             scalar_summary,
             upper - exp(T(-0.2) + T(0.5) * abs2(T(0.75))),
@@ -309,7 +309,7 @@ function validation_cases(::Type{T}) where {T}
             sample_contract=(kind=:scalar, lower=nothing, upper),
         ),
         validation_case(
-            T, :flat_layout, flat_layout, flat_layout_logtarget,
+            T, :complete_flat, flat_layout, flat_layout_logtarget,
             (lower=T[flat_lower], upper=T[flat_upper]),
             flat_layout_summary,
             T[zero(T), zero(T), flat_lower + exp(T(0.5)), flat_upper - exp(T(0.5))],

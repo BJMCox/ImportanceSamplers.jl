@@ -24,6 +24,13 @@ The built-in scalar transforms are:
 | upper bounded | [`IntervalTransform`](@ref) with `(nothing, upper)` |
 | bounded | [`IntervalTransform`](@ref) with `(lower, upper)` |
 
+With a Gaussian base, `PositiveTransform` gives a lognormal upper tail, while
+`SoftplusTransform` gives a Gaussian-like upper tail. Proposal tails must cover
+target tails for stable importance weights, so choose between them with the
+target's upper tail in mind. Neither transform alone guarantees finite weight
+variance. Both have the same first-order behavior near zero and can still be
+too light there for targets with substantial boundary mass.
+
 Endpoints are excluded. Transform inputs, outputs, and log Jacobians must remain
 finite; invalid generated values fail the complete estimator with a located
 [`InvalidTransformError`](@ref).
