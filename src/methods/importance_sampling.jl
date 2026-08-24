@@ -325,6 +325,9 @@ function _transfer_prepared_sampler(
     device::MLDataDevices.AbstractDevice,
     sampler::_PreparedImportanceSampler,
 )
+    sampler.device isa MLDataDevices.AbstractAcceleratorDevice && throw(
+        SamplerDeviceError(device, :prepared_migration_unsupported),
+    )
     sampler.executed && throw(SamplerAlreadyExecutedError())
     throw(SamplerDeviceError(device, :unsupported_device))
 end

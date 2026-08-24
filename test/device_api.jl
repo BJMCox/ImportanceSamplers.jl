@@ -433,12 +433,16 @@ end
     accelerator = device(
         context_sampler(0x2215, (shift=[0.25],)),
     )
-    expected_accelerator_rng = copy(getfield(accelerator, :rng))
-    migration_error = caught_device_error(
-        () -> MLDataDevices.cpu_device()(accelerator),
+    for destination in (
+        MLDataDevices.cpu_device(),
+        device,
+        UnsupportedTestDevice(),
     )
-    @test migration_error isa SamplerDeviceError
-    @test migration_error.reason === :prepared_migration_unsupported
-    @test rand(getfield(accelerator, :rng), UInt64) ==
-          rand(expected_accelerator_rng, UInt64)
+        expected_accelerator_rng = copy(getfield(accelerator, :rng))
+        migration_error = caught_device_error(() -> destination(accelerator))
+        @test migration_error isa SamplerDeviceError
+        @test migration_error.reason === :prepared_migration_unsupported
+        @test rand(getfield(accelerator, :rng), UInt64) ==
+              rand(expected_accelerator_rng, UInt64)
+    end
 end
