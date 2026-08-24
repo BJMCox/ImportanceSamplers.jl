@@ -98,33 +98,42 @@ end
 scalar_summary(samples) = sum(samples) / length(samples)
 vector_summary(samples) = vec(sum(samples; dims=2)) / size(samples, 2)
 
+function lognormal_variance(mean, scale)
+    variance = abs2(scale)
+    return (exp(variance) - one(mean)) * exp(2mean + variance)
+end
+
 function validation_case(
-    ::Type{T}, label, proposal, target, context, summarize, expected, summary_atol;
+    ::Type{T}, label, proposal, target, context, summarize, expected, variance_trace;
     weight_multiplier=512,
 ) where {T}
+    standard_error = sqrt(variance_trace / T(VALIDATION_SAMPLES))
     return (;
-        label, proposal, target, context, summarize, expected,
-        summary_atol=T(summary_atol),
+        label, proposal, target, context, summarize, expected, standard_error,
+        summary_atol=T(5) * standard_error,
+        difference_atol=T(5) * sqrt(T(2)) * standard_error,
         weight_atol=T(weight_multiplier) * eps(T),
     )
 end
 
-validation_case(::Type{T}, case, summarize, expected, summary_atol; kws...) where {T} =
+validation_case(::Type{T}, case, summarize, expected, variance_trace; kws...) where {T} =
     validation_case(
         T, case.label, case.proposal, case.target, case.context, summarize,
-        expected, summary_atol; kws...,
+        expected, variance_trace; kws...,
     )
 
+# Vector tolerances use tr(Cov(X)); the interval variance is from deterministic
+# quadrature, and the simplex bound is tr(Cov(X)) <= 1 - ||E[X]||² = 2/3.
 function validation_cases(::Type{T}) where {T}
     return (
         validation_case(
-            T, scalar_gaussian_case(T), scalar_summary, T(0.25), 0.02,
+            T, scalar_gaussian_case(T), scalar_summary, T(0.25), abs2(T(1.25)),
         ),
         validation_case(
             T, :vector, DiagonalGaussian(T[0.25, -0.5], T[0.75, 1.25]),
             vector_gaussian_logtarget,
             (location=T[0.25, -0.5], scale=T[0.75, 1.25]),
-            vector_summary, T[0.25, -0.5], 0.02,
+            vector_summary, T[0.25, -0.5], abs2(T(0.75)) + abs2(T(1.25)),
         ),
         validation_case(
             T, :positive,
@@ -133,7 +142,8 @@ function validation_cases(::Type{T}) where {T}
                 PositiveTransform(),
             ),
             positive_gaussian_logtarget, (location=T[0.2], scale=T[0.8]),
-            scalar_summary, exp(T(0.2) + T(0.5) * abs2(T(0.8))), 0.04,
+            scalar_summary, exp(T(0.2) + T(0.5) * abs2(T(0.8))),
+            lognormal_variance(T(0.2), T(0.8)),
         ),
         validation_case(
             T, :interval,
@@ -142,7 +152,7 @@ function validation_cases(::Type{T}) where {T}
                 IntervalTransform(T(-2), T(3)),
             ),
             interval_gaussian_logtarget, (lower=T[-2], upper=T[3]),
-            scalar_summary, T(0.5), 0.01,
+            scalar_summary, T(0.5), T(1.08447589645),
         ),
         validation_case(
             T, :simplex,
@@ -151,13 +161,17 @@ function validation_cases(::Type{T}) where {T}
                 SimplexTransform(3),
             ),
             simplex_gaussian_logtarget, NamedTuple(), vector_summary,
-            fill(inv(T(3)), 3), 0.01;
+            fill(inv(T(3)), 3), T(2) / T(3);
             weight_multiplier=4096,
         ),
     )
 end
 
 function validate_case(device, ::Type{T}, case, seed) where {T}
+    @test case.summary_atol == T(5) * case.standard_error
+    @test case.difference_atol == T(5) * sqrt(T(2)) * case.standard_error
+    @test case.difference_atol < T(2) * case.summary_atol
+
     algorithm = ImportanceSampling(case.proposal; nsamples=VALIDATION_SAMPLES)
     cpu = importance_sample(
         Xoshiro(seed),
@@ -208,7 +222,7 @@ function validate_case(device, ::Type{T}, case, seed) where {T}
     gpu_summary = case.summarize(host.samples)
     @test isapprox(cpu_summary, case.expected; atol=case.summary_atol, rtol=zero(T))
     @test isapprox(gpu_summary, case.expected; atol=case.summary_atol, rtol=zero(T))
-    @test isapprox(cpu_summary, gpu_summary; atol=2case.summary_atol, rtol=zero(T))
+    @test isapprox(cpu_summary, gpu_summary; atol=case.difference_atol, rtol=zero(T))
     return nothing
 end
 
@@ -280,7 +294,9 @@ function environment_record()
         scalar_types=(Float32, Float64),
         cases=(:scalar, :vector, :positive, :interval, :simplex),
         tolerances=(
-            summaries=(scalar=0.02, vector=0.02, positive=0.04, interval=0.01, simplex=0.01),
+            summaries="5 standard errors from analytic variance or trace-variance bounds",
+            cpu_cuda_difference="5sqrt(2) standard errors for independent streams",
+            interval_variance=1.08447589645,
             logweights=(ordinary="512eps(T)", simplex="4096eps(T)"),
         ),
         commands=(validation=VALIDATION_COMMAND, project=Base.active_project()),

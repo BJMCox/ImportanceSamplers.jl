@@ -20,12 +20,12 @@ else
     "Kaimon ex: empty!(ARGS); include(\"cuda_plain_is.jl\") in the benchmark project"
 end
 
-function proposal_generation!(samples, normals, location, scale)
+function synthetic_proposal_generation!(samples, normals, location, scale)
     @. samples = muladd(scale, normals, location)
     return nothing
 end
 
-function gaussian_logdensity!(output, samples, location, scale)
+function synthetic_gaussian_logdensity!(output, samples, location, scale)
     half = oftype(location, 0.5)
     log2pi = log(oftype(location, 2pi))
     @. output = -half * abs2((samples - location) / scale) - log(scale) - half * log2pi
@@ -85,27 +85,28 @@ function benchmark_type(device, ::Type{T}) where {T}
     samples = similar(normals, T, SAMPLE_COUNT)
     target_log = similar(normals, T, SAMPLE_COUNT)
     proposal_log = similar(normals, T, SAMPLE_COUNT)
-    logweights = similar(normals, T, SAMPLE_COUNT)
-    fill!(logweights, zero(T))
     CUDA.synchronize()
 
     warm_benchmark = @benchmarkable synchronized(importance_sample!, $sampler)
     rng_benchmark = @benchmarkable synchronized(Random.randn!, $rng, $normals)
-    proposal_benchmark =
-        @benchmarkable synchronized(proposal_generation!, $samples, $normals, $location, $scale)
-    target_benchmark =
-        @benchmarkable synchronized(gaussian_logdensity!, $target_log, $samples, $location, $scale)
-    density_benchmark =
-        @benchmarkable synchronized(gaussian_logdensity!, $proposal_log, $samples, $location, $scale)
-    reduction_benchmark = @benchmarkable synchronized(sum, $logweights)
+    synthetic_proposal_benchmark = @benchmarkable synchronized(
+        synthetic_proposal_generation!, $samples, $normals, $location, $scale,
+    )
+    synthetic_target_benchmark = @benchmarkable synchronized(
+        synthetic_gaussian_logdensity!, $target_log, $samples, $location, $scale,
+    )
+    synthetic_density_benchmark = @benchmarkable synchronized(
+        synthetic_gaussian_logdensity!, $proposal_log, $samples, $location, $scale,
+    )
+    public_reduction_benchmark = @benchmarkable synchronized(lognormalizer, $warm_result)
     transfer_benchmark = @benchmarkable synchronized(Array, $samples)
     trials = (
         warm_execution=run_trial(warm_benchmark),
         rng_fill=run_trial(rng_benchmark),
-        proposal_generation=run_trial(proposal_benchmark),
-        target_evaluation=run_trial(target_benchmark),
-        density_evaluation=run_trial(density_benchmark),
-        reduction=run_trial(reduction_benchmark),
+        synthetic_proposal_generation=run_trial(synthetic_proposal_benchmark),
+        synthetic_target_evaluation=run_trial(synthetic_target_benchmark),
+        synthetic_density_evaluation=run_trial(synthetic_density_benchmark),
+        public_log_normalizer=run_trial(public_reduction_benchmark),
         transfer=run_trial(transfer_benchmark),
     )
 
@@ -117,7 +118,8 @@ function benchmark_type(device, ::Type{T}) where {T}
             seconds=cold.time,
             host_allocated_bytes=cold.bytes,
         ),
-        phases=map(trial_record, trials),
+        measurements=map(trial_record, trials),
+        additive_decomposition=false,
         device_arrays=(
             normal_bytes=sizeof(T) * length(normals),
             sample_bytes=sizeof(T) * length(warm_result.samples),
