@@ -21,6 +21,20 @@ struct GenericGaussian{T}
     scale::T
 end
 
+struct UnadaptedCUDAContext{A}
+    shift::A
+end
+
+struct AdaptedCUDAContext{A}
+    shift::A
+end
+
+ImportanceSamplers.Adapt.@adapt_structure AdaptedCUDAContext
+
+@inline function contextual_scalar_logtarget(sample, context)::Float32
+    return context.shift[1] - abs2(sample) / 2
+end
+
 function Random.rand(rng::Random.AbstractRNG, proposal::GenericGaussian{T}) where {T}
     return proposal.location + proposal.scale * randn(rng, T)
 end
@@ -249,7 +263,32 @@ function validate_rejections(device)
     )
     generic_error = caught(() -> device(generic_prepared))
     @test generic_error isa SamplerDeviceError
-    @test generic_error.reason === :accelerator_rng_unavailable
+    @test generic_error.reason === :generic_proposal_cpu_only
+
+    unadapted_prepared = prepare_sampler(
+        Xoshiro(VALIDATION_SEED),
+        contextual_scalar_logtarget,
+        UnadaptedCUDAContext(T[0.25]),
+        ImportanceSampling(proposal; nsamples=16);
+        threaded=true,
+    )
+    expected_unadapted_rng = copy(getfield(unadapted_prepared, :rng))
+    unadapted_error = caught(() -> device(unadapted_prepared))
+    @test unadapted_error isa SamplerDeviceError
+    @test unadapted_error.reason === :kernel_argument_unsupported
+    @test rand(getfield(unadapted_prepared, :rng), UInt64) ==
+          rand(expected_unadapted_rng, UInt64)
+
+    migration_source = prepare_sampler(
+        Xoshiro(VALIDATION_SEED),
+        contextual_scalar_logtarget,
+        (shift=T[0.25],),
+        ImportanceSampling(proposal; nsamples=16);
+        threaded=true,
+    ) |> device
+    migration_error = caught(() -> MLDataDevices.cpu_device()(migration_source))
+    @test migration_error isa SamplerDeviceError
+    @test migration_error.reason === :prepared_migration_unsupported
 
     invalid = TransformedProposal(
         SphericalGaussian(zeros(T, 2), T(floatmax(T))),
@@ -265,6 +304,37 @@ function validate_rejections(device)
     @test invalid_error isa SamplerExecutionError
     @test invalid_error.phase === :proposal_draw
     @test invalid_error.captured.ex isa InvalidTransformError
+    return nothing
+end
+
+
+function validate_context_execution(device)
+    T = Float32
+    proposal = SphericalGaussian(zero(T), one(T))
+
+    adapted = prepare_sampler(
+        Xoshiro(VALIDATION_SEED + UInt64(0x10)),
+        contextual_scalar_logtarget,
+        AdaptedCUDAContext(T[0.25]),
+        ImportanceSampling(proposal; nsamples=16);
+        threaded=true,
+    ) |> device
+    adapted_result = importance_sample!(adapted)
+    @test adapted_result.samples isa CuArray
+    @test adapted_result.logweights isa CuArray
+
+    named = prepare_sampler(
+        Xoshiro(VALIDATION_SEED + UInt64(0x11)),
+        contextual_scalar_logtarget,
+        (shift=T[0.25],),
+        ImportanceSampling(proposal; nsamples=2_048);
+        threaded=true,
+    ) |> device
+    named_result = importance_sample!(named)
+    @test Threads.nthreads(:default) == 1
+    @test named_result.samples isa CuArray
+    @test named_result.logweights isa CuArray
+    @test length(named_result) == 2_048
     return nothing
 end
 
@@ -313,6 +383,9 @@ function main()
         end
         @testset "fail closed" begin
             validate_rejections(device)
+        end
+        @testset "context and one-thread launch contracts" begin
+            validate_context_execution(device)
         end
     end
     return environment_record()

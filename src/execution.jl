@@ -206,6 +206,36 @@ function _native_target_evaluator(backend, target, ::Type{L}, nsamples) where {L
     return _NativeDeviceTarget{L,typeof(target)}(target), _NoNativeTargetFailures()
 end
 
+function _preflight_native_kernel_target(
+    device,
+    target,
+    proposal,
+    buffers::_RandomBuffers,
+)
+    samples = _allocate_native_samples(buffers.normal, proposal, 1)
+    binding_sample = _native_binding_sample(samples)
+    bound_target = _bind_resolved_target(target, binding_sample)
+    base, _ = _native_fused_components(proposal)
+    log_type = _resolve_native_logweight_type(
+        bound_target,
+        base,
+        typeof(binding_sample),
+    )
+    target_argument =
+        _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
+    backend = KernelAbstractions.get_backend(buffers.normal)
+    kernel = _native_gaussian_fused_kernel!(backend)
+    converted = try
+        KernelAbstractions.argconvert(kernel, target_argument)
+    catch
+        throw(SamplerDeviceError(device, :kernel_argument_unsupported))
+    end
+    isbits(converted) || throw(
+        SamplerDeviceError(device, :kernel_argument_unsupported),
+    )
+    return nothing
+end
+
 _native_fused_components(proposal::_GaussianProposal) =
     (proposal, _NoSampleTransform())
 _native_fused_components(proposal::TransformedProposal) =

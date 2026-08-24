@@ -1,6 +1,8 @@
 using Test
 using ImportanceSamplers
+import Adapt
 import DensityInterface
+import KernelAbstractions
 import MLDataDevices
 import Random
 import Random: rand, randn
@@ -34,6 +36,69 @@ Base.copy(rng::UncopyableRNG) = rng
 
 struct FunctionalAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
 MLDataDevices.functional(::FunctionalAccelerator) = true
+
+struct KernelArgumentTestBackend <: KernelAbstractions.GPU end
+
+struct KernelArgumentTestArray{T,N} <: AbstractArray{T,N}
+    storage::Array{T,N}
+end
+
+Base.size(array::KernelArgumentTestArray) = size(array.storage)
+Base.getindex(array::KernelArgumentTestArray, indices...) =
+    getindex(array.storage, indices...)
+Base.IndexStyle(::Type{<:KernelArgumentTestArray}) = IndexLinear()
+Base.similar(
+    ::KernelArgumentTestArray,
+    ::Type{T},
+    dimensions::Dims{N},
+) where {T,N} = KernelArgumentTestArray(Array{T,N}(undef, dimensions))
+
+KernelAbstractions.get_backend(::KernelArgumentTestArray) =
+    KernelArgumentTestBackend()
+
+struct KernelArgumentTestDeviceArray{T,N}
+    pointer::Ptr{T}
+    dimensions::NTuple{N,Int}
+end
+
+struct KernelArgumentTestAdaptor end
+
+Adapt.adapt_storage(
+    ::KernelArgumentTestAdaptor,
+    array::KernelArgumentTestArray{T,N},
+) where {T,N} = KernelArgumentTestDeviceArray{T,N}(
+    pointer(array.storage),
+    size(array.storage),
+)
+
+KernelAbstractions.argconvert(
+    ::KernelAbstractions.Kernel{KernelArgumentTestBackend},
+    argument,
+) = Adapt.adapt(KernelArgumentTestAdaptor(), argument)
+
+struct KernelArgumentTestAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
+MLDataDevices.functional(::KernelArgumentTestAccelerator) = true
+Adapt.adapt_storage(::KernelArgumentTestAccelerator, array::Array) =
+    KernelArgumentTestArray(copy(array))
+
+@eval ImportanceSamplers begin
+    _owned_backend_rng(::Main.KernelArgumentTestAccelerator, seed::UInt64) =
+        Random.Xoshiro(seed)
+end
+
+struct UnadaptedKernelContext{A}
+    shift::A
+end
+
+struct AdaptedKernelContext{A}
+    shift::A
+end
+
+Adapt.@adapt_structure AdaptedKernelContext
+
+function kernel_context_target(sample, context)::Float64
+    return context.shift[1] - abs2(sample) / 2
+end
 
 struct UnsupportedTestDevice <: MLDataDevices.AbstractDevice end
 
@@ -283,14 +348,14 @@ end
           collection_closure
     @test captured_values isa Vector{Float64}
 
+    rng_limit_sampler = prepare_sampler(
+        Random.Xoshiro(2207),
+        sample -> -abs2(sample) / 2,
+        ImportanceSampling(SphericalGaussian(0.0, 1.0); nsamples=4);
+        threaded=true,
+    )
     rng_limit_error = caught_device_error(
-        () -> FunctionalAccelerator()(
-            make_transfer_sampler(
-                2207;
-                threaded=true,
-                target=top_level_transfer_target,
-            ),
-        ),
+        () -> FunctionalAccelerator()(rng_limit_sampler),
     )
     @test rng_limit_error isa SamplerDeviceError
     @test rng_limit_error.reason === :accelerator_rng_unavailable
@@ -319,4 +384,61 @@ end
     )
     @test unsupported_error isa SamplerDeviceError
     @test unsupported_error.reason === :unsupported_device
+end
+
+@testset "accelerator capability rejection precedes RNG consumption" begin
+    device = KernelArgumentTestAccelerator()
+    proposal = SphericalGaussian(0.0, 1.0)
+    algorithm = ImportanceSampling(proposal; nsamples=16)
+    context_sampler(seed, context) = prepare_sampler(
+        Random.Xoshiro(seed),
+        kernel_context_target,
+        context,
+        algorithm;
+        threaded=true,
+    )
+
+    unadapted = context_sampler(
+        0x2211,
+        UnadaptedKernelContext([0.25]),
+    )
+    expected_unadapted_rng = copy(getfield(unadapted, :rng))
+    unadapted_error = caught_device_error(() -> device(unadapted))
+    @test unadapted_error isa SamplerDeviceError
+    @test unadapted_error.reason === :kernel_argument_unsupported
+    @test rand(getfield(unadapted, :rng), UInt64) ==
+          rand(expected_unadapted_rng, UInt64)
+
+    for (seed, context) in (
+        (0x2212, AdaptedKernelContext([0.25])),
+        (0x2213, (shift=[0.25],)),
+    )
+        destination = device(context_sampler(seed, context))
+        @test getfield(destination, :device) === device
+    end
+
+    generic = prepare_sampler(
+        Random.Xoshiro(0x2214),
+        top_level_transfer_target,
+        (shift=[0.25],),
+        ImportanceSampling(TransferProposal([0.0]); nsamples=16);
+        threaded=true,
+    )
+    expected_generic_rng = copy(getfield(generic, :rng))
+    generic_error = caught_device_error(() -> device(generic))
+    @test generic_error isa SamplerDeviceError
+    @test generic_error.reason === :generic_proposal_cpu_only
+    @test rand(getfield(generic, :rng), UInt64) == rand(expected_generic_rng, UInt64)
+
+    accelerator = device(
+        context_sampler(0x2215, (shift=[0.25],)),
+    )
+    expected_accelerator_rng = copy(getfield(accelerator, :rng))
+    migration_error = caught_device_error(
+        () -> MLDataDevices.cpu_device()(accelerator),
+    )
+    @test migration_error isa SamplerDeviceError
+    @test migration_error.reason === :prepared_migration_unsupported
+    @test rand(getfield(accelerator, :rng), UInt64) ==
+          rand(expected_accelerator_rng, UInt64)
 end

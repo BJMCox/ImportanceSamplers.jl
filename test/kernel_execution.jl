@@ -567,18 +567,37 @@ end
 
     @test MLDataDevices.default_device_rng(SharedRNGAccelerator()) ===
           MLDataDevices.default_device_rng(SharedRNGAccelerator())
+    shared_source = prepare_sampler(
+        Random.Xoshiro(0x9112),
+        FusedQuadraticTarget(0.75),
+        algorithm;
+        threaded=true,
+    )
+    expected_shared_rng = copy(getfield(shared_source, :rng))
     shared_error = _caught_kernel_execution_error() do
-        SharedRNGAccelerator()(
-            prepare_sampler(
-                Random.Xoshiro(0x9112),
-                FusedQuadraticTarget(0.75),
-                algorithm;
-                threaded=true,
-            ),
-        )
+        SharedRNGAccelerator()(shared_source)
     end
     @test shared_error isa SamplerDeviceError
     @test shared_error.reason === :accelerator_rng_unavailable
+    @test rand(getfield(shared_source, :rng), UInt64) ==
+          rand(expected_shared_rng, UInt64)
+end
+
+@testset "accelerator launch policy is independent of host threads" begin
+    sampler = OwnedBufferAccelerator()(
+        prepare_sampler(
+            Random.Xoshiro(0x9113),
+            FusedQuadraticTarget(0.75),
+            ImportanceSampling(
+                SphericalGaussian(0.25, 1.5);
+                nsamples=2_048,
+            );
+            threaded=true,
+        ),
+    )
+    result = importance_sample!(sampler)
+    @test result.diagnostics.execution === :threaded
+    @test length(result) == 2_048
 end
 
 @testset "CUDA ownership rejects pointer-backed RNG state" begin

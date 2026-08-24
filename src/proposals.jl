@@ -34,7 +34,7 @@ struct ProductProposal{B<:NamedTuple}
     end
 end
 
-_accelerator_proposal_limit(proposal) = nothing
+_accelerator_proposal_limit(proposal) = :generic_proposal_cpu_only
 _accelerator_proposal_limit(::ProductProposal) = :product_proposal_cpu_only
 
 struct _PreparedProposalToken end
@@ -77,6 +77,8 @@ struct _GaussianProposal{F,L,S,T}
     scale::S
     lognormalizer::T
 end
+
+_accelerator_proposal_limit(::_GaussianProposal) = nothing
 
 Adapt.@adapt_structure _SphericalGaussianScale
 Adapt.@adapt_structure _DiagonalGaussianScale

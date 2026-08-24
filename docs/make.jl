@@ -191,7 +191,7 @@ function checked_plain_is_capability_table()
     generic_error isa SamplerDeviceError || error(
         "generic accelerator capability check did not return SamplerDeviceError",
     )
-    generic_error.reason === :accelerator_rng_unavailable || error(
+    generic_error.reason === :generic_proposal_cpu_only || error(
         "generic accelerator capability check returned the wrong reason",
     )
 
@@ -207,7 +207,7 @@ function checked_plain_is_capability_table()
         "| Proposal or transform | Docs-build CPU check | CUDA status/evidence |\n" *
         "|:--|:--|:--|\n" *
         "| Generic normalized proposal | serial and threaded (`$threaded_detail`) " *
-        "| rejected: no native random buffers |\n" *
+        "| rejected: generic proposal is CPU-only |\n" *
         "| $a100_names | serial execution | A100 execution with $a100_types |\n" *
         "| $other_names | serial execution | not A100-validated |\n" *
         "| `ProductProposal` and named product layout | serial execution " *

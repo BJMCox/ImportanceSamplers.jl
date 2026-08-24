@@ -317,6 +317,15 @@ standard traversal to inspect or reconstruct their captures. Once an execution
 has begun, later transfer throws [`SamplerAlreadyExecutedError`](@ref),
 including after a failed run.
 
+An accelerator destination is deliberately one-hop state. Only a CPU-origin
+prepared sampler can create an accelerator destination; applying any device to
+that destination fails as `:prepared_migration_unsupported`, even before its
+first execution. The original CPU source remains valid and may create another
+independent destination. Custom context or callable structs with array fields
+must register standard Adapt support for the accelerator kernel argument
+conversion; named tuples already do so. Unsupported representations fail at
+transfer as `:kernel_argument_unsupported` without advancing the source RNG.
+
 A prepared sampler is mutable and non-reentrant. Do not call
 `importance_sample!` concurrently on the same handle; prepare separate
 samplers with separate RNGs. Re-entry throws [`SamplerBusyError`](@ref). A
@@ -331,10 +340,12 @@ one-shot call or at preparation for an explicitly serial run:
 sampler = prepare_sampler(rng, logtarget, algorithm; threaded=false)
 ```
 
-The choice is bound into a prepared sampler and cannot be changed per run. If
-Julia has only one default thread, `threaded=true` falls back to serial
-execution. The result diagnostic distinguishes the requested policy
-(`diagnostics.threaded`) from the actual mode (`diagnostics.execution`).
+The choice is bound into a prepared sampler and cannot be changed per run. On
+CPU, if Julia has only one default thread, `threaded=true` falls back to serial
+execution. Accelerator execution uses its backend-parallel launch policy
+regardless of the host thread count. The result diagnostic distinguishes the
+requested policy (`diagnostics.threaded`) from the actual mode
+(`diagnostics.execution`).
 
 All proposal draws happen on the coordinator before worker tasks start.
 Threaded phases only evaluate the scalar target and proposal density over
@@ -368,10 +379,11 @@ target is finite.
 zero at every draw. The raw result remains inspectable, but normalized
 summaries are undefined.
 
-**Unsupported device.** Apply `cpu_device()` before first execution when an
-independent CPU copy is wanted. CUDA requires the native proposal path,
-`threaded=true`, a functional backend, and a device-compatible target. There is
-no host fallback. See [Accelerators](@ref).
+**Unsupported device.** Apply `cpu_device()` to the CPU-origin prepared sampler
+before first execution when an independent CPU copy is wanted. Accelerator
+destinations cannot be transferred again. CUDA requires the native proposal
+path, `threaded=true`, a functional backend, and a device-compatible target.
+There is no host fallback. See [Accelerators](@ref).
 
 **Unstable return types or shapes.** Make every proposal draw return the same
 scalar type, vector length, named-tuple keys, and numeric leaf types. Make every

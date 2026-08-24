@@ -55,8 +55,10 @@ context, together with the proposal state and random buffers; the target
 indexes both arrays on the device. `prepared = device(prepared)` and
 `prepared |> device` are equivalent. Transfer consumes one seed from the source
 RNG to initialize an independently owned device stream. It returns a distinct
-prepared handle; source and destination remain usable, and each handle's
-placement is fixed only when that handle begins execution.
+prepared handle. The CPU source remains usable and may create other independent
+destinations. An accelerator destination is CPU-origin, one-hop state: it can
+execute, but cannot itself be transferred to CPU or another accelerator, even
+before execution. Such a request fails as `:prepared_migration_unsupported`.
 
 The target returns an unnormalized log density. `result.logweights` contains
 the raw values `logtarget(x, p) - logdensityof(proposal, x)`, not normalized
@@ -65,13 +67,19 @@ on CUDA until the explicit `result |> cpu_device()` transfer above.
 
 ## Targets and ownership
 
-Device transfer can recursively move ordinary numerical fields, but Julia does
-not expose a reliable general operation for inspecting and reconstructing an
-opaque closure's captured environment. A reachable closure that captures a
-host array is rejected with [`SamplerDeviceError`](@ref) before accelerator
-execution. Global host arrays are likewise not transferred with a callable.
-Use a top-level function or an isbits callable, and pass every numerical array
-through `p` as in the example.
+Device transfer recursively moves ordinary numerical fields. A custom context
+or callable struct with array fields must also register standard Adapt support
+so KernelAbstractions can form its isbits kernel representation. Otherwise
+transfer fails as `:kernel_argument_unsupported`, before source RNG
+consumption. Named tuples such as `p` in the example already satisfy this
+conversion contract.
+
+Julia does not expose a reliable general operation for inspecting and
+reconstructing an opaque closure's captured environment. A reachable closure
+that captures a host array is rejected with [`SamplerDeviceError`](@ref) before
+accelerator execution. Global host arrays are likewise not transferred with a
+callable. Use a top-level function or an isbits callable, and pass every
+numerical array through `p` as in the example.
 
 The prepared sampler owns its RNG stream and advances it on each run. Treat it
 as a mutable, single-owner, non-reentrant handle. Concurrent use of one handle
@@ -99,8 +107,8 @@ Main.NATIVE_PLAIN_IS_CAPABILITY_TABLE
 CUDA execution requires `threaded=true`, a supported native Gaussian and
 transform layout, and a target that compiles for the device. Only the table row
 labeled A100 execution has real-hardware evidence from Task 12; the other
-native row was not A100-validated. Generic proposal RNGs and `ProductProposal`
-are rejected. AMDGPU and Metal remain unclaimed; a KernelAbstractions backend
+native row was not A100-validated. Generic proposals and `ProductProposal` are
+rejected. AMDGPU and Metal remain unclaimed; a KernelAbstractions backend
 alone is not a package support guarantee.
 
 ## Backend documentation and reproducer
