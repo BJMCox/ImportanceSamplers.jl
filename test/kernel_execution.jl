@@ -60,6 +60,26 @@ function (::NativePhaseOrderTarget)(sample::Float64)::Float64
     return isfinite(sample) ? 0.0 : -Inf
 end
 
+struct NativeFailFromScalarTarget
+    first_failure::Float64
+end
+
+function (target::NativeFailFromScalarTarget)(sample::Float64)::Float64
+    sample >= target.first_failure && throw(NativeTargetFailure(sample))
+    return -abs2(sample)
+end
+
+struct NativeFailAtTwoScalarTarget
+    first_failure::Float64
+    second_failure::Float64
+end
+
+function (target::NativeFailAtTwoScalarTarget)(sample::Float64)::Float64
+    (sample == target.first_failure || sample == target.second_failure) &&
+        throw(NativeTargetFailure(sample))
+    return -abs2(sample)
+end
+
 mutable struct NativeResetTarget
     fail::Bool
 end
@@ -441,6 +461,32 @@ end
         @test (phase_order_failure.phase, phase_order_failure.sample_index) == (:target, 3)
         @test phase_order_failure.captured.ex isa NativeTargetFailure
     end
+
+    for threaded in (false, true)
+        proposal = SphericalGaussian(0.0, 1.0)
+        concurrent = threaded && Threads.nthreads(:default) > 1
+        if concurrent
+            execution = ImportanceSamplers._sampling_execution(proposal, true)
+            @test getfield(execution, :cpu_execution) isa
+                  ImportanceSamplers._ThreadedCPUExecution
+        end
+        nsamples = concurrent ? 2_049 : 4
+        second_failure = concurrent ? 2_048.0 : 2.0
+        first_failure = _caught_kernel_execution_error() do
+            _run_native_fused(
+                NativeFailAtTwoScalarTarget(1.0, second_failure),
+                proposal,
+                collect(0.0:(nsamples - 1)),
+                threaded,
+            )
+        end
+        @test first_failure isa SamplerExecutionError
+        if first_failure isa SamplerExecutionError
+            @test (first_failure.phase, first_failure.sample_index) == (:target, 2)
+            @test first_failure.captured.ex isa NativeTargetFailure
+            @test first_failure.captured.ex.sample == 1.0
+        end
+    end
 end
 
 @testset "portable native execution allocations" begin
@@ -505,6 +551,9 @@ end
         failure_storage = getfield(getfield(scratch, :record), :storage)
         target_failures = getfield(scratch, :target_failures)
 
+        target_failure_slots = getfield(target_failures, :slots)
+        target_failure_index = getfield(target_failures, :first_index)
+
         first_result = @inferred importance_sample!(sampler)
         second_result = @inferred importance_sample!(sampler)
 
@@ -512,7 +561,8 @@ end
               scratch
         @test getfield(getfield(scratch, :record), :storage) === failure_storage
         @test getfield(scratch, :target_failures) === target_failures
-        @test length(target_failures) == nsamples
+        @test length(target_failure_slots) == nsamples
+        @test target_failure_index[] == typemax(Int)
         @test first_result.samples !== second_result.samples
         @test first_result.logweights !== second_result.logweights
         @test first_result.diagnostics.transfers !==
@@ -533,15 +583,19 @@ end
     scratch = getfield(getfield(sampler, :random_buffers), :failure_scratch)
     failure_storage = getfield(getfield(scratch, :record), :storage)
     target_failures = getfield(scratch, :target_failures)
+    target_failure_slots = getfield(target_failures, :slots)
+    target_failure_index = getfield(target_failures, :first_index)
 
     failure = _caught_kernel_execution_error() do
         importance_sample!(sampler)
     end
     @test failure isa SamplerExecutionError
-    @test (failure.phase, failure.sample_index) == (:target, 2)
-    @test failure.captured.ex isa NativeTargetFailure
-    @test count(!isnothing, target_failures) == 1
-    @test target_failures[2] === failure
+    if failure isa SamplerExecutionError
+        @test (failure.phase, failure.sample_index) == (:target, 2)
+        @test failure.captured.ex isa NativeTargetFailure
+    end
+    @test all(isnothing, target_failure_slots)
+    @test target_failure_index[] == typemax(Int)
 
     target.fail = false
     result = @inferred importance_sample!(sampler)
@@ -549,7 +603,8 @@ end
     @test getfield(getfield(sampler, :random_buffers), :failure_scratch) === scratch
     @test getfield(getfield(scratch, :record), :storage) === failure_storage
     @test getfield(scratch, :target_failures) === target_failures
-    @test all(isnothing, target_failures)
+    @test all(isnothing, target_failure_slots)
+    @test target_failure_index[] == typemax(Int)
     @test failure_storage == zeros(UInt64, 2)
 
     transform_sampler = prepare_sampler(
@@ -582,6 +637,72 @@ end
     transform_result = @inferred importance_sample!(transform_sampler)
     @test length(transform_result) == 1
     @test transform_storage == zeros(UInt64, 2)
+
+    mixed_sampler = prepare_sampler(
+        PrefilledNormalRNG([Inf, 1.0, 0.0, 0.0], 0),
+        NativeFailFromScalarTarget(1.0),
+        ImportanceSampling(
+            TransformedProposal(
+                SphericalGaussian(0.0, 1.0),
+                IdentityTransform(),
+            );
+            nsamples=2,
+        );
+        threaded=true,
+    )
+    mixed_scratch = getfield(
+        getfield(mixed_sampler, :random_buffers),
+        :failure_scratch,
+    )
+    mixed_failures = getfield(mixed_scratch, :target_failures)
+    mixed_failure = _caught_kernel_execution_error() do
+        importance_sample!(mixed_sampler)
+    end
+    @test mixed_failure isa SamplerExecutionError
+    if mixed_failure isa SamplerExecutionError
+        @test (mixed_failure.phase, mixed_failure.sample_index) == (:proposal_draw, 1)
+        @test mixed_failure.captured.ex isa InvalidTransformError
+    end
+    @test all(isnothing, getfield(mixed_failures, :slots))
+    @test getfield(mixed_failures, :first_index)[] == typemax(Int)
+
+    mixed_result = @inferred importance_sample!(mixed_sampler)
+    @test length(mixed_result) == 2
+end
+
+@testset "native CPU target failure marker avoids clean full-array passes" begin
+    nsamples = 8
+    sampler = prepare_sampler(
+        PrefilledNormalRNG(zeros(2nsamples), 0),
+        FusedQuadraticTarget(0.75),
+        ImportanceSampling(SphericalGaussian(0.0, 1.0); nsamples);
+        threaded=false,
+    )
+    scratch = getfield(getfield(sampler, :random_buffers), :failure_scratch)
+    target_failures = getfield(scratch, :target_failures)
+    slots = getfield(target_failures, :slots)
+    first_index = getfield(target_failures, :first_index)
+    stale = SamplerExecutionError(
+        :target,
+        nsamples,
+        CapturedException(NativeTargetFailure(9.0), backtrace()),
+    )
+
+    slots[end] = stale
+    clean = @inferred importance_sample!(sampler)
+    @test length(clean) == nsamples
+    @test slots[end] === stale
+    @test first_index[] == typemax(Int)
+
+    first_index[] = 2
+    ImportanceSamplers._reset_native_failure_scratch!(scratch)
+    @test all(isnothing, slots)
+    @test first_index[] == typemax(Int)
+
+    recovered = @inferred importance_sample!(sampler)
+    @test length(recovered) == nsamples
+    @test all(isnothing, slots)
+    @test first_index[] == typemax(Int)
 end
 
 @testset "native serial and threaded prepared execution remain equivalent" begin

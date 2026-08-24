@@ -27,6 +27,11 @@ end
 
 struct _NoNativeTargetFailures end
 
+struct _NativeCPUTargetFailures
+    slots::Vector{Union{Nothing,SamplerExecutionError}}
+    first_index::Threads.Atomic{Int}
+end
+
 struct _NativeDeviceTarget{L,T}
     target::T
 end
@@ -178,7 +183,7 @@ function _native_target_evaluator(
     ::KernelAbstractions.CPU,
     target,
     ::Type{L},
-    failures::Vector{Union{Nothing,SamplerExecutionError}},
+    failures::_NativeCPUTargetFailures,
 ) where {L}
     return _NativeCPUTarget{L,typeof(target),typeof(failures)}(target, failures), failures
 end
@@ -303,8 +308,10 @@ function _allocate_native_failure_scratch(normal_buffer, nsamples)
     return _NativeFailureScratch(record, target_failures)
 end
 
-_allocate_native_target_failures(::KernelAbstractions.CPU, nsamples) =
-    Vector{Union{Nothing,SamplerExecutionError}}(nothing, nsamples)
+function _allocate_native_target_failures(::KernelAbstractions.CPU, nsamples)
+    slots = Vector{Union{Nothing,SamplerExecutionError}}(nothing, nsamples)
+    return _NativeCPUTargetFailures(slots, Threads.Atomic{Int}(typemax(Int)))
+end
 _allocate_native_target_failures(backend, nsamples) = _NoNativeTargetFailures()
 
 Base.@noinline _reset_native_failure_scratch!(::_NoNativeFailureScratch)::Nothing =
@@ -320,8 +327,10 @@ end
 
 _reset_native_target_failures!(::_NoNativeTargetFailures) = nothing
 
-function _reset_native_target_failures!(failures)
-    fill!(failures, nothing)
+function _reset_native_target_failures!(failures::_NativeCPUTargetFailures)
+    failures.first_index[] == typemax(Int) && return nothing
+    fill!(failures.slots, nothing)
+    failures.first_index[] = typemax(Int)
     return nothing
 end
 
@@ -391,11 +400,13 @@ end
     cause,
     trace,
 ) where {L}
-    @inbounds evaluator.failures[slot] = SamplerExecutionError(
+    failures = evaluator.failures
+    @inbounds failures.slots[slot] = SamplerExecutionError(
         :target,
         slot,
         CapturedException(cause, trace),
     )
+    Threads.atomic_min!(failures.first_index, slot)
     return zero(L), UInt16(0), true
 end
 

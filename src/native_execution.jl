@@ -432,20 +432,24 @@ function _throw_native_failure(snapshot, transform)
     )
 end
 
-_throw_first_native_target_failure(::_NoNativeTargetFailures) = nothing
+_take_first_native_target_failure!(::_NoNativeTargetFailures) = nothing
 
-function _throw_first_native_target_failure(failures)
-    for failure in failures
-        isnothing(failure) || throw(failure)
-    end
-    return nothing
+function _take_first_native_target_failure!(failures::_NativeCPUTargetFailures)
+    index = failures.first_index[]
+    index == typemax(Int) && return nothing
+    failure = checkbounds(Bool, failures.slots, index) ?
+              @inbounds(failures.slots[index]) : nothing
+    fill!(failures.slots, nothing)
+    failures.first_index[] = typemax(Int)
+    return failure
 end
 
 function _throw_native_failures(snapshot, target_failures, transform)
+    target_failure = _take_first_native_target_failure!(target_failures)
     if !iszero(snapshot.count) && snapshot.reason_bits & _NATIVE_TRANSFORM_REASONS != 0
         _throw_native_failure(snapshot, transform)
     end
-    _throw_first_native_target_failure(target_failures)
+    isnothing(target_failure) || throw(target_failure)
     return _throw_native_failure(snapshot, transform)
 end
 
