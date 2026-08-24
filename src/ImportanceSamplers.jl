@@ -1,5 +1,6 @@
 module ImportanceSamplers
 
+import Adapt
 import DensityInterface
 import KernelAbstractions
 import KernelAbstractions: @index, @kernel

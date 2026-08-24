@@ -23,6 +23,11 @@ struct _NativeDeviceTarget{L,T}
     target::T
 end
 
+function Adapt.adapt_structure(to, evaluator::_NativeDeviceTarget{L}) where {L}
+    target = Adapt.adapt(to, evaluator.target)
+    return _NativeDeviceTarget{L,typeof(target)}(target)
+end
+
 struct _NativeCPUTarget{L,T,F}
     target::T
     failures::F
@@ -292,7 +297,7 @@ end
              UInt64(inverse_block) << 16 |
              UInt64(reason_bits)
     KernelAbstractions.@atomic storage[1] += UInt64(1)
-    KernelAbstractions.@atomic storage[2] = max(storage[2], packed)
+    KernelAbstractions.@atomic storage[2] max packed
     return nothing
 end
 

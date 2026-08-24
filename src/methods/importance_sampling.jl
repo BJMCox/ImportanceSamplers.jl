@@ -248,6 +248,7 @@ function _transfer_prepared_sampler(
     device::MLDataDevices.AbstractAcceleratorDevice,
     sampler::_PreparedImportanceSampler,
 )
+    device = _preserving_accelerator_device(device)
     sampler.executed && throw(SamplerAlreadyExecutedError())
     sampler.threaded || throw(SamplerDeviceError(device, :serial_accelerator))
     _target_has_opaque_host_closure(sampler.target) && throw(
@@ -282,6 +283,15 @@ function _transfer_prepared_sampler(
         false,
         false,
     )
+end
+
+function _preserving_accelerator_device(device)
+    if applicable(Base.eltype, device) &&
+       Base.eltype(device) === Missing &&
+       applicable(MLDataDevices.with_eltype, device, nothing)
+        return MLDataDevices.with_eltype(device, nothing)
+    end
+    return device
 end
 
 function _transfer_prepared_sampler(

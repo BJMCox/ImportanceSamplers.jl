@@ -75,6 +75,11 @@ struct _GaussianProposal{F,L,S,T}
     lognormalizer::T
 end
 
+Adapt.@adapt_structure _SphericalGaussianScale
+Adapt.@adapt_structure _DiagonalGaussianScale
+Adapt.@adapt_structure _FactorGaussianScale
+Adapt.@adapt_structure _GaussianProposal
+
 const _NativeGaussianFloat = Union{Float32,Float64}
 
 function _validated_gaussian_location(location::T) where {T<:_NativeGaussianFloat}

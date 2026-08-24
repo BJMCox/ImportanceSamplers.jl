@@ -191,6 +191,12 @@ end
 end
 
 @testset "device transfer lifecycle and accelerator limits" begin
+    default_cuda = MLDataDevices.CUDADevice()
+    preserving_cuda = IS._preserving_accelerator_device(default_cuda)
+    @test Base.eltype(default_cuda) === Missing
+    @test Base.eltype(preserving_cuda) === Nothing
+    @test getfield(preserving_cuda, :device) === getfield(default_cuda, :device)
+
     cpu = MLDataDevices.cpu_device()
     executed = make_transfer_sampler(2201; threaded=false)
     importance_sample!(executed)

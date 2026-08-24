@@ -31,6 +31,11 @@ struct _BoundDensityInterfaceTarget{T} <: _BoundTarget
     target::T
 end
 
+Adapt.@adapt_structure _BoundContextFreeTarget
+Adapt.@adapt_structure _BoundContextualTarget
+Adapt.@adapt_structure _BoundLogDensityProblemsTarget
+Adapt.@adapt_structure _BoundDensityInterfaceTarget
+
 @inline (target::_BoundContextFreeTarget)(sample) = target.logdensity(sample)
 @inline (target::_BoundContextualTarget)(sample) = target.logdensity(sample, target.context)
 @inline (target::_BoundLogDensityProblemsTarget)(sample) =
