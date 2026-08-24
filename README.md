@@ -52,6 +52,9 @@ The runnable
 [`logistic_regression.jl`](examples/logistic_regression.jl) example performs
 end-to-end Bayesian inference for an intercept and two regression slopes. It
 uses a prior pilot to fit an inflated Gaussian proposal, then draws an
-independent final importance sample.
+independent final importance sample. Its
+[`cuda_logistic_regression.jl`](examples/cuda_logistic_regression.jl) variant
+runs both sampling rounds on CUDA and transfers results to CPU only between
+adaptation rounds and for the final summary.
 For background, see the open-access survey
 [“Advances in Importance Sampling”](https://arxiv.org/abs/2102.05407).

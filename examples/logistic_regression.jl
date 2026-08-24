@@ -127,6 +127,33 @@ function fit_gaussian_proposal(result; covariance_inflation=1.5)
     return FactorGaussian(means, factor)
 end
 
+function print_logistic_summary(title, summary, pilot_ess, pilot_samples, nsamples)
+    println(title)
+    for coefficient in eachindex(COEFFICIENT_NAMES)
+        interval = summary.intervals[coefficient]
+        println(
+            "  ", COEFFICIENT_NAMES[coefficient],
+            ": true=", TRUE_COEFFICIENTS[coefficient],
+            ", mean=", round(summary.means[coefficient]; digits=3),
+            ", sd=", round(summary.standard_deviations[coefficient]; digits=3),
+            ", 95% interval=", round.(interval; digits=3),
+        )
+    end
+    println(
+        "  pilot effective sample size: ",
+        round(pilot_ess; digits=1),
+        " / ",
+        pilot_samples,
+    )
+    println(
+        "  final effective sample size: ",
+        round(summary.effective_sample_size; digits=1),
+        " / ",
+        nsamples,
+    )
+    println("  estimated log evidence: ", round(summary.log_evidence; digits=3))
+end
+
 function main(; pilot_samples=20_000, nsamples=100_000)
     data = simulate_logistic_data(Xoshiro(0x4c4f474953544943), TRUE_COEFFICIENTS)
     prior_scale = 1.5
@@ -151,31 +178,13 @@ function main(; pilot_samples=20_000, nsamples=100_000)
     )
     summary = summarize_coefficients(result)
     pilot_ess = inv(sum(abs2, normalized_weights(pilot)))
-
-    println("Logistic regression posterior")
-    for coefficient in eachindex(COEFFICIENT_NAMES)
-        interval = summary.intervals[coefficient]
-        println(
-            "  ", COEFFICIENT_NAMES[coefficient],
-            ": true=", TRUE_COEFFICIENTS[coefficient],
-            ", mean=", round(summary.means[coefficient]; digits=3),
-            ", sd=", round(summary.standard_deviations[coefficient]; digits=3),
-            ", 95% interval=", round.(interval; digits=3),
-        )
-    end
-    println(
-        "  pilot effective sample size: ",
-        round(pilot_ess; digits=1),
-        " / ",
+    print_logistic_summary(
+        "Logistic regression posterior",
+        summary,
+        pilot_ess,
         pilot_samples,
-    )
-    println(
-        "  final effective sample size: ",
-        round(summary.effective_sample_size; digits=1),
-        " / ",
         nsamples,
     )
-    println("  estimated log evidence: ", round(summary.log_evidence; digits=3))
 
     return (; pilot, proposal, result, summary, context)
 end
