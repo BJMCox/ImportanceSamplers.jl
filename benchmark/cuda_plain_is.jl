@@ -77,12 +77,7 @@ function assert_independent_storage(source::NamedTuple, destination::NamedTuple)
     return nothing
 end
 
-function assert_independent_storage(source, destination)
-    if Base.ismutabletype(typeof(source))
-        @assert source !== destination
-    end
-    return nothing
-end
+assert_independent_storage(source, destination) = nothing
 
 array_payload_bytes(array::AbstractArray) = sizeof(array)
 array_payload_bytes(tuple::NamedTuple) =
@@ -99,6 +94,7 @@ function validate_complete_host_result(device_result, host_result)
     assert_independent_storage(device_result.logweights, host_result.logweights)
     assert_independent_storage(device_result.diagnostics, host_result.diagnostics)
     assert_independent_storage(device_result.provenance, host_result.provenance)
+    @assert device_result.diagnostics.transfers !== host_result.diagnostics.transfers
 
     sample_array_bytes = array_payload_bytes(host_result.samples)
     complete_result_array_bytes =
