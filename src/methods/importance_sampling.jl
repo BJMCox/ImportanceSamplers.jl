@@ -10,6 +10,7 @@ abstract type AbstractImportanceSampler end
 
 """
     ImportanceSampling(proposal; nsamples)
+    ImportanceSampling(bank::ProposalBank; nsamples, mis_scheme=StratifiedMixture())
 
 Configure plain, single-proposal importance sampling.
 
@@ -19,14 +20,51 @@ measure. `nsamples` must be a positive `Int` and is the exact number of samples
 returned by every run. Generic proposals execute on CPU; the native Gaussian
 and transform subset also supports prepared CUDA execution.
 """
-struct ImportanceSampling{P} <: AbstractImportanceSampler
+struct _SingleProposalScheme end
+
+mutable struct _ValidatedImportanceSamplingToken end
+const _VALIDATED_IMPORTANCE_SAMPLING_TOKEN = _ValidatedImportanceSamplingToken()
+
+struct ImportanceSampling{P,S} <: AbstractImportanceSampler
     proposal::P
     nsamples::Int
+    mis_scheme::S
+
+    function ImportanceSampling(
+        proposal::P,
+        nsamples::Int,
+        mis_scheme::S,
+        token::_ValidatedImportanceSamplingToken,
+    ) where {P,S}
+        token === _VALIDATED_IMPORTANCE_SAMPLING_TOKEN || throw(
+            ArgumentError("invalid internal algorithm-construction token"),
+        )
+        return new{P,S}(proposal, nsamples, mis_scheme)
+    end
 end
 
 function ImportanceSampling(proposal; nsamples)
     nsamples isa Int && nsamples > 0 || throw(ArgumentError("nsamples must be a positive Int"))
-    return ImportanceSampling(proposal, nsamples)
+    return ImportanceSampling(
+        proposal,
+        nsamples,
+        _SingleProposalScheme(),
+        _VALIDATED_IMPORTANCE_SAMPLING_TOKEN,
+    )
+end
+
+function ImportanceSampling(
+    bank::ProposalBank;
+    nsamples,
+    mis_scheme::AbstractMISScheme=StratifiedMixture(),
+)
+    nsamples isa Int && nsamples > 0 || throw(ArgumentError("nsamples must be a positive Int"))
+    return ImportanceSampling(
+        bank,
+        nsamples,
+        mis_scheme,
+        _VALIDATED_IMPORTANCE_SAMPLING_TOKEN,
+    )
 end
 
 """
@@ -230,7 +268,13 @@ end
 
 function _copy_algorithm(device, algorithm::ImportanceSampling)
     proposal = _copy_to_device(device, algorithm.proposal)
-    return ImportanceSampling(proposal, algorithm.nsamples)
+    mis_scheme = _copy_to_device(device, algorithm.mis_scheme)
+    return ImportanceSampling(
+        proposal,
+        algorithm.nsamples,
+        mis_scheme,
+        _VALIDATED_IMPORTANCE_SAMPLING_TOKEN,
+    )
 end
 
 function _clone_rng(device, rng::Random.AbstractRNG)

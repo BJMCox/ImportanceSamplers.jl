@@ -11,7 +11,9 @@ import MLDataDevices
 import Random
 
 export AbstractImportanceSampler,
+    AbstractMISScheme,
     AbstractProposalFamily,
+    AbstractProposalPopulation,
     AbstractRadialProposalFamily,
     AbstractSampleTransform,
     AllZeroWeightsError,
@@ -22,12 +24,17 @@ export AbstractImportanceSampler,
     IntervalTransform,
     InvalidTransformError,
     LogTarget,
+    PartialDeterministicMixture,
+    ProposalBank,
+    RandomMixture,
     SamplerAlreadyExecutedError,
     SamplerBusyError,
     SamplerDeviceError,
     SamplerExecutionError,
     SimplexTransform,
     SphericalGaussian,
+    StandardMIS,
+    StratifiedMixture,
     PositiveTransform,
     ProductProposal,
     SoftplusTransform,
@@ -43,6 +50,7 @@ export AbstractImportanceSampler,
 include("proposals.jl")
 include("transforms.jl")
 include("proposal_composition.jl")
+include("proposal_banks.jl")
 include("methods/importance_sampling.jl")
 include("targets.jl")
 include("storage.jl")

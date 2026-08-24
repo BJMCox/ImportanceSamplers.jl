@@ -6,6 +6,7 @@ include("support/proposals.jl")
 test_files = if isempty(ARGS)
     [
         "algorithm",
+        "static_mis",
         "device_api",
         "plain_is",
         "threading",
