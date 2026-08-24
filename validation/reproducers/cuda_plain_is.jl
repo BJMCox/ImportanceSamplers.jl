@@ -355,7 +355,7 @@ function validate_public_preserving_device(device, ::Type{T}) where {T}
 
     @test eltype(device) === Nothing
     @test eltype(prepared_proposal.location) === T
-    @test eltype(prepared_proposal.scale) === T
+    @test eltype(prepared_proposal.scale.scales) === T
     @test eltype(prepared_context.location) === T
     @test eltype(prepared_context.scale) === T
     @test eltype(buffers.uniform) === T
