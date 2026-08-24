@@ -67,6 +67,33 @@ function _dependent_structured_logdensity(sample::NamedTuple, factor)
     return base_logdensity - logabsjac
 end
 
+@testset "native proposals implement DensityInterface" begin
+    gaussian = SphericalGaussian(0.0, 1.0)
+    product = ProductProposal((left=gaussian, right=SphericalGaussian(1.0, 2.0)))
+    transformed = TransformedProposal(gaussian, IdentityTransform())
+    cases = (
+        (gaussian, 0.25),
+        (product, (left=0.25, right=-0.5)),
+        (transformed, 0.25),
+    )
+
+    for (index, (proposal, sample)) in enumerate(cases)
+        expected = DensityInterface.logdensityof(proposal, sample)
+        @test DensityInterface.DensityKind(proposal) isa DensityInterface.HasDensity
+        @test DensityInterface.logdensityof(proposal)(sample) == expected
+        DensityInterface.test_density_interface(proposal, sample, expected)
+
+        result = importance_sample(
+            Random.Xoshiro(0x7400 + index),
+            proposal,
+            ImportanceSampling(proposal; nsamples=8);
+            threaded=false,
+        )
+        @test result.logweights == zeros(eltype(result.logweights), 8)
+        @test lognormalizer(result) == zero(eltype(result.logweights))
+    end
+end
+
 @testset "product proposal CPU semantics" begin
     blocks = (
         first=SphericalGaussian(1.0, 0.5),

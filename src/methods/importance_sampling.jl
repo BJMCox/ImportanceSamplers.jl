@@ -110,7 +110,7 @@ end
     SamplerExecutionError
 
 Exception wrapping a failure from one logical sample during proposal drawing,
-target evaluation, or proposal-density evaluation.
+target evaluation, proposal-density evaluation, or log-weight construction.
 
 The `phase` and `sample_index` fields locate the failure. `captured` preserves
 the original exception and backtrace. A failed run never returns a partial
@@ -718,9 +718,25 @@ function _construct_logweights!(logweights::Vector{T}, target_logs::Vector{T}) w
         DimensionMismatch("target and proposal log arrays must be aligned"),
     )
     for sample_index in eachindex(logweights, target_logs)
-        logweights[sample_index] = target_logs[sample_index] - logweights[sample_index]
+        logweights[sample_index] = _capture_sampler_failure(:logweight, sample_index) do
+            logweight, reason = _subtract_logweight(
+                target_logs[sample_index],
+                logweights[sample_index],
+            )
+            iszero(reason) || throw(
+                DomainError(logweight, "derived log weight may not be NaN or +Inf"),
+            )
+            logweight
+        end
     end
     return logweights
+end
+
+@inline function _subtract_logweight(target_log, proposal_log)
+    logweight = target_log - proposal_log
+    reason = (isnan(logweight) || logweight == Inf) ?
+             _NATIVE_LOGWEIGHT_INVALID : UInt16(0)
+    return logweight, reason
 end
 
 function _target_logdensity(target, sample, sample_index)

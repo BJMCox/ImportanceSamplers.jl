@@ -520,6 +520,8 @@ function DensityInterface.logdensityof(
     return proposal.lognormalizer - oftype(proposal.lognormalizer, 0.5) * squared_radius
 end
 
+@inline DensityInterface.DensityKind(::_GaussianProposal) = DensityInterface.HasDensity()
+
 _proposal_dimension(proposal::_GaussianProposal) = _gaussian_dimension(proposal.location)
 
 _draw_product_values(rng::Random.AbstractRNG, ::Tuple{}) = ()
@@ -544,3 +546,5 @@ end
 function DensityInterface.logdensityof(proposal::ProductProposal, sample::NamedTuple)
     throw(ArgumentError("product proposal sample fields must match proposal blocks"))
 end
+
+@inline DensityInterface.DensityKind(::ProductProposal) = DensityInterface.HasDensity()

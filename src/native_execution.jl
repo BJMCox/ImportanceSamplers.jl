@@ -124,8 +124,9 @@ end
 end
 
 @inline function _native_generate_sample!(samples, slot, base, ::_NoSampleTransform, normals, offset)
-    _native_store_gaussian!(samples, slot, base, normals, offset)
-    return zero(base.lognormalizer), UInt16(0), 0
+    valid = _native_store_gaussian!(samples, slot, base, normals, offset)
+    reason = valid ? UInt16(0) : _NATIVE_GENERATED_NONFINITE
+    return zero(base.lognormalizer), reason, 0
 end
 
 @inline function _native_generate_sample!(
@@ -142,10 +143,9 @@ end
     return logabsjac, reason, 1
 end
 
-
 @inline function _native_generate_sample!(samples, slot, base, ::IdentityTransform, normals, offset)
     valid = _native_store_gaussian!(samples, slot, base, normals, offset)
-    reason = valid ? UInt16(0) : _NATIVE_TRANSFORM_NONFINITE_INPUT
+    reason = valid ? UInt16(0) : _NATIVE_GENERATED_NONFINITE
     return zero(base.lognormalizer), reason, 1
 end
 
@@ -393,7 +393,20 @@ end
             if !iszero(proposal_reason)
                 _record_native_failure!(failure_storage, slot, 0, proposal_reason)
             else
-                @inbounds logweights[slot] = target_log - proposal_log
+                logweight, logweight_reason = _subtract_logweight(
+                    target_log,
+                    proposal_log,
+                )
+                if iszero(logweight_reason)
+                    @inbounds logweights[slot] = logweight
+                else
+                    _record_native_failure!(
+                        failure_storage,
+                        slot,
+                        0,
+                        logweight_reason,
+                    )
+                end
             end
         end
     end
@@ -418,9 +431,15 @@ function _throw_native_failure(snapshot, transform)
             _native_failure_location(transform, snapshot.first_block),
         )
         throw(SamplerExecutionError(:proposal_draw, index, CapturedException(cause, backtrace())))
+    elseif bits & _NATIVE_GENERATED_NONFINITE != 0
+        cause = DomainError(bits, "generated proposal samples must contain only finite values")
+        throw(SamplerExecutionError(:proposal_draw, index, CapturedException(cause, backtrace())))
     elseif bits & (_NATIVE_TARGET_NAN | _NATIVE_TARGET_POSITIVE_INFINITY) != 0
         cause = DomainError(bits, "target log density may not be NaN or +Inf")
         throw(SamplerExecutionError(:target, index, CapturedException(cause, backtrace())))
+    elseif bits & _NATIVE_LOGWEIGHT_INVALID != 0
+        cause = DomainError(bits, "derived log weight may not be NaN or +Inf")
+        throw(SamplerExecutionError(:logweight, index, CapturedException(cause, backtrace())))
     end
     cause = DomainError(bits, "proposal log density at a generated sample may not be NaN or -Inf")
     throw(
@@ -446,7 +465,8 @@ end
 
 function _throw_native_failures(snapshot, target_failures, transform)
     target_failure = _take_first_native_target_failure!(target_failures)
-    if !iszero(snapshot.count) && snapshot.reason_bits & _NATIVE_TRANSFORM_REASONS != 0
+    if !iszero(snapshot.count) &&
+       snapshot.reason_bits & _NATIVE_PROPOSAL_DRAW_REASONS != 0
         _throw_native_failure(snapshot, transform)
     end
     isnothing(target_failure) || throw(target_failure)

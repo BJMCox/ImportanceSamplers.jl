@@ -60,6 +60,29 @@ function (::NativePhaseOrderTarget)(sample::Float64)::Float64
     return isfinite(sample) ? 0.0 : -Inf
 end
 
+struct NativeMaximumTarget{T} end
+
+function (::NativeMaximumTarget{T})(::T)::T where {T}
+    return floatmax(T)
+end
+
+struct FixedOverflowProposal{T}
+    sample::T
+end
+
+Random.rand(::Random.AbstractRNG, proposal::FixedOverflowProposal) = proposal.sample
+DensityInterface.logdensityof(proposal::FixedOverflowProposal{T}, ::T) where {T} =
+    -floatmax(T)
+
+mutable struct NativeCallCounterTarget{T}
+    calls::Int
+end
+
+function (target::NativeCallCounterTarget{T})(::T)::T where {T}
+    target.calls += 1
+    return zero(T)
+end
+
 struct NativeFailFromScalarTarget
     first_failure::Float64
 end
@@ -421,6 +444,70 @@ end
     end
 end
 
+@testset "derived nonfinite log weights fail consistently" begin
+    for T in (Float32, Float64)
+        invalid_cases = (
+            (T(-Inf), T(-Inf), T(NaN)),
+            (floatmax(T), -floatmax(T), T(Inf)),
+        )
+        for (target_log, proposal_log, expected) in invalid_cases
+            logweight, reason = ImportanceSamplers._subtract_logweight(
+                target_log,
+                proposal_log,
+            )
+            @test isequal(logweight, expected)
+            @test !iszero(reason)
+        end
+        preserved, reason = ImportanceSamplers._subtract_logweight(T(-Inf), T(Inf))
+        @test preserved === T(-Inf)
+        @test iszero(reason)
+
+        for threaded in (false, true)
+            generic_failure = _caught_kernel_execution_error() do
+                importance_sample(
+                    Random.Xoshiro(0x9301),
+                    NativeMaximumTarget{T}(),
+                    ImportanceSampling(FixedOverflowProposal(zero(T)); nsamples=2);
+                    threaded,
+                )
+            end
+            @test generic_failure isa SamplerExecutionError
+            @test (generic_failure.phase, generic_failure.sample_index) == (:logweight, 1)
+            @test generic_failure.captured.ex isa DomainError
+
+            overflow_normal = T(0.75) * sqrt(floatmax(T))
+            fused_failure = _caught_kernel_execution_error() do
+                _run_native_fused(
+                    NativeMaximumTarget{T}(),
+                    SphericalGaussian(zero(T), one(T)),
+                    T[overflow_normal, zero(T)],
+                    threaded,
+                    2,
+                )
+            end
+            @test fused_failure isa SamplerExecutionError
+            @test (fused_failure.phase, fused_failure.sample_index) == (:logweight, 1)
+            @test fused_failure.captured.ex isa DomainError
+        end
+    end
+end
+
+@testset "nonfinite Gaussian draws fail before target evaluation" begin
+    for T in (Float32, Float64), transformed in (false, true)
+        target = NativeCallCounterTarget{T}(0)
+        gaussian = SphericalGaussian(zero(T), one(T))
+        proposal = transformed ?
+                   TransformedProposal(gaussian, IdentityTransform()) : gaussian
+        failure = _caught_kernel_execution_error() do
+            _run_native_fused(target, proposal, T[Inf], false)
+        end
+        @test failure isa SamplerExecutionError
+        @test (failure.phase, failure.sample_index) == (:proposal_draw, 1)
+        @test failure.captured.ex isa DomainError
+        @test target.calls == 0
+    end
+end
+
 @testset "native CPU target failures retain binding, phase, and index" begin
     proposal = SphericalGaussian(zeros(2), 1.0)
     binding_failure = _caught_kernel_execution_error() do
@@ -458,8 +545,10 @@ end
     end
     @test phase_order_failure isa SamplerExecutionError
     if phase_order_failure isa SamplerExecutionError
-        @test (phase_order_failure.phase, phase_order_failure.sample_index) == (:target, 3)
-        @test phase_order_failure.captured.ex isa NativeTargetFailure
+        @test (phase_order_failure.phase, phase_order_failure.sample_index) ==
+              (:proposal_draw, 1)
+        @test phase_order_failure.captured.ex isa DomainError
+        @test phase_order_failure.captured.ex.val == UInt16(0x0800)
     end
 
     for threaded in (false, true)
@@ -630,9 +719,9 @@ end
     @test transform_failure isa SamplerExecutionError
     @test (transform_failure.phase, transform_failure.sample_index) ==
           (:proposal_draw, 1)
-    @test transform_failure.captured.ex isa InvalidTransformError
+    @test transform_failure.captured.ex isa DomainError
     @test transform_storage[1] == 1
-    @test transform_storage[2] & UInt64(0xffff) == UInt64(0x0001)
+    @test transform_storage[2] & UInt64(0xffff) == UInt64(0x0800)
 
     transform_result = @inferred importance_sample!(transform_sampler)
     @test length(transform_result) == 1
@@ -661,7 +750,7 @@ end
     @test mixed_failure isa SamplerExecutionError
     if mixed_failure isa SamplerExecutionError
         @test (mixed_failure.phase, mixed_failure.sample_index) == (:proposal_draw, 1)
-        @test mixed_failure.captured.ex isa InvalidTransformError
+        @test mixed_failure.captured.ex isa DomainError
     end
     @test all(isnothing, getfield(mixed_failures, :slots))
     @test getfield(mixed_failures, :first_index)[] == typemax(Int)

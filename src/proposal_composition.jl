@@ -336,5 +336,7 @@ function DensityInterface.logdensityof(proposal::TransformedProposal, logical_va
     return DensityInterface.logdensityof(proposal.base, coordinate) - logabsjac
 end
 
+@inline DensityInterface.DensityKind(::TransformedProposal) = DensityInterface.HasDensity()
+
 _accelerator_proposal_limit(proposal::TransformedProposal) =
     _accelerator_proposal_limit(proposal.base)
