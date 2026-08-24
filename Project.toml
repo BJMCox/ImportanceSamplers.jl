@@ -13,6 +13,13 @@ LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
 MLDataDevices = "7e8f7934-dd98-4c1a-8fe8-92b47a384d40"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 
+[extras]
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Statistics", "Test"]
+
 [weakdeps]
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 
