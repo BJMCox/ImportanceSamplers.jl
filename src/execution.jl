@@ -116,6 +116,15 @@ function _allocate_random_buffers(device, proposal, nsamples)
     return _RandomBuffers(uniform, normal, failure_scratch)
 end
 
+function _allocate_random_buffers(
+    device,
+    proposal,
+    ::_SingleProposalMethodState,
+    nsamples,
+)
+    return _allocate_random_buffers(device, proposal, nsamples)
+end
+
 _native_failure_scratch(::_NoRandomBuffers) = _NoNativeFailureScratch()
 _native_failure_scratch(buffers::_RandomBuffers) = buffers.failure_scratch
 

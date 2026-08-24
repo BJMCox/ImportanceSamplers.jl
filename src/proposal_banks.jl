@@ -55,6 +55,35 @@ struct ProposalBank{P<:AbstractVector,M<:AbstractVector} <: AbstractProposalPopu
     end
 end
 
+struct _ActiveProposalBank{P,M,C,I}
+    proposals::P
+    logmasses::M
+    cdf::C
+    proposal_ids::I
+end
+
+function _prepare_active_proposal_bank(bank::ProposalBank)
+    proposal_type = eltype(bank.proposals)
+    isconcretetype(proposal_type) || throw(
+        ArgumentError(
+            "generic CPU proposal banks require one concrete proposal element type",
+        ),
+    )
+
+    proposal_ids = findall(!iszero, bank.masses)
+    proposals = bank.proposals[proposal_ids]
+    masses = bank.masses[proposal_ids]
+    masses ./= sum(masses)
+    cdf = cumsum(masses)
+    cdf[end] = one(eltype(cdf))
+    return _ActiveProposalBank(
+        proposals,
+        log.(masses),
+        cdf,
+        proposal_ids,
+    )
+end
+
 function ProposalBank(proposals::AbstractVector)
     isempty(proposals) && throw(ArgumentError("a proposal bank cannot be empty"))
     return ProposalBank(proposals, ones(Float64, length(proposals)))

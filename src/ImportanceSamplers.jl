@@ -55,6 +55,7 @@ include("methods/importance_sampling.jl")
 include("targets.jl")
 include("storage.jl")
 include("execution.jl")
+include("methods/static_mis.jl")
 include("native_execution.jl")
 include("results.jl")
 

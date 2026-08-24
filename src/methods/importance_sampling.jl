@@ -21,6 +21,7 @@ returned by every run. Generic proposals execute on CPU; the native Gaussian
 and transform subset also supports prepared CUDA execution.
 """
 struct _SingleProposalScheme end
+struct _SingleProposalMethodState end
 
 mutable struct _ValidatedImportanceSamplingToken end
 const _VALIDATED_IMPORTANCE_SAMPLING_TOKEN = _ValidatedImportanceSamplingToken()
@@ -181,11 +182,12 @@ struct _ContextualPreparedTarget{T,P}
     context::P
 end
 
-mutable struct _PreparedImportanceSampler{R,B,T,A,D}
+mutable struct _PreparedImportanceSampler{R,B,T,A,M,D}
     rng::R
     random_buffers::B
     target::T
     algorithm::A
+    method_state::M
     device::D
     threaded::Bool
     running::Bool
@@ -247,20 +249,30 @@ end
 function _prepare_importance_sampler(rng, target, algorithm, threaded)
     threaded isa Bool || throw(ArgumentError("threaded must be Bool"))
     prepared_target = _resolve_prepared_target(target, algorithm.proposal)
+    method_state = _prepare_method_state(algorithm)
     device = MLDataDevices.CPUDevice()
-    random_buffers =
-        _allocate_random_buffers(device, algorithm.proposal, algorithm.nsamples)
+    random_buffers = _allocate_random_buffers(
+        device,
+        algorithm.proposal,
+        method_state,
+        algorithm.nsamples,
+    )
     return _PreparedImportanceSampler(
         rng,
         random_buffers,
         prepared_target,
         algorithm,
+        method_state,
         device,
         threaded,
         false,
         false,
     )
 end
+
+_prepare_method_state(
+    ::ImportanceSampling{P,_SingleProposalScheme},
+) where {P} = _SingleProposalMethodState()
 
 function _copy_to_device(device, value)
     return device(deepcopy(value))
@@ -315,13 +327,19 @@ function _transfer_prepared_sampler(
         SamplerDeviceError(device, :opaque_host_closure),
     )
     algorithm = _copy_algorithm(device, sampler.algorithm)
-    random_buffers =
-        _allocate_random_buffers(device, algorithm.proposal, algorithm.nsamples)
+    method_state = _prepare_method_state(algorithm)
+    random_buffers = _allocate_random_buffers(
+        device,
+        algorithm.proposal,
+        method_state,
+        algorithm.nsamples,
+    )
     return _PreparedImportanceSampler(
         _clone_rng(device, sampler.rng),
         random_buffers,
         _transfer_prepared_target(device, sampler.target),
         algorithm,
+        method_state,
         device,
         sampler.threaded,
         false,
@@ -352,15 +370,20 @@ function _transfer_prepared_sampler(
     return _with_backend_device(device) do
         algorithm = _copy_algorithm(device, sampler.algorithm)
         target = _transfer_prepared_target(device, sampler.target)
+        method_state = _prepare_method_state(algorithm)
         random_buffers = _allocate_random_buffers(
             device,
             algorithm.proposal,
+            method_state,
             algorithm.nsamples,
         )
         random_buffers isa _RandomBuffers || throw(
             SamplerDeviceError(device, :accelerator_rng_unavailable),
         )
-        _validate_backend_state(device, (algorithm, target, random_buffers))
+        _validate_backend_state(
+            device,
+            (algorithm, method_state, target, random_buffers),
+        )
         _preflight_native_kernel_target(
             device,
             target,
@@ -378,6 +401,7 @@ function _transfer_prepared_sampler(
             random_buffers,
             target,
             algorithm,
+            method_state,
             device,
             sampler.threaded,
             false,
@@ -474,6 +498,7 @@ function importance_sample!(sampler::_PreparedImportanceSampler)
                 sampler.device,
                 (
                     sampler.algorithm,
+                    sampler.method_state,
                     sampler.target,
                     sampler.random_buffers,
                     sampler.rng,
@@ -493,6 +518,10 @@ function importance_sample!(sampler::_PreparedImportanceSampler)
 end
 
 function _importance_sample_cpu!(sampler, threaded)
+    return _importance_sample_cpu!(sampler, sampler.method_state, threaded)
+end
+
+function _importance_sample_cpu!(sampler, ::_SingleProposalMethodState, threaded)
     execution = _sampling_execution(sampler.algorithm.proposal, threaded)
     samples, logweights, transfers = _importance_sample!(sampler, execution)
     diagnostics = (
