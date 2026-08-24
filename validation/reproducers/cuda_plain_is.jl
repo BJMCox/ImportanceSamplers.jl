@@ -158,6 +158,26 @@ end
 
 scalar_summary(samples) = sum(samples) / length(samples)
 vector_summary(samples) = vec(sum(samples; dims=2)) / size(samples, 2)
+
+function factor_summary(samples)
+    T = eltype(samples)
+    location = T[0.25, -0.5]
+    summary = vector_summary(samples)
+    cross_moment = zero(T)
+    for sample_index in axes(samples, 2)
+        cross_moment += (samples[1, sample_index] - location[1]) *
+                        (samples[2, sample_index] - location[2])
+    end
+    return vcat(summary, cross_moment / T(size(samples, 2)))
+end
+
+function softplus_median_probability(samples)
+    T = eltype(samples)
+    location = T(0.15)
+    threshold = max(location, zero(T)) + log1p(exp(-abs(location)))
+    return T(count(<=(threshold), samples)) / T(length(samples))
+end
+
 flat_layout_summary(samples) = vcat(
     vector_summary(samples.free),
     scalar_summary(samples.lower),
@@ -184,22 +204,6 @@ function validation_case(
     )
 end
 
-function support_validation_case(
-    ::Type{T}, label, proposal, target, context, sample_contract;
-    weight_multiplier=512,
-) where {T}
-    return (;
-        label, proposal, target, context,
-        summarize=nothing,
-        expected=nothing,
-        standard_error=nothing,
-        summary_atol=nothing,
-        difference_atol=nothing,
-        weight_atol=T(weight_multiplier) * eps(T),
-        sample_contract,
-    )
-end
-
 validation_case(::Type{T}, case, summarize, expected, variance_trace; kws...) where {T} =
     validation_case(
         T, case.label, case.proposal, case.target, case.context, summarize,
@@ -215,6 +219,11 @@ function validation_cases(::Type{T}) where {T}
     factor_lognormalizer = T[
         -log(T(2) * T(pi)) - log(factor[1, 1]) - log(factor[2, 2]),
     ]
+    factor_cross_covariance = factor[1, 1] * factor[2, 1]
+    factor_cross_variance =
+        abs2(factor[1, 1]) * (abs2(factor[2, 1]) + abs2(factor[2, 2])) +
+        abs2(factor_cross_covariance)
+    factor_summary_variance = max(sum(abs2, factor), factor_cross_variance)
     identity = TransformedProposal(
         SphericalGaussian(T[-0.2, 0.6], T(1.1)),
         IdentityTransform(),
@@ -267,7 +276,8 @@ function validation_cases(::Type{T}) where {T}
                 factor,
                 lognormalizer=factor_lognormalizer,
             ),
-            vector_summary, T[0.25, -0.5], sum(abs2, factor),
+            factor_summary, T[0.25, -0.5, factor_cross_covariance],
+            factor_summary_variance,
             sample_contract=(kind=:vector, dimension=2),
         ),
         validation_case(
@@ -276,10 +286,11 @@ function validation_cases(::Type{T}) where {T}
             vector_summary, T[-0.2, 0.6], T(2) * abs2(T(1.1)),
             sample_contract=(kind=:vector, dimension=2),
         ),
-        support_validation_case(
+        validation_case(
             T, :softplus, softplus, softplus_gaussian_logtarget,
             (location=T[0.15], scale=T[0.7]),
-            (kind=:scalar, lower=zero(T), upper=nothing),
+            softplus_median_probability, T(0.5), T(0.25),
+            sample_contract=(kind=:scalar, lower=zero(T), upper=nothing),
         ),
         validation_case(
             T, :lower_bounded, lower_bounded, lower_bounded_gaussian_logtarget,
