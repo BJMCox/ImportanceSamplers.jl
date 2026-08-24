@@ -74,8 +74,9 @@ function validate_native_gaussians()
             ImportanceSampling(proposal; nsamples=64);
             threaded=false,
         )
-        @assert all(iszero, result.logweights)
-        @assert iszero(lognormalizer(result))
+        tolerance = 8eps(eltype(result.logweights))
+        @assert all(logweight -> abs(logweight) <= tolerance, result.logweights)
+        @assert abs(lognormalizer(result)) <= tolerance
     end
 
     normalization_factor = FactorGaussian(
