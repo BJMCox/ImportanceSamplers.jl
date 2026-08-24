@@ -154,73 +154,10 @@ the posterior geometry when collapse is material.
 
 ## Transformed and product proposals
 
-[`TransformedProposal`](@ref) maps normalized base-proposal draws into logical
-values and evaluates the exact change-of-variables density
-
-```math
-\log q_x(x) = \log q_z(z) - \log |J(z)|.
-```
-
-A partial named layout requires a [`ProductProposal`](@ref) base. Omitted
-known fields receive [`IdentityTransform`](@ref); unknown fields are rejected
-when the proposal is constructed. A flat base uses named selector pairs.
-Selectors are validated once as scalar indices or contiguous ranges that are
-in bounds, disjoint, and collectively complete. Both layouts return the same
-target-facing named-tuple shape:
-
-```jldoctest transformed_proposals
-using DensityInterface
-using ImportanceSamplers
-using Random
-
-named = TransformedProposal(
-    ProductProposal((
-        weights=SphericalGaussian(zeros(2), 1.0),
-        rate=SphericalGaussian(0.0, 1.0),
-        offset=SphericalGaussian(0.0, 1.0),
-    )),
-    (weights=SimplexTransform(3), rate=PositiveTransform()),
-)
-
-factor = [
-    1.0 0.0 0.0 0.0
-    0.3 1.2 0.0 0.0
-    -0.2 0.4 0.8 0.0
-    0.1 -0.3 0.25 1.5
-]
-flat = TransformedProposal(
-    FactorGaussian(zeros(4), factor),
-    (
-        weights=(1:2 => SimplexTransform(3)),
-        rate=(3 => PositiveTransform()),
-        offset=(4 => IdentityTransform()),
-    ),
-)
-
-x = (weights=fill(1 / 3, 3), rate=1.0, offset=0.0)
-named_reference = -2log(2pi) + 2.5log(3)
-flat_reference = named_reference - sum(log, (1.0, 1.2, 0.8, 1.5))
-
-(
-    keys(rand(Xoshiro(7), named)),
-    keys(rand(Xoshiro(8), flat)),
-    DensityInterface.logdensityof(named, x) ≈ named_reference,
-    DensityInterface.logdensityof(flat, x) ≈ flat_reference,
-)
-
-# output
-
-((:weights, :rate, :offset), (:weights, :rate, :offset), true, true)
-```
-
-The simplex Jacobian in this example is measured against
-`dx₁ dx₂`, with `x₃ = 1 - x₁ - x₂`, and retains the full
-`sqrt(3)` factor. External logical values outside transform support have
-proposal log density `-Inf`. A transform failure while producing a base draw
-instead raises [`InvalidTransformError`](@ref), preserving its block location.
-Product blocks use the sampler-owned coordinator RNG sequentially in field
-order. Product proposals are CPU-only in this slice and accelerator transfer
-raises a typed [`SamplerDeviceError`](@ref); mixtures are not implied.
+[`TransformedProposal`](@ref) applies a normalized change of variables, while
+[`ProductProposal`](@ref) combines independent named blocks on CPU. See
+[Transforms](@ref) for the scalar, structured, and simplex contracts and
+[Accelerators](@ref) for the narrower CUDA-supported layout.
 
 ## Target contract
 
@@ -405,22 +342,14 @@ already-drawn samples. Therefore those callables must be pure, deterministic,
 thread-safe, and free of hidden mutable scratch state. Worker tasks never draw
 from the prepared RNG.
 
-## Device capability and future accelerator work
+## Devices
 
-Preparation has no `device=` keyword and the one-shot form is CPU-only. Applying
-an `MLDataDevices.CPUDevice` to an unexecuted prepared sampler is supported.
-Accelerator requests fail during transfer until backend-owned random buffers
-and execution are implemented. An unavailable backend, `threaded=false`, and
-an opaque closure with captured host state each produce a typed
-[`SamplerDeviceError`](@ref). The package never silently falls back to CPU.
-
-## Future accelerator work
-
-GPU execution is a future slice requiring native packed proposal kernels,
-device-resident RNG and result storage, scalar-indexing-disabled tests, and
-validation on real hardware. No CUDA, AMDGPU, Metal, or oneAPI support is
-implemented or promised by this CPU execution slice. Return to
-[Device capability and future accelerator work](@ref) for the current boundary.
+Preparation has no `device=` keyword and the one-shot form starts on CPU.
+Before first execution, apply an MLDataDevices device to the complete prepared
+sampler. CPU accepts generic and native proposals. CUDA accepts the documented
+native subset with a device-compatible target and `threaded=true`; AMDGPU and
+Metal are unclaimed. See [Accelerators](@ref) for the complete transfer example,
+resident-result rules, and generated capability matrix.
 
 ## Troubleshooting
 
@@ -440,8 +369,9 @@ zero at every draw. The raw result remains inspectable, but normalized
 summaries are undefined.
 
 **Unsupported device.** Apply `cpu_device()` before first execution when an
-independent CPU copy is wanted. Accelerator requests fail during transfer;
-there is no host fallback. See [Future accelerator work](@ref).
+independent CPU copy is wanted. CUDA requires the native proposal path,
+`threaded=true`, a functional backend, and a device-compatible target. There is
+no host fallback. See [Accelerators](@ref).
 
 **Unstable return types or shapes.** Make every proposal draw return the same
 scalar type, vector length, named-tuple keys, and numeric leaf types. Make every
@@ -458,8 +388,8 @@ lock or concurrent top-level execution mode.
 
 ## Analytic validation and local performance
 
-The [runnable analytic validation](@ref "Runnable analytic validation") at
-`validation/reproducers/plain_is.jl` labels and checks two analytic identities:
+The runnable `validation/reproducers/plain_is.jl` labels and checks two
+analytic identities:
 proposal equal to normalized target, and a Gaussian weighted-mean and
 normalizer identity. It records the fixed seed, Julia and dependency versions,
 scalar type, budgets, tolerances, rationale, and command, and exits with an

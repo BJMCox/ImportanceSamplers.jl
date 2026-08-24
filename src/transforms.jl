@@ -2,28 +2,32 @@
     AbstractSampleTransform
 
 Abstract supertype for transforms from unconstrained coordinates to a logical
-sample value.
+sample value. Forward log Jacobians belong to the proposal's change-of-variables
+density.
 """
 abstract type AbstractSampleTransform end
 
 """
     IdentityTransform()
 
-Leave an unconstrained scalar or vector unchanged with zero log Jacobian.
+Leave an unconstrained scalar or vector unchanged with zero log Jacobian. A
+named product layout inserts this transform for omitted known fields.
 """
 struct IdentityTransform <: AbstractSampleTransform end
 
 """
     PositiveTransform()
 
-Map an unconstrained scalar `z` to `exp(z)` on the positive real line.
+Map an unconstrained scalar `z` to `exp(z)` on the positive real line, with
+forward log Jacobian `z`.
 """
 struct PositiveTransform <: AbstractSampleTransform end
 
 """
     SoftplusTransform()
 
-Map an unconstrained scalar smoothly to the positive real line with `softplus`.
+Map an unconstrained scalar smoothly to the positive real line with `softplus`
+and its stable forward log Jacobian.
 """
 struct SoftplusTransform <: AbstractSampleTransform end
 
@@ -38,7 +42,8 @@ end
 Transform `K - 1` unconstrained coordinates into `K` positive weights that
 sum to one. The coordinates use an orthonormal embedding into the sum-zero
 logit subspace. The forward Jacobian is measured against the first `K - 1`
-simplex coordinates, `dx₁⋯dxₖ₋₁`.
+simplex coordinates, `dx₁⋯dxₖ₋₁`, and includes the full constant:
+`log|J| = 0.5log(K) + sum(log, x)`.
 """
 struct SimplexTransform <: AbstractSampleTransform
     dimension::Int
@@ -235,7 +240,8 @@ end
 
 Construct a scalar transform onto the open interval defined by finite
 `Float32` or `Float64` endpoints. Use `nothing` for the unbounded endpoint;
-at least one endpoint is required.
+at least one endpoint is required. `(lower, nothing)`, `(nothing, upper)`, and
+`(lower, upper)` represent lower-bounded, upper-bounded, and bounded support.
 """
 function IntervalTransform(lower, upper)
     validated_lower = _validated_interval_endpoint(lower, "lower bound")

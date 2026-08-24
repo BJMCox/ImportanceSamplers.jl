@@ -19,7 +19,8 @@ struct GaussianFamily <: AbstractRadialProposalFamily end
 
 Construct a CPU proposal for the product of independent named proposal blocks.
 Blocks are drawn in field order with the supplied RNG, and their normalized log
-densities are summed.
+densities are summed. `ProductProposal` and transformed named-product layouts
+are not supported on CUDA.
 """
 struct ProductProposal{B<:NamedTuple}
     blocks::B
@@ -43,7 +44,9 @@ struct _PreparedProposalToken end
 
 Construct a proposal that maps draws from `base` into logical values through
 `transform`. Its density uses the exact normalized change of variables
-`log q_x(x) = log q_z(z) - log|J(z)|`.
+`log q_x(x) = log q_z(z) - log|J(z)|`. The proposal owns this Jacobian;
+target densities must use the resulting logical reference measure without
+applying it again.
 """
 struct TransformedProposal{B,T}
     base::B
@@ -126,7 +129,8 @@ end
 
 Construct a normalized scalar or vector Gaussian proposal with finite
 `Float32` or `Float64` location and a finite positive scalar standard
-deviation of the same type.
+deviation of the same type. Its covariance is `scale^2` for a scalar and
+`scale^2 I` for a vector.
 """
 function SphericalGaussian(location, scale)
     stored_location = _validated_gaussian_location(location)
@@ -170,7 +174,8 @@ end
 
 Construct a normalized vector Gaussian proposal with independent finite
 positive coordinate scales. Location and scales must use the same `Float32`
-or `Float64` element type.
+or `Float64` element type. The scales are standard deviations, so the
+covariance diagonal is `scales .^ 2`.
 """
 function DiagonalGaussian(location, scales)
     stored_location = _validated_gaussian_location(location)
@@ -239,7 +244,9 @@ end
 Construct a normalized vector Gaussian proposal with affine map
 `x = location + L * z`, where `z` is standard normal and `L` is a finite
 lower-triangular factor with positive diagonal. A `Cholesky` factorization is
-accepted through its lower factor.
+accepted through its lower factor. The covariance is `L * L'`; pass a factor,
+not an inverse covariance. Density evaluation uses triangular solves and never
+forms a covariance inverse.
 """
 function FactorGaussian(location, factor)
     stored_location = _validated_gaussian_location(location)

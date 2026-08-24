@@ -1,0 +1,50 @@
+# Public API
+
+## Algorithms and execution
+
+```@docs
+AbstractImportanceSampler
+ImportanceSampling
+prepare_sampler
+importance_sample
+importance_sample!
+```
+
+## Native proposals and transforms
+
+```@docs
+AbstractProposalFamily
+AbstractRadialProposalFamily
+SphericalGaussian
+DiagonalGaussian
+FactorGaussian
+ProductProposal
+TransformedProposal
+AbstractSampleTransform
+IdentityTransform
+PositiveTransform
+SoftplusTransform
+IntervalTransform
+SimplexTransform
+LogTarget
+```
+
+## Results
+
+```@docs
+WeightedSamples
+WeightedSampleView
+normalized_weights
+lognormalizer
+```
+
+## Errors
+
+```@docs
+AllZeroWeightsError
+InvalidTransformError
+SamplerBusyError
+SamplerAlreadyExecutedError
+SamplerDeviceError
+SamplerExecutionError
+```

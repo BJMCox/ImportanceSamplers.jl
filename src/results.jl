@@ -117,6 +117,8 @@ An aligned descriptive view of a subset of weighted samples.
 Views support indexing, iteration, and [`normalized_weights`](@ref), but not
 [`lognormalizer`](@ref), because an arbitrary subset is not a complete
 estimator result. Construct views by indexing a [`WeightedSamples`](@ref).
+Device-resident views retain device storage and require CPU transfer before
+scalar indexing or iteration.
 """
 struct WeightedSampleView{R,S,W<:AbstractVector,P<:NamedTuple} <:
        _AbstractWeightedSamples{R}
@@ -532,7 +534,8 @@ plain-importance-sampling normalizer estimate.
 This is Bayesian log evidence only if the supplied target retains every
 required normalizing constant. It returns `-Inf` when all raw weights are zero.
 It is unavailable on [`WeightedSampleView`](@ref), which is not a complete
-estimator.
+estimator. Device-resident complete results use a device reduction and transfer
+only its two-scalar log-sum-exp accumulator.
 """
 function lognormalizer(result::WeightedSamples)
     logweight_sum = _logweight_sum(result)
@@ -557,7 +560,8 @@ descriptive view.
 
 The raw `result.logweights` remain unchanged. If every raw log weight is
 `-Inf`, throw [`AllZeroWeightsError`](@ref) rather than inventing uniform
-weights.
+weights. For a device-resident result, the returned weight array stays on the
+same device.
 """
 function normalized_weights(result::_AbstractWeightedSamples)
     logweight_sum = _logweight_sum(result)

@@ -16,7 +16,8 @@ Configure plain, single-proposal importance sampling.
 `proposal` must implement `rand(rng, proposal)` and
 `DensityInterface.logdensityof(proposal, sample)` for the same normalized
 measure. `nsamples` must be a positive `Int` and is the exact number of samples
-returned by every run.
+returned by every run. Generic proposals execute on CPU; the native Gaussian
+and transform subset also supports prepared CUDA execution.
 """
 struct ImportanceSampling{P} <: AbstractImportanceSampler
     proposal::P
@@ -57,7 +58,8 @@ end
     SamplerDeviceError
 
 Exception thrown when a requested device cannot execute a prepared sampler.
-The `reason` field identifies the rejected capability.
+The `reason` field identifies the rejected capability, such as an unavailable
+backend, opaque target closure, unsupported proposal, or missing device RNG.
 """
 struct SamplerDeviceError{D} <: Exception
     device::D
@@ -158,9 +160,12 @@ noncumulative results that own their arrays.
 
 Preparation always produces a CPU sampler. Apply an explicit
 `MLDataDevices.AbstractDevice` value to the complete prepared sampler before
-its first execution to request transfer. Set `threaded=false` for serial CPU
-evaluation. With `threaded=true`, a one-thread Julia process falls back to the
-serial path.
+its first execution to request transfer. Transfer recursively moves proposal,
+device-adaptable callable state, and every numerical array in `p`; opaque
+closure captures cannot be moved reliably and are rejected for accelerator
+execution. Native CUDA execution requires `threaded=true` and keeps returned
+arrays on the device. Set `threaded=false` for serial CPU evaluation. With
+`threaded=true`, a one-thread Julia process falls back to the serial CPU path.
 """
 function prepare_sampler(
     rng::Random.AbstractRNG,
@@ -314,7 +319,8 @@ Run one complete plain-importance-sampling estimator.
 
 This is the one-shot form of [`prepare_sampler`](@ref) followed by
 [`importance_sample!`](@ref). `logtarget` returns a log density, not a linear
-density. The contextual overload calls `logtarget(sample, p)`.
+density. The contextual overload calls `logtarget(sample, p)`. The one-shot
+form executes on CPU; apply a device to a prepared sampler for CUDA execution.
 
 The result stores canonical raw log weights
 `logtarget(sample) - logdensityof(proposal, sample)`. Use
@@ -364,7 +370,8 @@ run succeeds or fails.
 Each returned [`WeightedSamples`](@ref) owns its storage and cannot be changed
 by later runs. Concurrent calls on the same sampler throw
 [`SamplerBusyError`](@ref); use separate prepared samplers and RNGs for
-concurrent top-level runs.
+concurrent top-level runs. CUDA results remain device-resident until an explicit
+device transfer such as `result |> MLDataDevices.cpu_device()`.
 """
 function importance_sample!(sampler::_PreparedImportanceSampler)
     sampler.running && throw(SamplerBusyError())

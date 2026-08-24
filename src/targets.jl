@@ -6,7 +6,9 @@ Mark `logdensity` as a package callable target.
 This explicit wrapper takes priority over target interfaces advertised by the
 wrapped object. The callable must accept `logdensity(sample)` in the
 context-free API or `logdensity(sample, p)` when an explicit context is passed,
-and must return a `Float32` or `Float64` log density.
+and must return a `Float32` or `Float64` unnormalized log density. For CUDA,
+use a device-compatible callable and pass numerical arrays through `p`; opaque
+closure captures cannot be transferred reliably.
 """
 struct LogTarget{F}
     logdensity::F
