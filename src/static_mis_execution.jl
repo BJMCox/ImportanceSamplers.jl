@@ -20,6 +20,78 @@ function _allocate_random_buffers(
     )
 end
 
+function _copy_accelerator_algorithm(
+    device,
+    algorithm::ImportanceSampling{<:ProposalBank},
+    ::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+)
+    return deepcopy(algorithm)
+end
+
+function _prepare_transferred_method_state(
+    device,
+    algorithm,
+    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+)
+    return _copy_to_device(device, method_state)
+end
+
+_transferred_backend_state(
+    algorithm,
+    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    target,
+    random_buffers,
+) = (method_state, target, random_buffers)
+
+_prepared_backend_state(
+    sampler,
+    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+) = (
+    method_state,
+    sampler.target,
+    sampler.random_buffers,
+    sampler.rng,
+)
+
+function _preflight_accelerator_method(
+    device,
+    target,
+    algorithm,
+    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    random_buffers,
+)
+    return _preflight_packed_static_mis_kernel_target(
+        device,
+        target,
+        method_state,
+        random_buffers,
+    )
+end
+
+function _allocate_random_buffers(
+    device::MLDataDevices.AbstractAcceleratorDevice,
+    ::ProposalBank,
+    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    nsamples,
+)
+    bank = method_state.bank
+    prototype = device(Vector{eltype(bank.locations)}(undef, 0))
+    uniform = similar(prototype, eltype(bank.cdf), nsamples)
+    normal = similar(
+        prototype,
+        eltype(bank.locations),
+        size(bank.locations, 1) * nsamples,
+    )
+    assignments = similar(prototype, Int, nsamples)
+    failure_scratch = _allocate_native_failure_scratch(normal, nsamples)
+    return _PackedStaticMISRandomBuffers(
+        uniform,
+        normal,
+        assignments,
+        failure_scratch,
+    )
+end
+
 @kernel function _static_mis_assignment_kernel!(
     assignments,
     uniforms,
@@ -114,21 +186,71 @@ end
 end
 
 function _allocate_packed_static_mis_samples(
+    prototype,
     bank::_PackedDiagonalGaussianBank{L,S,N,M,C,I,<:_ScalarGaussianLayout},
     nsamples,
 ) where {L,S,N,M,C,I}
-    return Vector{eltype(bank.locations)}(undef, nsamples)
+    return similar(prototype, eltype(bank.locations), nsamples)
 end
 
 function _allocate_packed_static_mis_samples(
+    prototype,
     bank::_PackedDiagonalGaussianBank{L,S,N,M,C,I,<:_VectorGaussianLayout},
     nsamples,
 ) where {L,S,N,M,C,I}
-    return Matrix{eltype(bank.locations)}(
-        undef,
+    return similar(
+        prototype,
+        eltype(bank.locations),
         size(bank.locations, 1),
         nsamples,
     )
+end
+
+function _preflight_packed_static_mis_kernel_target(
+    device,
+    target,
+    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    buffers::_PackedStaticMISRandomBuffers,
+)
+    bank = method_state.bank
+    samples = _allocate_packed_static_mis_samples(buffers.normal, bank, 1)
+    binding_sample = _native_binding_sample(samples)
+    bound_target = _bind_resolved_target(target, binding_sample)
+    log_type = _resolve_packed_static_mis_logweight_type(
+        bound_target,
+        bank,
+        typeof(binding_sample),
+    )
+    logweights = similar(buffers.normal, log_type, 1)
+    proposal_ids = similar(buffers.assignments, Int, 1)
+    target_argument = _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
+    backend = KernelAbstractions.get_backend(buffers.normal)
+
+    assignment_kernel = _static_mis_assignment_kernel!(backend)
+    for argument in (
+        buffers.assignments,
+        buffers.uniform,
+        bank.cdf,
+        method_state.design.assignment,
+    )
+        _preflight_kernel_argument(device, assignment_kernel, argument)
+    end
+
+    sampling_kernel = _static_mis_sampling_kernel!(backend)
+    for argument in (
+        samples,
+        logweights,
+        proposal_ids,
+        buffers.failure_scratch.record.storage,
+        buffers.normal,
+        target_argument,
+        bank,
+        buffers.assignments,
+        method_state.design.denominator,
+    )
+        _preflight_kernel_argument(device, sampling_kernel, argument)
+    end
+    return nothing
 end
 
 function _resolve_packed_static_mis_logweight_type(target, bank, sample_type)
@@ -192,7 +314,11 @@ function _importance_sample_cpu!(
         _fill_random_buffers!(sampler.rng, sampler.random_buffers)
     end
     nsamples = sampler.algorithm.nsamples
-    samples = _allocate_packed_static_mis_samples(method_state.bank, nsamples)
+    samples = _allocate_packed_static_mis_samples(
+        buffers.normal,
+        method_state.bank,
+        nsamples,
+    )
     binding_sample = _native_binding_sample(samples)
     target = _capture_sampler_failure(:target, 1) do
         _bind_resolved_target(sampler.target, binding_sample)
@@ -202,8 +328,8 @@ function _importance_sample_cpu!(
         method_state.bank,
         typeof(binding_sample),
     )
-    logweights = Vector{log_type}(undef, nsamples)
-    proposal_ids = Vector{Int}(undef, nsamples)
+    logweights = similar(buffers.normal, log_type, nsamples)
+    proposal_ids = similar(buffers.assignments, Int, nsamples)
     failure_scratch = buffers.failure_scratch
     target_evaluator, target_failures = _native_target_evaluator(
         KernelAbstractions.get_backend(buffers.normal),

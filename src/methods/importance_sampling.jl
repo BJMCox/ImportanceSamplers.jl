@@ -126,6 +126,14 @@ function Base.showerror(io::IO, error::SamplerDeviceError)
         "generic proposals are CPU-only"
     elseif error.reason === :product_proposal_cpu_only
         "ProductProposal is CPU-only"
+    elseif error.reason === :factor_proposal_cpu_only
+        "factor Gaussian proposal banks are CPU-only"
+    elseif error.reason === :transformed_proposal_cpu_only
+        "transformed proposal banks are CPU-only"
+    elseif error.reason === :mixed_dimension_proposal_cpu_only
+        "proposal banks with mixed dimensions are CPU-only"
+    elseif error.reason === :mixed_float_proposal_cpu_only
+        "proposal banks with mixed floating types are CPU-only"
     elseif error.reason === :kernel_argument_unsupported
         "the target or context does not have a supported accelerator kernel " *
         "argument representation"
@@ -289,6 +297,12 @@ function _copy_algorithm(device, algorithm::ImportanceSampling)
     )
 end
 
+_copy_accelerator_algorithm(device, algorithm, method_state) =
+    _copy_algorithm(device, algorithm)
+
+_prepare_transferred_method_state(device, algorithm, method_state) =
+    _prepare_method_state(algorithm)
+
 function _clone_rng(device, rng::Random.AbstractRNG)
     cloned = try
         copy(rng)
@@ -310,6 +324,32 @@ function _validate_backend_state(device, state)
         SamplerDeviceError(device, :device_residency_mismatch),
     )
     return nothing
+end
+
+_prepared_backend_state(sampler, method_state) = (
+    sampler.algorithm,
+    method_state,
+    sampler.target,
+    sampler.random_buffers,
+    sampler.rng,
+)
+
+_transferred_backend_state(algorithm, method_state, target, random_buffers) =
+    (algorithm, method_state, target, random_buffers)
+
+function _preflight_accelerator_method(
+    device,
+    target,
+    algorithm,
+    ::_SingleProposalMethodState,
+    random_buffers,
+)
+    return _preflight_native_kernel_target(
+        device,
+        target,
+        algorithm.proposal,
+        random_buffers,
+    )
 end
 
 function _transfer_prepared_sampler(
@@ -368,26 +408,40 @@ function _transfer_prepared_sampler(
     proposal_limit = _accelerator_proposal_limit(sampler.algorithm.proposal)
     isnothing(proposal_limit) || throw(SamplerDeviceError(device, proposal_limit))
     return _with_backend_device(device) do
-        algorithm = _copy_algorithm(device, sampler.algorithm)
+        algorithm = _copy_accelerator_algorithm(
+            device,
+            sampler.algorithm,
+            sampler.method_state,
+        )
         target = _transfer_prepared_target(device, sampler.target)
-        method_state = _prepare_method_state(algorithm)
+        method_state = _prepare_transferred_method_state(
+            device,
+            algorithm,
+            sampler.method_state,
+        )
         random_buffers = _allocate_random_buffers(
             device,
             algorithm.proposal,
             method_state,
             algorithm.nsamples,
         )
-        random_buffers isa _RandomBuffers || throw(
+        random_buffers isa Union{_RandomBuffers,_PackedStaticMISRandomBuffers} || throw(
             SamplerDeviceError(device, :accelerator_rng_unavailable),
         )
         _validate_backend_state(
             device,
-            (algorithm, method_state, target, random_buffers),
+            _transferred_backend_state(
+                algorithm,
+                method_state,
+                target,
+                random_buffers,
+            ),
         )
-        _preflight_native_kernel_target(
+        _preflight_accelerator_method(
             device,
             target,
-            algorithm.proposal,
+            algorithm,
+            method_state,
             random_buffers,
         )
         _owned_backend_rng(device, zero(UInt64))
@@ -496,13 +550,7 @@ function importance_sample!(sampler::_PreparedImportanceSampler)
         return _with_backend_device(sampler.device) do
             _validate_backend_state(
                 sampler.device,
-                (
-                    sampler.algorithm,
-                    sampler.method_state,
-                    sampler.target,
-                    sampler.random_buffers,
-                    sampler.rng,
-                ),
+                _prepared_backend_state(sampler, sampler.method_state),
             )
             _reset_native_failure_scratch!(
                 _native_failure_scratch(sampler.random_buffers),

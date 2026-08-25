@@ -10,15 +10,21 @@ struct _PartialMixtureDenominator{G,O,I,C}
     logcoefficients::C
 end
 
+Adapt.@adapt_structure _PartialMixtureDenominator
+
 struct _PreparedMISDesign{A,D}
     assignment::A
     denominator::D
 end
 
+Adapt.@adapt_structure _PreparedMISDesign
+
 struct _PreparedStaticMIS{B,D}
     bank::B
     design::D
 end
+
+Adapt.@adapt_structure _PreparedStaticMIS
 
 struct _StaticMISRandomBuffers{A}
     assignments::A

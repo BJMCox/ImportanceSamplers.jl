@@ -21,9 +21,13 @@ struct _PackedStaticMISRandomBuffers{U,N,A,F}
     failure_scratch::F
 end
 
+Adapt.@adapt_structure _PackedStaticMISRandomBuffers
+
 struct _DeviceFailureRecord{A}
     storage::A
 end
+
+Adapt.@adapt_structure _DeviceFailureRecord
 
 struct _NoNativeFailureScratch end
 
@@ -31,6 +35,8 @@ struct _NativeFailureScratch{R,F}
     record::R
     target_failures::F
 end
+
+Adapt.@adapt_structure _NativeFailureScratch
 
 struct _NoNativeTargetFailures end
 
@@ -242,8 +248,12 @@ function _preflight_native_kernel_target(
         _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
     backend = KernelAbstractions.get_backend(buffers.normal)
     kernel = _native_gaussian_fused_kernel!(backend)
+    return _preflight_kernel_argument(device, kernel, target_argument)
+end
+
+function _preflight_kernel_argument(device, kernel, argument)
     converted = try
-        KernelAbstractions.argconvert(kernel, target_argument)
+        KernelAbstractions.argconvert(kernel, argument)
     catch
         throw(SamplerDeviceError(device, :kernel_argument_unsupported))
     end

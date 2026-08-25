@@ -162,6 +162,12 @@ function kernel_context_target(sample, context)::Float64
     return context.shift[1] - abs2(sample) / 2
 end
 
+function static_mis_device_target(sample, context)
+    T = sample isa Number ? typeof(sample) : eltype(sample)
+    radius = sample isa Number ? abs2(sample) : sum(abs2, sample)
+    return context.shift[1] - T(0.5) * radius
+end
+
 struct UnsupportedTestDevice <: MLDataDevices.AbstractDevice end
 
 struct NestedClosureDensityTarget{F}
@@ -562,6 +568,112 @@ end
         @test migration_error.reason === :prepared_migration_unsupported
         @test rand(getfield(accelerator, :rng), UInt64) ==
               rand(expected_accelerator_rng, UInt64)
+    end
+end
+
+@testset "static MIS accelerator transfer and capability limits" begin
+    device = KernelArgumentTestAccelerator()
+    proposals = [
+        SphericalGaussian([-1.0], 0.75),
+        DiagonalGaussian([0.5], [1.25]),
+        SphericalGaussian([2.0], 0.5),
+    ]
+    bank = ProposalBank(proposals, [1.0, 3.0, 0.0])
+    algorithm = ImportanceSampling(
+        bank;
+        nsamples=17,
+        mis_scheme=PartialDeterministicMixture(((1, 3), (2,))),
+    )
+    source = prepare_sampler(
+        Random.Xoshiro(0x2218),
+        static_mis_device_target,
+        (shift=[0.25],),
+        algorithm;
+        threaded=true,
+    )
+    expected_source_rng = copy(getfield(source, :rng))
+
+    @test IS._accelerator_proposal_limit(bank) === nothing
+    destination = device(source)
+    method_state = getfield(destination, :method_state)
+    packed = getfield(method_state, :bank)
+    denominator = getfield(getfield(method_state, :design), :denominator)
+    buffers = getfield(destination, :random_buffers)
+    @test packed isa IS._PackedDiagonalGaussianBank
+    @test all(
+        array -> array isa KernelArgumentTestArray,
+        (
+            packed.locations,
+            packed.scales,
+            packed.lognormalizers,
+            packed.logmasses,
+            packed.cdf,
+            packed.proposal_ids,
+            denominator.group_of_slot,
+            denominator.offsets,
+            denominator.members,
+            denominator.logcoefficients,
+            buffers.uniform,
+            buffers.normal,
+            buffers.assignments,
+            buffers.failure_scratch.record.storage,
+        ),
+    )
+    rand(expected_source_rng, UInt64)
+    @test rand(getfield(source, :rng), UInt64) ==
+          rand(expected_source_rng, UInt64)
+
+    generic = ProposalBank([TransferProposal([0.0]), TransferProposal([1.0])])
+    factor = ProposalBank([
+        FactorGaussian([0.0, 0.0], [1.0 0.0; 0.0 1.0]),
+        FactorGaussian([1.0, 1.0], [1.0 0.0; 0.0 1.0]),
+    ])
+    transformed = ProposalBank([
+        TransformedProposal(SphericalGaussian(0.0, 1.0), PositiveTransform()),
+        TransformedProposal(SphericalGaussian(1.0, 1.0), PositiveTransform()),
+    ])
+    product = ProposalBank([
+        ProductProposal((x=SphericalGaussian(0.0, 1.0),)),
+        ProductProposal((x=SphericalGaussian(1.0, 1.0),)),
+    ])
+    mixed_dimension = ProposalBank([
+        SphericalGaussian([0.0], 1.0),
+        SphericalGaussian([0.0, 1.0], 1.0),
+    ])
+    mixed_float = ProposalBank(Any[
+        SphericalGaussian(Float32[0], 1.0f0),
+        SphericalGaussian(Float64[0], 1.0),
+    ])
+    limits = (
+        generic => :generic_proposal_cpu_only,
+        factor => :factor_proposal_cpu_only,
+        transformed => :transformed_proposal_cpu_only,
+        product => :product_proposal_cpu_only,
+        mixed_dimension => :mixed_dimension_proposal_cpu_only,
+        mixed_float => :mixed_float_proposal_cpu_only,
+    )
+    for (rejected_bank, reason) in limits
+        @test IS._accelerator_proposal_limit(rejected_bank) === reason
+    end
+
+    for (seed, rejected_bank, reason) in (
+        (0x2219, generic, :generic_proposal_cpu_only),
+        (0x221a, factor, :factor_proposal_cpu_only),
+        (0x221b, transformed, :transformed_proposal_cpu_only),
+        (0x221c, product, :product_proposal_cpu_only),
+    )
+        rejected = prepare_sampler(
+            Random.Xoshiro(seed),
+            static_mis_device_target,
+            (shift=[0.25],),
+            ImportanceSampling(rejected_bank; nsamples=17);
+            threaded=true,
+        )
+        expected_rng = copy(getfield(rejected, :rng))
+        error = caught_device_error(() -> device(rejected))
+        @test error isa SamplerDeviceError
+        @test error.reason === reason
+        @test rand(getfield(rejected, :rng), UInt64) == rand(expected_rng, UInt64)
     end
 end
 

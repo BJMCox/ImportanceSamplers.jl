@@ -75,8 +75,37 @@ struct _PackedDiagonalGaussianBank{L,S,N,M,C,I,R}
     layout::R
 end
 
+Adapt.@adapt_structure _PackedDiagonalGaussianBank
+
 _active_proposal_count(bank::_ActiveProposalBank) = length(bank.proposals)
 _active_proposal_count(bank::_PackedDiagonalGaussianBank) = size(bank.locations, 2)
+
+function _accelerator_proposal_limit(bank::ProposalBank)
+    proposal_ids = findall(!iszero, bank.masses)
+    proposals = view(bank.proposals, proposal_ids)
+    for proposal in proposals
+        proposal isa ProductProposal && return :product_proposal_cpu_only
+        proposal isa TransformedProposal && return :transformed_proposal_cpu_only
+        proposal isa _GaussianProposal || return :generic_proposal_cpu_only
+        proposal.scale isa _FactorGaussianScale && return :factor_proposal_cpu_only
+        _is_packable_native_gaussian(proposal) || return :generic_proposal_cpu_only
+    end
+
+    first_location = first(proposals).location
+    scalar_layout = first_location isa _NativeGaussianFloat
+    dimension = _gaussian_dimension(first_location)
+    float_type = _gaussian_float_type(first_location)
+    for proposal in Iterators.drop(proposals, 1)
+        location = proposal.location
+        (location isa _NativeGaussianFloat) == scalar_layout ||
+            return :mixed_dimension_proposal_cpu_only
+        _gaussian_dimension(location) == dimension ||
+            return :mixed_dimension_proposal_cpu_only
+        _gaussian_float_type(location) === float_type ||
+            return :mixed_float_proposal_cpu_only
+    end
+    return nothing
+end
 
 function _prepare_active_proposal_metadata(bank::ProposalBank)
     proposal_ids = findall(!iszero, bank.masses)
