@@ -56,7 +56,7 @@ end
 struct NativePhaseOrderTarget end
 
 function (::NativePhaseOrderTarget)(sample::Float64)::Float64
-    sample == 2.0 && throw(NativeTargetFailure(sample))
+    (sample == 0.0 || sample == 2.0) && throw(NativeTargetFailure(sample))
     return isfinite(sample) ? 0.0 : -Inf
 end
 
@@ -174,7 +174,8 @@ end
     slot = @index(Global, Linear)
     logical_index = slot == 1 ? 7 : slot == 2 ? 3 : 5
     block = slot == 1 ? 2 : slot == 2 ? 4 : 1
-    reason_bits = UInt16(1) << slot
+    reason_bits = slot == 1 ? UInt16(0x0001) :
+                  slot == 2 ? UInt16(0x0400) : UInt16(0x0800)
     ImportanceSamplers._record_native_failure!(
         storage, logical_index, block, reason_bits
     )
@@ -406,7 +407,11 @@ end
     @test snapshot.failure.count == 3
     @test snapshot.failure.first_logical_index == 3
     @test snapshot.failure.first_block == 4
-    @test snapshot.failure.reason_bits == UInt16(1) << 2
+    @test snapshot.failure.reason_bits == UInt16(0x0400)
+    @test snapshot.draw_failure.count == 1
+    @test snapshot.draw_failure.first_logical_index == 5
+    @test snapshot.draw_failure.first_block == 1
+    @test snapshot.draw_failure.reason_bits == UInt16(0x0800)
     @test snapshot.transfers == (count=0, bytes=0)
 
     for T in (Float32, Float64)
@@ -539,14 +544,14 @@ end
         _run_native_fused(
             NativePhaseOrderTarget(),
             SphericalGaussian(0.0, 1.0),
-            [Inf, 0.0, 2.0],
+            [0.0, Inf, 2.0],
             true,
         )
     end
     @test phase_order_failure isa SamplerExecutionError
     if phase_order_failure isa SamplerExecutionError
         @test (phase_order_failure.phase, phase_order_failure.sample_index) ==
-              (:proposal_draw, 1)
+              (:proposal_draw, 2)
         @test phase_order_failure.captured.ex isa DomainError
         @test phase_order_failure.captured.ex.val == UInt16(0x0800)
     end
@@ -694,7 +699,7 @@ end
     @test getfield(scratch, :target_failures) === target_failures
     @test all(isnothing, target_failure_slots)
     @test target_failure_index[] == typemax(Int)
-    @test failure_storage == zeros(UInt64, 2)
+    @test failure_storage == zeros(UInt64, 3)
 
     transform_sampler = prepare_sampler(
         PrefilledNormalRNG([Inf, 0.0], 0),
@@ -722,10 +727,11 @@ end
     @test transform_failure.captured.ex isa DomainError
     @test transform_storage[1] == 1
     @test transform_storage[2] & UInt64(0xffff) == UInt64(0x0800)
+    @test transform_storage[3] & UInt64(0xffff) == UInt64(0x0800)
 
     transform_result = @inferred importance_sample!(transform_sampler)
     @test length(transform_result) == 1
-    @test transform_storage == zeros(UInt64, 2)
+    @test transform_storage == zeros(UInt64, 3)
 
     mixed_sampler = prepare_sampler(
         PrefilledNormalRNG([Inf, 1.0, 0.0, 0.0], 0),

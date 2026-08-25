@@ -111,27 +111,55 @@ end
 
 _native_failure_scratch(::_StaticMISRandomBuffers) = _NoNativeFailureScratch()
 
-function _compile_assignments!(rng, assignments, ::_StratifiedAssignment, cdf)
+@inline function _static_mis_assignment_uniform(
+    ::_StratifiedAssignment,
+    uniform,
+    sample_index,
+    nsamples,
+)
+    return ((sample_index - 1) + uniform) / nsamples
+end
+
+@inline _static_mis_assignment_uniform(
+    ::_RandomAssignment,
+    uniform,
+    sample_index,
+    nsamples,
+) = uniform
+
+@inline function _static_mis_assignment(
+    assignment,
+    cdf,
+    uniform,
+    sample_index,
+    nsamples,
+)
+    mapped_uniform = _static_mis_assignment_uniform(
+        assignment,
+        uniform,
+        sample_index,
+        nsamples,
+    )
+    for slot in eachindex(cdf)
+        mapped_uniform <= @inbounds(cdf[slot]) && return slot
+    end
+    return lastindex(cdf)
+end
+
+function _compile_assignments!(rng, assignments, assignment, cdf)
     nsamples = length(assignments)
     for sample_index in eachindex(assignments)
         assignments[sample_index] = _capture_sampler_failure(
             :proposal_draw,
             sample_index,
         ) do
-            uniform = ((sample_index - 1) + rand(rng)) / nsamples
-            searchsortedfirst(cdf, uniform)
-        end
-    end
-    return assignments
-end
-
-function _compile_assignments!(rng, assignments, ::_RandomAssignment, cdf)
-    for sample_index in eachindex(assignments)
-        assignments[sample_index] = _capture_sampler_failure(
-            :proposal_draw,
-            sample_index,
-        ) do
-            searchsortedfirst(cdf, rand(rng))
+            _static_mis_assignment(
+                assignment,
+                cdf,
+                rand(rng),
+                sample_index,
+                nsamples,
+            )
         end
     end
     return assignments
@@ -275,82 +303,113 @@ function _phase_logdensity(
     )
 end
 
-function _mis_logdenominator(
+@inline function _mis_proposal_logdensity(
     ::Type{T},
-    bank,
-    ::_FullMixtureDenominator,
-    generating_slot,
+    bank::_ActiveProposalBank,
     sample,
-    sample_index,
+    proposal_slot,
 ) where {T}
-    return _capture_sampler_failure(:proposal_logdensity, sample_index) do
-        denominator = T(-Inf)
-        generating_logdensity = zero(T)
-        for slot in eachindex(bank.proposals)
-            value = DensityInterface.logdensityof(bank.proposals[slot], sample)
-            _validate_mixture_proposal_logdensity(value)
-            converted = _convert_static_mis_logdensity(T, value)
-            slot == generating_slot && (generating_logdensity = converted)
-            logterm = convert(T, bank.logmasses[slot]) + converted
-            denominator = LogExpFunctions.logaddexp(denominator, logterm)
-        end
-        _validate_reduced_mis_denominator(denominator)
-        _validate_generating_logdensity(generating_logdensity)
-        denominator
-    end
+    value = DensityInterface.logdensityof(
+        @inbounds(bank.proposals[proposal_slot]),
+        sample,
+    )
+    _validate_mixture_proposal_logdensity(value)
+    return _convert_static_mis_logdensity(T, value)
 end
 
-function _mis_logdenominator(
-    ::Type{T},
+@inline _mis_term_bounds(bank, ::_FullMixtureDenominator, generating_slot) =
+    (firstindex(bank.logmasses), lastindex(bank.logmasses))
+
+@inline function _mis_term_bounds(
     bank,
     denominator::_PartialMixtureDenominator,
     generating_slot,
-    sample,
-    sample_index,
+)
+    group = @inbounds denominator.group_of_slot[generating_slot]
+    first_member = @inbounds denominator.offsets[group]
+    return first_member, @inbounds(denominator.offsets[group + 1]) - 1
+end
+
+@inline _mis_term_bounds(bank, ::_GeneratingDenominator, generating_slot) =
+    (generating_slot, generating_slot)
+
+@inline function _mis_denominator_term(
+    ::Type{T},
+    bank,
+    ::_FullMixtureDenominator,
+    term_index,
 ) where {T}
-    return _capture_sampler_failure(:proposal_logdensity, sample_index) do
-        group = denominator.group_of_slot[generating_slot]
-        first_member = denominator.offsets[group]
-        last_member = denominator.offsets[group + 1] - 1
-        value = T(-Inf)
-        generating_logdensity = zero(T)
-        for member_index in first_member:last_member
-            slot = denominator.members[member_index]
-            logdensity = DensityInterface.logdensityof(
-                bank.proposals[slot],
-                sample,
-            )
-            _validate_mixture_proposal_logdensity(logdensity)
-            converted = _convert_static_mis_logdensity(T, logdensity)
-            slot == generating_slot && (generating_logdensity = converted)
-            logterm = convert(T, denominator.logcoefficients[member_index]) +
-                      converted
-            value = LogExpFunctions.logaddexp(value, logterm)
-        end
-        _validate_reduced_mis_denominator(value)
-        _validate_generating_logdensity(generating_logdensity)
-        value
+    return term_index, convert(T, @inbounds(bank.logmasses[term_index]))
+end
+
+@inline function _mis_denominator_term(
+    ::Type{T},
+    bank,
+    denominator::_PartialMixtureDenominator,
+    term_index,
+) where {T}
+    return @inbounds(denominator.members[term_index]), convert(
+        T,
+        @inbounds(denominator.logcoefficients[term_index]),
+    )
+end
+
+@inline _mis_denominator_term(
+    ::Type{T},
+    bank,
+    ::_GeneratingDenominator,
+    term_index,
+) where {T} = (term_index, zero(T))
+
+@inline function _mis_logdenominator_core(
+    ::Type{T},
+    bank,
+    denominator,
+    generating_slot,
+    sample,
+) where {T}
+    value = T(-Inf)
+    generating_logdensity = zero(T)
+    first_term, last_term = _mis_term_bounds(bank, denominator, generating_slot)
+    for term_index in first_term:last_term
+        proposal_slot, logmass = _mis_denominator_term(
+            T,
+            bank,
+            denominator,
+            term_index,
+        )
+        logdensity = _mis_proposal_logdensity(T, bank, sample, proposal_slot)
+        proposal_slot == generating_slot && (generating_logdensity = logdensity)
+        value = LogExpFunctions.logaddexp(value, logmass + logdensity)
     end
+    reason = (
+        isnan(generating_logdensity) || generating_logdensity == -Inf ||
+        isnan(value) || value == -Inf
+    ) ? _NATIVE_PROPOSAL_INVALID : UInt16(0)
+    return value, generating_logdensity, reason
 end
 
 function _mis_logdenominator(
     ::Type{T},
     bank,
-    ::_GeneratingDenominator,
+    denominator,
     generating_slot,
     sample,
     sample_index,
 ) where {T}
     return _capture_sampler_failure(:proposal_logdensity, sample_index) do
-        value = DensityInterface.logdensityof(
-            bank.proposals[generating_slot],
+        value, generating_logdensity, reason = _mis_logdenominator_core(
+            T,
+            bank,
+            denominator,
+            generating_slot,
             sample,
         )
-        _validate_mixture_proposal_logdensity(value)
-        denominator = _convert_static_mis_logdensity(T, value)
-        _validate_generating_logdensity(denominator)
-        _validate_reduced_mis_denominator(denominator)
-        denominator
+        if !iszero(reason)
+            _validate_generating_logdensity(generating_logdensity)
+            _validate_reduced_mis_denominator(value)
+        end
+        value
     end
 end
 

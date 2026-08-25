@@ -123,6 +123,7 @@ end
         @test exp.(vector.logmasses) ≈ T[0.25, 0.75]
         @test vector.cdf == T[0.25, 1]
     end
+
 end
 
 @testset "packed native Gaussian bank validation precedes RNG" begin
@@ -482,6 +483,7 @@ end
     @test sampler.random_buffers.normal === normal_buffer
     @test sampler.random_buffers.assignments === assignment_buffer
     @test sampler.random_buffers.failure_scratch === scratch
+    @test scratch.record.storage == zeros(UInt64, 3)
     @test result.diagnostics.transfers.count == 0
     @test result.diagnostics.transfers.bytes == 0
     @test rng.calls == [:uniform, :normal, :uniform, :normal]
@@ -502,6 +504,24 @@ end
     @test draw_failure isa SamplerExecutionError
     @test (draw_failure.phase, draw_failure.sample_index) == (:proposal_draw, 1)
     @test draw_failure.captured.ex isa DomainError
+
+    draw_after_density = prepare_sampler(
+        StaticMISKernelPrefilledRNG(
+            fill(0.25, 3),
+            [2sqrt(floatmax(Float64)), Inf, Inf],
+            Symbol[],
+        ),
+        StaticMISKernelConstantTarget(0.0),
+        ImportanceSampling(bank; nsamples=3);
+        threaded=true,
+    )
+    phase_priority_failure = caught_static_mis_kernel_failure() do
+        importance_sample!(draw_after_density)
+    end
+    @test phase_priority_failure isa SamplerExecutionError
+    @test (phase_priority_failure.phase, phase_priority_failure.sample_index) ==
+          (:proposal_draw, 2)
+    @test phase_priority_failure.captured.ex isa DomainError
 end
 
 @testset "packed native Gaussian log-value truth table" begin
@@ -552,6 +572,76 @@ end
         @test failure isa SamplerExecutionError
         @test (failure.phase, failure.sample_index) == (:logweight, 1)
         @test failure.captured.ex isa DomainError
+    end
+
+    function packed_table_denominator(logdensities, denominator; generating_slot=1)
+        T = eltype(logdensities)
+        bank = ISK._PackedDiagonalGaussianBank(
+            zeros(T, 1, 2),
+            ones(T, 1, 2),
+            collect(logdensities),
+            fill(-log(T(2)), 2),
+            T[0.5, 1],
+            [1, 2],
+            ISK._ScalarGaussianLayout(),
+        )
+        return ISK._mis_logdenominator_core(
+            T,
+            bank,
+            denominator,
+            generating_slot,
+            zero(T),
+        )
+    end
+
+    full = ISK._FullMixtureDenominator()
+    partial = ISK._PartialMixtureDenominator([1, 1], [1, 3], [1, 2], fill(-log(2.0), 2))
+    for denominator in (full, partial)
+        finite, finite_generating, finite_reason =
+            packed_table_denominator([0.0, -Inf], denominator)
+        @test finite == -log(2.0)
+        @test finite_generating == 0.0
+        @test iszero(finite_reason)
+
+        positive_infinity, _, positive_infinity_reason =
+            packed_table_denominator([0.0, Inf], denominator)
+        @test positive_infinity == Inf
+        @test iszero(positive_infinity_reason)
+
+        generating_positive_infinity, generating_logdensity, generating_reason =
+            packed_table_denominator([Inf, -Inf], denominator)
+        @test generating_positive_infinity == Inf
+        @test generating_logdensity == Inf
+        @test iszero(generating_reason)
+
+        for logdensities in ([-Inf, 0.0], [NaN, 0.0])
+            _, _, reason = packed_table_denominator(logdensities, denominator)
+            @test reason == ISK._NATIVE_PROPOSAL_INVALID
+        end
+
+        reduced_nan, _, reduced_nan_reason =
+            packed_table_denominator([0.0, NaN], denominator)
+        @test isnan(reduced_nan)
+        @test reduced_nan_reason == ISK._NATIVE_PROPOSAL_INVALID
+
+        reduced_minus_infinity, _, reduced_minus_infinity_reason =
+            packed_table_denominator([-Inf, -Inf], denominator)
+        @test reduced_minus_infinity == -Inf
+        @test reduced_minus_infinity_reason == ISK._NATIVE_PROPOSAL_INVALID
+    end
+
+    generating = ISK._GeneratingDenominator()
+    for (logdensity, expected_reason) in (
+        (0.0, UInt16(0)),
+        (Inf, UInt16(0)),
+        (-Inf, ISK._NATIVE_PROPOSAL_INVALID),
+        (NaN, ISK._NATIVE_PROPOSAL_INVALID),
+    )
+        denominator, generating_logdensity, reason =
+            packed_table_denominator([logdensity, 0.0], generating)
+        @test isequal(denominator, logdensity)
+        @test isequal(generating_logdensity, logdensity)
+        @test reason == expected_reason
     end
 end
 @testset "packed native Gaussian execution allocations" begin

@@ -196,7 +196,12 @@ function _importance_sample!(sampler, execution::_KernelExecution)
         execution.cpu_execution,
     )
     snapshot = _device_failure_snapshot(failure_record)
-    _throw_native_failures(snapshot.failure, target_failures, transform)
+    _throw_native_failures(
+        snapshot.failure,
+        snapshot.draw_failure,
+        target_failures,
+        transform,
+    )
     return samples, logweights, snapshot.transfers
 end
 
@@ -324,7 +329,7 @@ end
 function _allocate_native_failure_scratch(normal_buffer, nsamples)
     backend = KernelAbstractions.get_backend(normal_buffer)
     target_failures = _allocate_native_target_failures(backend, nsamples)
-    storage = similar(normal_buffer, UInt64, 2)
+    storage = similar(normal_buffer, UInt64, 3)
     record = _DeviceFailureRecord(storage)
     return _NativeFailureScratch(record, target_failures)
 end
@@ -368,16 +373,14 @@ end
              UInt64(reason_bits)
     KernelAbstractions.@atomic storage[1] += UInt64(1)
     KernelAbstractions.@atomic storage[2] max packed
+    if reason_bits & _NATIVE_PROPOSAL_DRAW_REASONS != 0
+        KernelAbstractions.@atomic storage[3] max packed
+    end
     return nothing
 end
 
-function _device_failure_snapshot(record::_DeviceFailureRecord)
-    values = Array(record.storage)
-    transfers = _is_host_storage(record.storage) ?
-                (count=0, bytes=0) : (count=1, bytes=sizeof(values))
-    count = values[1]
-    packed = values[2]
-    failure = iszero(count) ? (
+@inline function _decode_native_failure(count, packed)
+    return iszero(count) ? (
         count=count,
         first_logical_index=0,
         first_block=0,
@@ -392,8 +395,21 @@ function _device_failure_snapshot(record::_DeviceFailureRecord)
             reason_bits=UInt16(packed & 0xffff),
         )
     end
+end
+
+function _device_failure_snapshot(record::_DeviceFailureRecord)
+    values = Array(record.storage)
+    transfers = _is_host_storage(record.storage) ?
+                (count=0, bytes=0) : (count=1, bytes=sizeof(values))
+    count = values[1]
+    failure = _decode_native_failure(count, values[2])
+    draw_failure = _decode_native_failure(
+        iszero(values[3]) ? zero(count) : one(count),
+        values[3],
+    )
     return (
         failure=failure,
+        draw_failure=draw_failure,
         transfers=transfers,
     )
 end

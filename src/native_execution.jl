@@ -97,58 +97,34 @@ end
     return _native_gaussian_logdensity!(base, coordinates, offset) - logabsjac, UInt16(0)
 end
 
-@inline function _packed_gaussian_coordinate(
-    bank,
+@inline function _native_gaussian_coordinate(
+    base::_GaussianProposal,
     normals,
-    normal_offset,
+    offset,
     coordinate,
     proposal_slot,
 )
-    return @inbounds(bank.locations[coordinate, proposal_slot]) +
-           @inbounds(bank.scales[coordinate, proposal_slot]) *
-           @inbounds(normals[normal_offset + coordinate - 1])
-end
-
-@inline function _store_packed_gaussian!(
-    samples::AbstractVector,
-    sample_index,
-    bank,
-    normals,
-    normal_offset,
-    proposal_slot,
-)
-    value = _packed_gaussian_coordinate(
-        bank,
+    return _gaussian_coordinate(
+        base.location,
+        base.scale,
         normals,
-        normal_offset,
-        1,
-        proposal_slot,
+        offset,
+        coordinate,
     )
-    @inbounds samples[sample_index] = value
-    return isfinite(value)
 end
 
-@inline function _store_packed_gaussian!(
-    samples::AbstractMatrix,
-    sample_index,
-    bank,
+@inline function _native_gaussian_coordinate(
+    bank::_PackedDiagonalGaussianBank,
     normals,
-    normal_offset,
+    offset,
+    coordinate,
     proposal_slot,
 )
-    valid = true
-    for coordinate in axes(bank.locations, 1)
-        value = _packed_gaussian_coordinate(
-            bank,
-            normals,
-            normal_offset,
-            coordinate,
-            proposal_slot,
-        )
-        @inbounds samples[coordinate, sample_index] = value
-        valid &= isfinite(value)
-    end
-    return valid
+    return _gaussian_affine_coordinate(
+        @inbounds(bank.locations[coordinate, proposal_slot]),
+        @inbounds(bank.scales[coordinate, proposal_slot]),
+        @inbounds(normals[offset + coordinate - 1]),
+    )
 end
 
 @inline _packed_sample_coordinate(sample::Real, coordinate) = sample
@@ -169,6 +145,13 @@ end
            T(0.5) * squared_radius
 end
 
+@inline _mis_proposal_logdensity(
+    ::Type{T},
+    bank::_PackedDiagonalGaussianBank,
+    sample,
+    proposal_slot,
+) where {T} = convert(T, _packed_gaussian_logdensity(bank, sample, proposal_slot))
+
 @inline _native_sample_at(samples::AbstractVector, slot) = @inbounds samples[slot]
 @inline _native_sample_at(samples::AbstractMatrix, slot) = @view samples[:, slot]
 
@@ -179,16 +162,42 @@ end
     return :(NamedTuple{$Names}(($(leaves...),)))
 end
 
-@inline function _native_store_gaussian!(samples::AbstractVector, slot, base, normals, offset)
-    value = _gaussian_coordinate(base.location, base.scale, normals, offset, 1)
+@inline function _native_store_gaussian!(
+    samples::AbstractVector,
+    slot,
+    gaussian,
+    normals,
+    offset,
+    proposal_slot,
+)
+    value = _native_gaussian_coordinate(
+        gaussian,
+        normals,
+        offset,
+        1,
+        proposal_slot,
+    )
     @inbounds samples[slot] = value
     return isfinite(value)
 end
 
-@inline function _native_store_gaussian!(samples::AbstractMatrix, slot, base, normals, offset)
+@inline function _native_store_gaussian!(
+    samples::AbstractMatrix,
+    slot,
+    gaussian,
+    normals,
+    offset,
+    proposal_slot,
+)
     valid = true
-    for coordinate in 1:_gaussian_dimension(base.location)
-        value = _gaussian_coordinate(base.location, base.scale, normals, offset, coordinate)
+    for coordinate in axes(samples, 1)
+        value = _native_gaussian_coordinate(
+            gaussian,
+            normals,
+            offset,
+            coordinate,
+            proposal_slot,
+        )
         @inbounds samples[coordinate, slot] = value
         valid &= isfinite(value)
     end
@@ -196,7 +205,7 @@ end
 end
 
 @inline function _native_generate_sample!(samples, slot, base, ::_NoSampleTransform, normals, offset)
-    valid = _native_store_gaussian!(samples, slot, base, normals, offset)
+    valid = _native_store_gaussian!(samples, slot, base, normals, offset, 0)
     reason = valid ? UInt16(0) : _NATIVE_GENERATED_NONFINITE
     return zero(base.lognormalizer), reason, 0
 end
@@ -216,7 +225,7 @@ end
 end
 
 @inline function _native_generate_sample!(samples, slot, base, ::IdentityTransform, normals, offset)
-    valid = _native_store_gaussian!(samples, slot, base, normals, offset)
+    valid = _native_store_gaussian!(samples, slot, base, normals, offset, 0)
     reason = valid ? UInt16(0) : _NATIVE_GENERATED_NONFINITE
     return zero(base.lognormalizer), reason, 1
 end
@@ -535,12 +544,9 @@ function _take_first_native_target_failure!(failures::_NativeCPUTargetFailures)
     return failure
 end
 
-function _throw_native_failures(snapshot, target_failures, transform)
+function _throw_native_failures(snapshot, draw_snapshot, target_failures, transform)
     target_failure = _take_first_native_target_failure!(target_failures)
-    if !iszero(snapshot.count) &&
-       snapshot.reason_bits & _NATIVE_PROPOSAL_DRAW_REASONS != 0
-        _throw_native_failure(snapshot, transform)
-    end
+    _throw_native_failure(draw_snapshot, transform)
     isnothing(target_failure) || throw(target_failure)
     return _throw_native_failure(snapshot, transform)
 end

@@ -20,29 +20,6 @@ function _allocate_random_buffers(
     )
 end
 
-@inline function _static_mis_assignment(cdf, uniform)
-    for slot in eachindex(cdf)
-        uniform <= @inbounds(cdf[slot]) && return slot
-    end
-    return lastindex(cdf)
-end
-
-@inline function _static_mis_assignment_uniform(
-    ::_StratifiedAssignment,
-    uniform,
-    sample_index,
-    nsamples,
-)
-    return ((sample_index - 1) + uniform) / nsamples
-end
-
-@inline _static_mis_assignment_uniform(
-    ::_RandomAssignment,
-    uniform,
-    sample_index,
-    nsamples,
-) = uniform
-
 @kernel function _static_mis_assignment_kernel!(
     assignments,
     uniforms,
@@ -50,115 +27,12 @@ end
     assignment,
 )
     sample_index = @index(Global, Linear)
-    uniform = _static_mis_assignment_uniform(
+    @inbounds assignments[sample_index] = _static_mis_assignment(
         assignment,
+        cdf,
         @inbounds(uniforms[sample_index]),
         sample_index,
         length(assignments),
-    )
-    @inbounds assignments[sample_index] = _static_mis_assignment(cdf, uniform)
-end
-
-@inline function _packed_full_mis_logdenominator(
-    ::Type{L},
-    bank,
-    generating_slot,
-    sample,
-) where {L}
-    denominator = L(-Inf)
-    generating_logdensity = zero(L)
-    for proposal_slot in axes(bank.locations, 2)
-        proposal_logdensity = convert(
-            L,
-            _packed_gaussian_logdensity(bank, sample, proposal_slot),
-        )
-        isnan(proposal_logdensity) && return denominator, _NATIVE_PROPOSAL_INVALID
-        proposal_slot == generating_slot &&
-            (generating_logdensity = proposal_logdensity)
-        logterm = convert(L, @inbounds(bank.logmasses[proposal_slot])) +
-                  proposal_logdensity
-        denominator = LogExpFunctions.logaddexp(denominator, logterm)
-    end
-    reason = (
-        isnan(generating_logdensity) || generating_logdensity == -Inf ||
-        isnan(denominator) || denominator == -Inf
-    ) ? _NATIVE_PROPOSAL_INVALID : UInt16(0)
-    return denominator, reason
-end
-
-@inline function _packed_partial_mis_logdenominator(
-    ::Type{L},
-    bank,
-    denominator_policy::_PartialMixtureDenominator,
-    generating_slot,
-    sample,
-) where {L}
-    group = @inbounds denominator_policy.group_of_slot[generating_slot]
-    first_member = @inbounds denominator_policy.offsets[group]
-    last_member = @inbounds(denominator_policy.offsets[group + 1]) - 1
-    denominator = L(-Inf)
-    generating_logdensity = zero(L)
-    for member_index in first_member:last_member
-        proposal_slot = @inbounds denominator_policy.members[member_index]
-        proposal_logdensity = convert(
-            L,
-            _packed_gaussian_logdensity(bank, sample, proposal_slot),
-        )
-        isnan(proposal_logdensity) && return denominator, _NATIVE_PROPOSAL_INVALID
-        proposal_slot == generating_slot &&
-            (generating_logdensity = proposal_logdensity)
-        logterm = convert(
-            L,
-            @inbounds(denominator_policy.logcoefficients[member_index]),
-        ) + proposal_logdensity
-        denominator = LogExpFunctions.logaddexp(denominator, logterm)
-    end
-    reason = (
-        isnan(generating_logdensity) || generating_logdensity == -Inf ||
-        isnan(denominator) || denominator == -Inf
-    ) ? _NATIVE_PROPOSAL_INVALID : UInt16(0)
-    return denominator, reason
-end
-
-@inline function _packed_mis_logdenominator(
-    ::Type{L},
-    bank,
-    ::_FullMixtureDenominator,
-    generating_slot,
-    sample,
-) where {L}
-    return _packed_full_mis_logdenominator(L, bank, generating_slot, sample)
-end
-
-@inline function _packed_mis_logdenominator(
-    ::Type{L},
-    bank,
-    ::_GeneratingDenominator,
-    generating_slot,
-    sample,
-) where {L}
-    denominator = convert(
-        L,
-        _packed_gaussian_logdensity(bank, sample, generating_slot),
-    )
-    reason = (isnan(denominator) || denominator == -Inf) ?
-             _NATIVE_PROPOSAL_INVALID : UInt16(0)
-    return denominator, reason
-end
-
-@inline function _packed_mis_logdenominator(
-    ::Type{L},
-    bank,
-    denominator::_PartialMixtureDenominator,
-    generating_slot,
-    sample,
-) where {L}
-    return _packed_partial_mis_logdenominator(
-        L,
-        bank,
-        denominator,
-        generating_slot,
-        sample,
     )
 end
 
@@ -177,7 +51,7 @@ end
     generating_slot = @inbounds assignments[sample_index]
     dimension = size(bank.locations, 1)
     normal_offset = (sample_index - 1) * dimension + 1
-    valid = _store_packed_gaussian!(
+    valid = _native_store_gaussian!(
         samples,
         sample_index,
         bank,
@@ -203,7 +77,7 @@ end
                 target_reason,
             )
         else
-            denominator, denominator_reason = _packed_mis_logdenominator(
+            denominator, _, denominator_reason = _mis_logdenominator_core(
                 typeof(target_log),
                 bank,
                 denominator_policy,
@@ -349,6 +223,7 @@ function _importance_sample_cpu!(
     snapshot = _device_failure_snapshot(failure_scratch.record)
     _throw_native_failures(
         snapshot.failure,
+        snapshot.draw_failure,
         target_failures,
         _NoSampleTransform(),
     )
