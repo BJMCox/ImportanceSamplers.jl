@@ -391,13 +391,13 @@ end
 function main()
     device = cuda_device()
     environment = environment_record()
-    vector_correctness = RUN_CORRECTNESS ? [
+    vector_correctness = RUN_CORRECTNESS ? vec([
         correctness_case(device, T, scheme, case_index) for
         (case_index, (T, scheme)) in enumerate(Iterators.product(
             (Float32, Float64),
             static_mis_schemes(4),
         ))
-    ] : NamedTuple[]
+    ]) : NamedTuple[]
     scalar_correctness = RUN_CORRECTNESS ? [
         correctness_case(
             device,
@@ -408,6 +408,8 @@ function main()
         ) for (case_index, T) in enumerate((Float32, Float64))
     ] : NamedTuple[]
     correctness = vcat(vector_correctness, scalar_correctness)
+    @assert correctness isa Vector
+    @assert length(correctness) == (RUN_CORRECTNESS ? 10 : 0)
     benchmarks = RUN_BENCHMARKS ? [
         benchmark_case(device, T, scheme, proposal_count, dimension, nsamples) for
         T in (Float32, Float64) for
