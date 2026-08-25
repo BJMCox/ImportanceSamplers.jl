@@ -91,25 +91,49 @@ function static_mis_case(::Type{T}, proposal_count, dimension) where {T}
     return ProposalBank(proposals, masses), context, expected_mean
 end
 
-function static_mis_scalar_case(::Type{T}) where {T}
-    locations = T[-1.25, 0.25, 1.5, 2.25]
-    scales = T[0.7, 1.1, 0.8, 1.35]
-    masses = T[1, 3, 0, 2]
-    masses ./= sum(masses)
-    proposals = [
-        SphericalGaussian(locations[proposal], scales[proposal]) for
-        proposal in eachindex(locations)
-    ]
+function static_mis_direct_case(row, ::Type{T}) where {T}
+    bank = row.factory(T)
+    direct = row.direct
+    isnothing(direct) && error("static-MIS capability row has no direct case")
+    layout = direct.sample_layout
+    masses = bank.masses
     active = findall(!iszero, masses)
-    active_scales = scales[active]
-    context = (
-        locations=locations[active],
-        scales=active_scales,
-        lognormalizers=-log.(active_scales) .-
-                       T(0.5) * log(T(2) * T(pi)),
-        logmasses=log.(masses[active]),
-    )
-    return ProposalBank(proposals, masses), context, T[sum(locations .* masses)]
+    locations = if layout === :scalar
+        T[getfield(proposal, :location) for proposal in bank.proposals]
+    elseif layout === :vector
+        reduce(hcat, (getfield(proposal, :location) for proposal in bank.proposals))
+    else
+        error("unknown directly tested sample layout: $layout")
+    end
+    proposal_scales = T[
+        getfield(getfield(proposal, :scale), :scale) for proposal in bank.proposals
+    ]
+    if layout === :scalar
+        active_scales = proposal_scales[active]
+        context = (
+            locations=locations[active],
+            scales=active_scales,
+            lognormalizers=-log.(active_scales) .-
+                           T(0.5) * log(T(2) * T(pi)),
+            logmasses=log.(masses[active]),
+        )
+        expected_mean = T[sum(locations .* masses)]
+    else
+        scales = repeat(reshape(proposal_scales, 1, :), size(locations, 1), 1)
+        active_scales = scales[:, active]
+        context = (
+            locations=locations[:, active],
+            scales=active_scales,
+            lognormalizers=T[
+                -T(0.5) * T(size(locations, 1)) * log(T(2) * T(pi)) -
+                sum(log, view(active_scales, :, proposal)) for
+                proposal in axes(active_scales, 2)
+            ],
+            logmasses=log.(masses[active]),
+        )
+        expected_mean = locations * masses
+    end
+    return bank, context, expected_mean
 end
 
 function static_mis_scheme(label, proposal_count)
@@ -215,11 +239,10 @@ function correctness_case(
     ::Type{T},
     scheme,
     case_index;
-    scalar=false,
+    row,
 ) where {T}
-    bank, context, expected_mean = scalar ?
-                                   static_mis_scalar_case(T) :
-                                   static_mis_case(T, 4, 4)
+    bank, context, expected_mean = static_mis_direct_case(row, T)
+    scalar = row.direct.sample_layout === :scalar
     target = scalar ? static_mis_scalar_target : static_mis_mixture_target
     algorithm = ImportanceSampling(
         bank;
@@ -300,7 +323,7 @@ function correctness_case(
     @assert transfers.bytes >= 3sizeof(T) + 3sizeof(UInt64)
     return (
         scalar_type=T,
-        sample_layout=scalar ? :scalar : :vector,
+        sample_layout=row.direct.sample_layout,
         scheme=scheme_name(scheme),
         counts,
         gpu=gpu_summary,
@@ -400,36 +423,33 @@ end
 function main()
     device = cuda_device()
     environment = environment_record()
-    vector_correctness = RUN_CORRECTNESS ? vec([
-        correctness_case(device, T, scheme, case_index) for
-        (case_index, (T, scheme)) in enumerate(Iterators.product(
-            STATIC_MIS_A100_TYPES,
-            static_mis_schemes(4),
-        ))
-    ]) : NamedTuple[]
-    scalar_correctness = RUN_CORRECTNESS ? [
+    direct_cases = [
+        (row=row, type=T, scheme=scheme) for
+        row in STATIC_MIS_CAPABILITY_ROWS if !isnothing(row.direct) for
+        T in row.direct.types for scheme in row.direct.schemes
+    ]
+    @assert length(direct_cases) == 16
+    correctness = RUN_CORRECTNESS ? [
         correctness_case(
             device,
-            T,
-            StratifiedMixture(),
-            8 + case_index;
-            scalar=true,
-        ) for (case_index, T) in enumerate(STATIC_MIS_A100_TYPES)
+            case.type,
+            static_mis_scheme(case.scheme, 4),
+            case_index;
+            row=case.row,
+        ) for (case_index, case) in enumerate(direct_cases)
     ] : NamedTuple[]
-    correctness = vcat(vector_correctness, scalar_correctness)
     @assert correctness isa Vector
-    @assert length(correctness) == (RUN_CORRECTNESS ? 10 : 0)
+    @assert length(correctness) == (RUN_CORRECTNESS ? 16 : 0)
+    direct_types = unique(case.type for case in direct_cases)
     benchmarks = RUN_BENCHMARKS ? [
         benchmark_case(device, T, scheme, proposal_count, dimension, nsamples) for
-        T in STATIC_MIS_A100_TYPES for
+        T in direct_types for
         proposal_count in (2, 8, 32) for
         scheme in static_mis_schemes(proposal_count) for
         dimension in (1, 4, 16) for
         nsamples in (10_000, 100_000, 1_000_000)
     ] : NamedTuple[]
     RUN_BENCHMARKS && write_benchmarks(benchmarks)
-    Tuple(row.label for row in STATIC_MIS_CAPABILITY_ROWS if row.a100) ==
-        STATIC_MIS_A100_LAYOUTS || error("static-MIS A100 capability metadata mismatch")
     return (
         environment,
         correctness_cases=length(correctness),

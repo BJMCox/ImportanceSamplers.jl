@@ -111,12 +111,10 @@ device. Transfer to CPU is explicit. AMDGPU and Metal remain unclaimed.
 
 ## Reproducers, benchmark, and example
 
-```@raw html
-<p>The repository provides a deterministic analytic
-<a href="https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/static_mis.jl">CPU reproducer</a>
+The repository provides a deterministic analytic
+[CPU reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/static_mis.jl)
 and the real-hardware
-<a href="https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_static_mis.jl">CUDA reproducer</a>.</p>
-```
+[CUDA reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_static_mis.jl).
 Run them from the package root with their isolated validation environment:
 
 ```text
