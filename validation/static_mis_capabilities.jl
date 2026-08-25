@@ -27,7 +27,7 @@ const STATIC_MIS_CAPABILITY_ROWS = (
         bank="scalar spherical Gaussians",
         cpu="packed CPU execution",
         factory=T -> ProposalBank(
-            [SphericalGaussian(T(x), T(s)) for (x, s) in ((-1.25, 0.7), (0.25, 1.1), (1.5, 0.8), (2.25, 1.35))],
+            [SphericalGaussian(T(x), T(s)) for (x, s) in ((-0.45, 1.0), (-0.1, 1.1), (0.2, 0.9), (0.5, 1.2))],
             T[1, 3, 0, 2],
         ),
         device=:supported,

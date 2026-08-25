@@ -7,6 +7,9 @@ using Test
 const STATIC_MIS_CPU_SEED = 0x7374617469636370
 const STATIC_MIS_CPU_COMMAND =
     "julia --project=validation validation/reproducers/static_mis.jl"
+const STATIC_MIS_DIRECT_SEED = 0x7374617469636d69
+
+include(joinpath(@__DIR__, "..", "static_mis_capabilities.jl"))
 
 @inline function logaddexp(left, right)
     left == -Inf && return right
@@ -142,6 +145,28 @@ function check_generating_and_partial_identities()
     return nothing
 end
 
+function check_scalar_direct_fixture()
+    row = only(filter(
+        row -> !isnothing(row.direct) && row.direct.sample_layout === :scalar,
+        STATIC_MIS_CAPABILITY_ROWS,
+    ))
+    for (case_index, scheme) in enumerate(STATIC_MIS_COMPLETE_SCHEMES)
+        bank = row.factory(Float32)
+        result = importance_sample(
+            Xoshiro(STATIC_MIS_DIRECT_SEED + UInt(case_index)),
+            sample -> bank_logdensity(bank, sample),
+            ImportanceSampling(bank; nsamples=10_003, mis_scheme=scheme.value);
+            threaded=false,
+        )
+        weights = exp.(result.logweights)
+        normalizer = sum(weights) / length(weights)
+        variance = sum(weight -> abs2(weight - normalizer), weights) / length(weights)
+        lognormalizer_se = sqrt(variance / length(weights)) / normalizer
+        @test abs(lognormalizer(result)) <= 7lognormalizer_se
+    end
+    return nothing
+end
+
 function package_versions()
     wanted = Set(("DensityInterface", "ImportanceSamplers", "LogExpFunctions"))
     return sort!(
@@ -158,6 +183,7 @@ function main()
     @testset "static MIS analytic CPU reproducer" begin
         check_full_mixture_identities()
         check_generating_and_partial_identities()
+        check_scalar_direct_fixture()
     end
     return (
         command=STATIC_MIS_CPU_COMMAND,
