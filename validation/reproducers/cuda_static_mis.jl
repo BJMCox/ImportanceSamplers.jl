@@ -284,7 +284,7 @@ function correctness_case(
     @assert host_gpu.logweights isa Vector
     @assert host_gpu.provenance.proposal_id isa Vector{Int}
     @assert size(host_gpu.samples) ==
-            (scalar ? (CORRECTNESS_SAMPLES,) : (4, CORRECTNESS_SAMPLES))
+            static_mis_expected_sample_size(row, expected_mean, CORRECTNESS_SAMPLES)
     counts = assert_assignment_counts(
         host_gpu.provenance.proposal_id,
         bank.masses,

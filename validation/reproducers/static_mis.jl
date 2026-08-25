@@ -167,6 +167,23 @@ function check_scalar_direct_fixture()
     return nothing
 end
 
+function check_direct_sample_shapes()
+    rows = filter(row -> !isnothing(row.direct), STATIC_MIS_CAPABILITY_ROWS)
+    for (case_index, row) in enumerate(rows)
+        bank = row.factory(Float32)
+        location = getfield(first(bank.proposals), :location)
+        expected_mean = zeros(Float32, location isa Real ? 1 : length(location))
+        result = importance_sample(
+            Xoshiro(STATIC_MIS_DIRECT_SEED + UInt(100 + case_index)),
+            sample -> bank_logdensity(bank, sample),
+            ImportanceSampling(bank; nsamples=17, mis_scheme=StratifiedMixture());
+            threaded=false,
+        )
+        @test size(result.samples) == static_mis_expected_sample_size(row, expected_mean, 17)
+    end
+    return nothing
+end
+
 function package_versions()
     wanted = Set(("DensityInterface", "ImportanceSamplers", "LogExpFunctions"))
     return sort!(
@@ -184,6 +201,7 @@ function main()
         check_full_mixture_identities()
         check_generating_and_partial_identities()
         check_scalar_direct_fixture()
+        check_direct_sample_shapes()
     end
     return (
         command=STATIC_MIS_CPU_COMMAND,
