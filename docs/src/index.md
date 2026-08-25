@@ -45,6 +45,8 @@ target and algorithm arguments. The proposal alone determines sample shape.
 
 - [Plain importance sampling](@ref) covers estimator semantics, generic CPU
   proposals, prepared reuse, threading, results, and failures.
+- [Static multiple importance sampling](@ref) covers proposal banks, all four
+  complete assignment/denominator schemes, provenance, and CPU/CUDA limits.
 - [Native proposals](@ref) explains the Gaussian scale and factor contracts.
 - [Transforms](@ref) covers constrained and structured parameters, including
   the simplex reference measure.

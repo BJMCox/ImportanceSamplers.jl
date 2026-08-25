@@ -1,3 +1,6 @@
+struct _SingleProposalScheme end
+struct _SingleProposalMethodState end
+
 """
     AbstractImportanceSampler
 
@@ -8,24 +11,28 @@ bound target belong to the object returned by [`prepare_sampler`](@ref).
 """
 abstract type AbstractImportanceSampler end
 
+mutable struct _ValidatedImportanceSamplingToken end
+const _VALIDATED_IMPORTANCE_SAMPLING_TOKEN = _ValidatedImportanceSamplingToken()
+
 """
     ImportanceSampling(proposal; nsamples)
     ImportanceSampling(bank::ProposalBank; nsamples, mis_scheme=StratifiedMixture())
 
-Configure plain, single-proposal importance sampling.
+Configure plain or static multiple importance sampling.
 
 `proposal` must implement `rand(rng, proposal)` and
 `DensityInterface.logdensityof(proposal, sample)` for the same normalized
 measure. `nsamples` must be a positive `Int` and is the exact number of samples
 returned by every run. Generic proposals execute on CPU; the native Gaussian
 and transform subset also supports prepared CUDA execution.
+
+When the first argument is a [`ProposalBank`](@ref), `mis_scheme` selects one of
+the four complete assignment/denominator contracts described by
+[`AbstractMISScheme`](@ref); it defaults to [`StratifiedMixture`](@ref). The
+result stores canonical raw log weights and stable one-based generating
+proposal IDs in `result.provenance.proposal_id`. Bank capabilities are validated
+during preparation, before the supplied RNG is consumed.
 """
-struct _SingleProposalScheme end
-struct _SingleProposalMethodState end
-
-mutable struct _ValidatedImportanceSamplingToken end
-const _VALIDATED_IMPORTANCE_SAMPLING_TOKEN = _ValidatedImportanceSamplingToken()
-
 struct ImportanceSampling{P,S} <: AbstractImportanceSampler
     proposal::P
     nsamples::Int

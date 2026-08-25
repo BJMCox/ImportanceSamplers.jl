@@ -6,6 +6,7 @@ using Random
 import MLDataDevices
 
 include(joinpath(@__DIR__, "..", "validation", "cuda_plain_is_capabilities.jl"))
+include(joinpath(@__DIR__, "..", "validation", "static_mis_capabilities.jl"))
 
 struct CapabilityGaussian end
 
@@ -216,6 +217,75 @@ end
 
 const NATIVE_PLAIN_IS_CAPABILITY_TABLE = checked_plain_is_capability_table()
 
+function checked_static_mis_capability_table()
+    generic = ProposalBank(fill(CapabilityGaussian(), 4), [1, 3, 2, 4])
+    packed = ProposalBank(Any[
+        SphericalGaussian(zeros(2), 1.0),
+        DiagonalGaussian(ones(2), [0.75, 1.25]),
+        SphericalGaussian(fill(2.0, 2), 1.1),
+        DiagonalGaussian(fill(3.0, 2), [1.25, 0.75]),
+    ], [1, 3, 2, 4])
+    rejected = (
+        generic=generic,
+        factor=ProposalBank(fill(FactorGaussian(zeros(2), [1.0 0.0; 0.2 1.1]), 4)),
+        transformed=ProposalBank(fill(TransformedProposal(
+            SphericalGaussian(0.0, 1.0), PositiveTransform(),
+        ), 4)),
+        product=ProposalBank(fill(ProductProposal((
+            left=CapabilityGaussian(), right=CapabilityGaussian(),
+        )), 4)),
+    )
+    for (bank_index, bank) in enumerate((packed, values(rejected)...))
+        proposal = first(bank.proposals)
+        target = sample -> DensityInterface.logdensityof(proposal, sample)
+        for (scheme_index, scheme) in enumerate(STATIC_MIS_COMPLETE_SCHEMES)
+            result = importance_sample(
+                Xoshiro(10bank_index + scheme_index), target,
+                ImportanceSampling(bank; nsamples=7, mis_scheme=scheme.value);
+                threaded=false,
+            )
+            length(result) == 7 || error("static-MIS CPU capability check failed")
+        end
+    end
+    for row in filter(row -> !isnothing(row.reason), STATIC_MIS_CAPABILITY_ROWS)
+        bank = getproperty(rejected, row.label)
+        sampler = prepare_sampler(
+            Xoshiro(0x53544154),
+            capability_product_target,
+            ImportanceSampling(bank; nsamples=4);
+            threaded=true,
+        )
+        caught = try CapabilityAccelerator()(sampler); nothing catch error; error end
+        caught isa SamplerDeviceError && caught.reason === row.reason ||
+            error("static-MIS accelerator rejection check failed")
+    end
+
+    a100_labels = Tuple(row.label for row in STATIC_MIS_CAPABILITY_ROWS if row.a100)
+    a100_labels == STATIC_MIS_A100_LAYOUTS || error("static-MIS A100 metadata mismatch")
+    STATIC_MIS_A100_TYPES == (Float32, Float64) || error("static-MIS type metadata mismatch")
+    scheme_names = join((scheme.name for scheme in STATIC_MIS_COMPLETE_SCHEMES), ", ")
+    rows = join(
+        ("| $(r.bank) | $(r.cpu) | $(r.accelerator) |" for r in STATIC_MIS_CAPABILITY_ROWS),
+        '\n',
+    )
+    rejections = join(
+        (
+            "| $(r.input) | `$(nameof(r.error))` before RNG use |" for
+            r in STATIC_MIS_PREPARATION_REJECTIONS
+        ),
+        '\n',
+    )
+    return Markdown.parse(
+        "All rows support the four complete schemes: $scheme_names.\n\n" *
+        "| Proposal bank | CPU | CUDA status/evidence |\n" *
+        "|:--|:--|:--|\n" * rows * "\n\n" *
+        "| Invalid positive-mass bank | Preparation result |\n" *
+        "|:--|:--|\n" * rejections,
+    )
+end
+
+const STATIC_MIS_CAPABILITY_TABLE = checked_static_mis_capability_table()
+
 makedocs(
     modules=[ImportanceSamplers],
     sitename="ImportanceSamplers.jl",
@@ -231,6 +301,7 @@ makedocs(
         "Home" => "index.md",
         "Methods" => [
             "Plain importance sampling" => "methods/importance_sampling.md",
+            "Static multiple importance sampling" => "methods/static_mis.md",
         ],
         "Guides" => [
             "Native proposals" => "guide/native_proposals.md",

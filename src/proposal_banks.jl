@@ -2,6 +2,10 @@
     AbstractProposalPopulation
 
 Abstract supertype for explicit populations of normalized proposals.
+
+Population values are sampler configuration, not probability distributions.
+Concrete subtypes describe proposals that assignment and denominator schemes can
+use separately during preparation.
 """
 abstract type AbstractProposalPopulation end
 
@@ -10,8 +14,22 @@ abstract type AbstractProposalPopulation end
     ProposalBank(proposals, masses)
 
 Construct an explicit proposal population with copied proposals and normalized
-nonnegative masses. Omitted masses are equal. Zero-mass proposals remain in the
-bank configuration.
+nonnegative masses. Omitted masses are equal. The readable `proposals` and
+`masses` fields preserve input order; masses sum to one.
+
+Zero-mass proposals remain in the configuration and retain their stable
+one-based IDs, but are neither assigned nor evaluated. Positive-mass proposals
+must share a sample dimension. Generic CPU execution additionally requires one
+concrete proposal element type. Native spherical and diagonal Gaussian banks
+with one scalar/vector layout and floating type may be packed during
+preparation.
+
+`ProposalBank` deliberately implements neither `rand` nor
+`DensityInterface.logdensityof`: a bank is a proposal population, not a mixture
+distribution. [`AbstractMISScheme`](@ref) independently selects both the
+assignment law and the density used in each MIS denominator. A pre-existing
+mixture object remains one atomic proposal unless its components are explicitly
+placed in a bank.
 """
 struct ProposalBank{P<:AbstractVector,M<:AbstractVector} <: AbstractProposalPopulation
     proposals::P
@@ -270,22 +288,53 @@ end
     AbstractMISScheme
 
 Abstract supertype for complete static multiple-importance-sampling schemes.
+
+Every subtype fixes both proposal assignment and the weight denominator. Scheme
+values are passed as `mis_scheme` to [`ImportanceSampling`](@ref).
 """
 abstract type AbstractMISScheme end
 
-"""Use stratified proposal assignment and the full nominal mixture denominator."""
+"""
+    StratifiedMixture()
+
+Fix stratified proposal assignments from the nominal bank masses before drawing
+samples, and divide every target value by the full nominal proposal mixture.
+The aggregate mixture must cover the target support. This is the default scheme
+for a [`ProposalBank`](@ref).
+"""
 struct StratifiedMixture <: AbstractMISScheme end
 
-"""Use independent mixture assignment and the full nominal mixture denominator."""
+"""
+    RandomMixture()
+
+Assign every sample independently from the nominal bank masses, and divide by
+the full nominal proposal mixture. The aggregate mixture must cover the target
+support. Compared with [`StratifiedMixture`](@ref), this retains iid mixture
+selection but usually has more assignment-count variation.
+"""
 struct RandomMixture <: AbstractMISScheme end
 
-"""Use stratified assignment and each sample's generating-proposal denominator."""
+"""
+    StandardMIS()
+
+Use stratified proposal assignment and divide each target value only by the
+sample's generating proposal density. Every positive-mass proposal must cover
+the target support. This costs one proposal-density evaluation per sample but
+normally gives higher variance than a valid full-mixture denominator.
+"""
 struct StandardMIS <: AbstractMISScheme end
 
 """
     PartialDeterministicMixture(groups)
 
-Use stratified assignment and the nominal mixture within each proposal group.
+Use stratified assignment and divide by the nominal mixture within the sample's
+generating group. `groups` must partition all stable proposal IDs exactly once;
+groups containing only zero-mass proposals are accepted as inert. Each active
+group mixture must cover the target support.
+
+This interpolates between [`StandardMIS`](@ref) (singleton groups) and the full
+mixture denominator (one group), with proposal-density cost proportional to the
+generating group size.
 """
 struct PartialDeterministicMixture{G} <: AbstractMISScheme
     groups::G

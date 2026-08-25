@@ -6,6 +6,7 @@ using Pkg
 using Random
 
 include(joinpath(@__DIR__, "..", "cuda_plain_is_support.jl"))
+include(joinpath(@__DIR__, "..", "static_mis_capabilities.jl"))
 
 const STATIC_MIS_SEED = 0x7374617469636d69
 const CORRECTNESS_SAMPLES = 10_003
@@ -111,11 +112,19 @@ function static_mis_scalar_case(::Type{T}) where {T}
     return ProposalBank(proposals, masses), context, T[sum(locations .* masses)]
 end
 
-static_mis_schemes(proposal_count) = (
-    StratifiedMixture(),
-    RandomMixture(),
-    StandardMIS(),
-    PartialDeterministicMixture((Tuple(1:2:proposal_count), Tuple(2:2:proposal_count))),
+function static_mis_scheme(label, proposal_count)
+    label === :stratified_mixture && return StratifiedMixture()
+    label === :random_mixture && return RandomMixture()
+    label === :standard_mis && return StandardMIS()
+    label === :partial_deterministic_mixture && return PartialDeterministicMixture(
+        (Tuple(1:2:proposal_count), Tuple(2:2:proposal_count)),
+    )
+    error("unknown static-MIS scheme metadata label: $label")
+end
+
+static_mis_schemes(proposal_count) = Tuple(
+    static_mis_scheme(scheme.label, proposal_count) for
+    scheme in STATIC_MIS_COMPLETE_SCHEMES
 )
 
 scheme_name(::StratifiedMixture) = :stratified_mixture
@@ -394,7 +403,7 @@ function main()
     vector_correctness = RUN_CORRECTNESS ? vec([
         correctness_case(device, T, scheme, case_index) for
         (case_index, (T, scheme)) in enumerate(Iterators.product(
-            (Float32, Float64),
+            STATIC_MIS_A100_TYPES,
             static_mis_schemes(4),
         ))
     ]) : NamedTuple[]
@@ -405,20 +414,22 @@ function main()
             StratifiedMixture(),
             8 + case_index;
             scalar=true,
-        ) for (case_index, T) in enumerate((Float32, Float64))
+        ) for (case_index, T) in enumerate(STATIC_MIS_A100_TYPES)
     ] : NamedTuple[]
     correctness = vcat(vector_correctness, scalar_correctness)
     @assert correctness isa Vector
     @assert length(correctness) == (RUN_CORRECTNESS ? 10 : 0)
     benchmarks = RUN_BENCHMARKS ? [
         benchmark_case(device, T, scheme, proposal_count, dimension, nsamples) for
-        T in (Float32, Float64) for
+        T in STATIC_MIS_A100_TYPES for
         proposal_count in (2, 8, 32) for
         scheme in static_mis_schemes(proposal_count) for
         dimension in (1, 4, 16) for
         nsamples in (10_000, 100_000, 1_000_000)
     ] : NamedTuple[]
     RUN_BENCHMARKS && write_benchmarks(benchmarks)
+    Tuple(row.label for row in STATIC_MIS_CAPABILITY_ROWS if row.a100) ==
+        STATIC_MIS_A100_LAYOUTS || error("static-MIS A100 capability metadata mismatch")
     return (
         environment,
         correctness_cases=length(correctness),

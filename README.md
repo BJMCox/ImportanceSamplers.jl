@@ -35,6 +35,9 @@ target returns a `Float32` or `Float64` log density; the sampler never applies
 
 - [Plain importance sampling](docs/src/methods/importance_sampling.md) explains
   the estimator, generic proposals, prepared reuse, and result semantics.
+- [Static multiple importance sampling](docs/src/methods/static_mis.md) explains
+  proposal banks, the four complete MIS schemes, provenance, and support and
+  device contracts.
 - [Native proposals](docs/src/guide/native_proposals.md) documents spherical,
   diagonal, and dense-factor Gaussians.
 - [Transforms](docs/src/guide/transforms.md) documents positive, interval,
@@ -48,6 +51,11 @@ Runnable checks include
 [`simplex_transform.jl`](validation/reproducers/simplex_transform.jl), and the
 real-CUDA matrix
 [`cuda_plain_is.jl`](validation/reproducers/cuda_plain_is.jl).
+Static MIS has an analytic CPU
+[`static_mis.jl`](validation/reproducers/static_mis.jl) reproducer and an A100
+[`cuda_static_mis.jl`](validation/reproducers/cuda_static_mis.jl) reproducer.
+The concise end-to-end workflow is
+[`examples/static_mis.jl`](examples/static_mis.jl).
 The runnable
 [`logistic_regression.jl`](examples/logistic_regression.jl) example performs
 end-to-end Bayesian inference for an intercept and two regression slopes. It
