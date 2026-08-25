@@ -16,6 +16,56 @@ function caught_static_mis_failure(f)
     return nothing
 end
 
+struct StaticMISCountedCDF{T,V<:AbstractVector{T}} <: AbstractVector{T}
+    values::V
+    accesses::Base.RefValue{Int}
+end
+
+Base.size(cdf::StaticMISCountedCDF) = size(cdf.values)
+Base.IndexStyle(::Type{<:StaticMISCountedCDF}) = IndexLinear()
+function Base.getindex(cdf::StaticMISCountedCDF, index::Int)
+    cdf.accesses[] += 1
+    return cdf.values[index]
+end
+
+@testset "static-MIS scalar assignment mapper" begin
+    random_assignment = IS._RandomAssignment()
+    assignment(cdf, uniform) =
+        IS._static_mis_assignment(random_assignment, cdf, uniform, 1, 1)
+
+    cdf = [0.2, 0.5, 1.0]
+    @test assignment(cdf, 0.0) == 1
+    @test assignment(cdf, 0.2) == 1
+    @test assignment(cdf, 0.5) == 2
+    @test assignment(cdf, prevfloat(1.0)) == 3
+    @test assignment(cdf, 1.0) == 3
+    @test assignment([1.0], 0.0) == 1
+    @test assignment([1.0], 0.5) == 1
+    @test assignment([1.0], 1.0) == 1
+
+    for positive_cdf in (Float32[1.0f-8, 1.0], Float32[prevfloat(1.0f0), 1.0])
+        boundary = positive_cdf[1]
+        @test assignment(positive_cdf, prevfloat(boundary)) == 1
+        @test assignment(positive_cdf, boundary) == 1
+        @test assignment(positive_cdf, nextfloat(boundary)) == 2
+    end
+
+    stratified_assignment = IS._StratifiedAssignment()
+    @test IS._static_mis_assignment(
+        stratified_assignment,
+        cdf,
+        0.5,
+        2,
+        3,
+    ) == 2
+
+    values = collect(range(1 / 10_000, 1; length=10_000))
+    accesses = Ref(0)
+    counted_cdf = StaticMISCountedCDF(values, accesses)
+    @test assignment(counted_cdf, prevfloat(1.0)) == 10_000
+    @test accesses[] <= ceil(Int, log2(length(counted_cdf))) + 1
+end
+
 @testset "proposal-bank configuration" begin
     proposals = [
         SphericalGaussian(-1.0, 1.0),

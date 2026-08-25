@@ -140,10 +140,17 @@ end
         sample_index,
         nsamples,
     )
-    for slot in eachindex(cdf)
-        mapped_uniform <= @inbounds(cdf[slot]) && return slot
+    first_slot = firstindex(cdf)
+    last_slot = lastindex(cdf)
+    while first_slot < last_slot
+        middle_slot = first_slot + (last_slot - first_slot) ÷ 2
+        if mapped_uniform <= @inbounds(cdf[middle_slot])
+            last_slot = middle_slot
+        else
+            first_slot = middle_slot + 1
+        end
     end
-    return lastindex(cdf)
+    return first_slot
 end
 
 function _compile_assignments!(rng, assignments, assignment, cdf)
