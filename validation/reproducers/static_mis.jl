@@ -95,11 +95,8 @@ function check_full_mixture_identities()
         10_003;
         seed=STATIC_MIS_CPU_SEED + 2,
     )
-    expected_counts = 10_003 .* unequal_bank.masses
-    @test all(
-        abs(count(==(id), nonintegral.provenance.proposal_id) - expected_counts[id]) <= 1
-        for id in 1:4
-    )
+    counts = [count(==(id), nonintegral.provenance.proposal_id) for id in 1:4]
+    @test static_mis_stratified_counts_within_bound(counts, unequal_bank.masses, 10_003)
     random = run_case(
         unequal_bank,
         RandomMixture(),
@@ -108,6 +105,16 @@ function check_full_mixture_identities()
     )
     @test maximum(abs, random.logweights) <= 512eps(Float64)
     @test 4 ∉ random.provenance.proposal_id
+    return nothing
+end
+
+function check_stratified_count_bound()
+    counts = [1_668, 5_002, 0, 3_333]
+    masses = Float32[1, 3, 0, 2]
+    masses ./= sum(masses)
+    deviations = abs.(counts .- 10_003 .* masses)
+    @test maximum(deviations) > 1
+    @test static_mis_stratified_counts_within_bound(counts, masses, 10_003)
     return nothing
 end
 
@@ -199,6 +206,7 @@ end
 function main()
     @testset "static MIS analytic CPU reproducer" begin
         check_full_mixture_identities()
+        check_stratified_count_bound()
         check_generating_and_partial_identities()
         check_scalar_direct_fixture()
         check_direct_sample_shapes()

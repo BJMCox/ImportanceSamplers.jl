@@ -88,6 +88,11 @@ const STATIC_MIS_CAPABILITY_ROWS = (
 static_mis_expected_sample_size(row, expected_mean, nsamples) =
     row.direct.sample_layout === :scalar ? (nsamples,) : (length(expected_mean), nsamples)
 
+function static_mis_stratified_counts_within_bound(counts, masses, nsamples)
+    expected = nsamples .* masses
+    return all(abs.(counts .- expected) .< 2 .+ 16 .* eps.(float.(expected)))
+end
+
 const STATIC_MIS_PREPARATION_REJECTIONS = (
     (input="mixed positive-mass vector dimensions", error=DimensionMismatch,
         factory=() -> ProposalBank(Any[SphericalGaussian(zeros(2), 1.0), DiagonalGaussian(zeros(3), ones(3))]),

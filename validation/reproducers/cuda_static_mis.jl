@@ -229,7 +229,7 @@ function assert_assignment_counts(ids, masses, scheme)
             @assert abs(counts[proposal] - expected) <= tolerance
         end
     else
-        @assert all(abs(counts[proposal] - length(ids) * masses[proposal]) <= 1 for proposal in active)
+        @assert static_mis_stratified_counts_within_bound(counts, masses, length(ids))
     end
     return counts
 end
