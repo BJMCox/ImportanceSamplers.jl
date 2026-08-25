@@ -62,21 +62,29 @@ struct _ActiveProposalBank{P,M,C,I}
     proposal_ids::I
 end
 
-function _prepare_active_proposal_bank(bank::ProposalBank)
-    proposal_type = eltype(bank.proposals)
-    isconcretetype(proposal_type) || throw(
-        ArgumentError(
-            "generic CPU proposal banks require one concrete proposal element type",
-        ),
-    )
+struct _ScalarGaussianLayout end
+struct _VectorGaussianLayout end
 
+struct _PackedDiagonalGaussianBank{L,S,N,M,C,I,R}
+    locations::L
+    scales::S
+    lognormalizers::N
+    logmasses::M
+    cdf::C
+    proposal_ids::I
+    layout::R
+end
+
+_active_proposal_count(bank::_ActiveProposalBank) = length(bank.proposals)
+_active_proposal_count(bank::_PackedDiagonalGaussianBank) = size(bank.locations, 2)
+
+function _prepare_active_proposal_metadata(bank::ProposalBank)
     proposal_ids = findall(!iszero, bank.masses)
     sort!(
         proposal_ids;
         by=proposal_id -> bank.masses[proposal_id],
         alg=Base.Sort.MergeSort,
     )
-    proposals = bank.proposals[proposal_ids]
     masses = bank.masses[proposal_ids]
     masses ./= sum(masses)
     cdf = cumsum(masses)
@@ -90,6 +98,126 @@ function _prepare_active_proposal_bank(bank::ProposalBank)
         )
         previous = boundary
     end
+    return proposal_ids, masses, cdf
+end
+
+function _is_packable_native_gaussian(proposal)
+    proposal isa _GaussianProposal || return false
+    return proposal.scale isa Union{
+        _SphericalGaussianScale,
+        _DiagonalGaussianScale,
+    }
+end
+
+function _pack_native_gaussian_bank(bank::ProposalBank)
+    proposal_ids, masses, cdf = _prepare_active_proposal_metadata(bank)
+    return _pack_native_gaussian_bank(bank, proposal_ids, masses, cdf)
+end
+
+function _pack_native_gaussian_bank(bank, proposal_ids, masses, cdf)
+    proposals = view(bank.proposals, proposal_ids)
+    all(_is_packable_native_gaussian, proposals) || return nothing
+    eltype(masses) <: _NativeGaussianFloat || return nothing
+
+    first_proposal = first(proposals)
+    first_location = first_proposal.location
+    scalar_layout = first_location isa _NativeGaussianFloat
+    layout = scalar_layout ? _ScalarGaussianLayout() : _VectorGaussianLayout()
+    T = _gaussian_float_type(first_location)
+    dimension = _gaussian_dimension(first_location)
+
+    for proposal in Iterators.drop(proposals, 1)
+        location = proposal.location
+        (location isa _NativeGaussianFloat) == scalar_layout || throw(
+            ArgumentError(
+                "positive-mass native Gaussian proposals must share scalar or vector layout",
+            ),
+        )
+        _gaussian_float_type(location) === T || throw(
+            ArgumentError(
+                "positive-mass native Gaussian proposals must use one floating type",
+            ),
+        )
+        _gaussian_dimension(location) == dimension || throw(
+            DimensionMismatch(
+                "positive-mass native Gaussian proposals must have one common dimension",
+            ),
+        )
+    end
+
+    locations = Matrix{T}(undef, dimension, length(proposals))
+    scales = Matrix{T}(undef, dimension, length(proposals))
+    lognormalizers = Vector{T}(undef, length(proposals))
+    for (slot, proposal) in pairs(proposals)
+        if scalar_layout
+            locations[1, slot] = proposal.location
+        else
+            copyto!(view(locations, :, slot), proposal.location)
+        end
+        if proposal.scale isa _SphericalGaussianScale
+            fill!(view(scales, :, slot), proposal.scale.scale)
+        else
+            copyto!(view(scales, :, slot), proposal.scale.scales)
+        end
+        lognormalizers[slot] = proposal.lognormalizer
+    end
+
+    return _PackedDiagonalGaussianBank(
+        locations,
+        scales,
+        lognormalizers,
+        log.(masses),
+        cdf,
+        proposal_ids,
+        layout,
+    )
+end
+
+function _prepare_active_proposal_bank(bank::ProposalBank)
+    proposal_ids, masses, cdf = _prepare_active_proposal_metadata(bank)
+    proposal_type = eltype(bank.proposals)
+    native_candidate = Val(
+        proposal_type <: _GaussianProposal || !isconcretetype(proposal_type),
+    )
+    return _prepare_active_proposal_bank(
+        bank,
+        proposal_ids,
+        masses,
+        cdf,
+        native_candidate,
+    )
+end
+
+function _prepare_active_proposal_bank(
+    bank,
+    proposal_ids,
+    masses,
+    cdf,
+    ::Val{true},
+)
+    packed = _pack_native_gaussian_bank(bank, proposal_ids, masses, cdf)
+    isnothing(packed) || return packed
+    return _prepare_generic_active_proposal_bank(bank, proposal_ids, masses, cdf)
+end
+
+function _prepare_active_proposal_bank(
+    bank,
+    proposal_ids,
+    masses,
+    cdf,
+    ::Val{false},
+)
+    return _prepare_generic_active_proposal_bank(bank, proposal_ids, masses, cdf)
+end
+
+function _prepare_generic_active_proposal_bank(bank, proposal_ids, masses, cdf)
+    proposal_type = eltype(bank.proposals)
+    isconcretetype(proposal_type) || throw(
+        ArgumentError(
+            "generic CPU proposal banks require one concrete proposal element type",
+        ),
+    )
+    proposals = bank.proposals[proposal_ids]
     return _ActiveProposalBank(
         proposals,
         log.(masses),

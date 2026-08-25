@@ -97,6 +97,78 @@ end
     return _native_gaussian_logdensity!(base, coordinates, offset) - logabsjac, UInt16(0)
 end
 
+@inline function _packed_gaussian_coordinate(
+    bank,
+    normals,
+    normal_offset,
+    coordinate,
+    proposal_slot,
+)
+    return @inbounds(bank.locations[coordinate, proposal_slot]) +
+           @inbounds(bank.scales[coordinate, proposal_slot]) *
+           @inbounds(normals[normal_offset + coordinate - 1])
+end
+
+@inline function _store_packed_gaussian!(
+    samples::AbstractVector,
+    sample_index,
+    bank,
+    normals,
+    normal_offset,
+    proposal_slot,
+)
+    value = _packed_gaussian_coordinate(
+        bank,
+        normals,
+        normal_offset,
+        1,
+        proposal_slot,
+    )
+    @inbounds samples[sample_index] = value
+    return isfinite(value)
+end
+
+@inline function _store_packed_gaussian!(
+    samples::AbstractMatrix,
+    sample_index,
+    bank,
+    normals,
+    normal_offset,
+    proposal_slot,
+)
+    valid = true
+    for coordinate in axes(bank.locations, 1)
+        value = _packed_gaussian_coordinate(
+            bank,
+            normals,
+            normal_offset,
+            coordinate,
+            proposal_slot,
+        )
+        @inbounds samples[coordinate, sample_index] = value
+        valid &= isfinite(value)
+    end
+    return valid
+end
+
+@inline _packed_sample_coordinate(sample::Real, coordinate) = sample
+@inline _packed_sample_coordinate(sample::AbstractVector, coordinate) =
+    @inbounds sample[coordinate]
+
+@inline function _packed_gaussian_logdensity(bank, sample, proposal_slot)
+    T = eltype(bank.lognormalizers)
+    squared_radius = zero(T)
+    for coordinate in axes(bank.locations, 1)
+        standardized = (
+            _packed_sample_coordinate(sample, coordinate) -
+            @inbounds(bank.locations[coordinate, proposal_slot])
+        ) / @inbounds(bank.scales[coordinate, proposal_slot])
+        squared_radius += abs2(standardized)
+    end
+    return @inbounds(bank.lognormalizers[proposal_slot]) -
+           T(0.5) * squared_radius
+end
+
 @inline _native_sample_at(samples::AbstractVector, slot) = @inbounds samples[slot]
 @inline _native_sample_at(samples::AbstractMatrix, slot) = @view samples[:, slot]
 

@@ -57,6 +57,7 @@ include("storage.jl")
 include("execution.jl")
 include("methods/static_mis.jl")
 include("native_execution.jl")
+include("static_mis_execution.jl")
 include("results.jl")
 
 end # module ImportanceSamplers

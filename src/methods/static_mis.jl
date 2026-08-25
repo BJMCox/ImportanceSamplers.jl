@@ -154,7 +154,7 @@ function _compile_partial_denominator(bank, active_bank, groups)
         active_slot[proposal_id] = slot
     end
 
-    group_of_slot = zeros(Int, length(active_bank.proposals))
+    group_of_slot = zeros(Int, _active_proposal_count(active_bank))
     offsets = Int[1]
     members = Int[]
     logcoefficients = Vector{eltype(active_bank.logmasses)}()

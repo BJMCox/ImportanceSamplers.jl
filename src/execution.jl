@@ -14,6 +14,13 @@ struct _RandomBuffers{U,N,F}
     failure_scratch::F
 end
 
+struct _PackedStaticMISRandomBuffers{U,N,A,F}
+    uniform::U
+    normal::N
+    assignments::A
+    failure_scratch::F
+end
+
 struct _DeviceFailureRecord{A}
     storage::A
 end
@@ -126,9 +133,14 @@ function _allocate_random_buffers(
 end
 
 _native_failure_scratch(::_NoRandomBuffers) = _NoNativeFailureScratch()
-_native_failure_scratch(buffers::_RandomBuffers) = buffers.failure_scratch
+_native_failure_scratch(
+    buffers::Union{_RandomBuffers,_PackedStaticMISRandomBuffers},
+) = buffers.failure_scratch
 
-function _fill_random_buffers!(rng, buffers::_RandomBuffers)
+function _fill_random_buffers!(
+    rng,
+    buffers::Union{_RandomBuffers,_PackedStaticMISRandomBuffers},
+)
     isempty(buffers.uniform) || Random.rand!(rng, buffers.uniform)
     isempty(buffers.normal) || Random.randn!(rng, buffers.normal)
     return buffers
