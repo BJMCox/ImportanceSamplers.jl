@@ -309,7 +309,12 @@ function environment_record()
     root = normpath(joinpath(@__DIR__, "..", ".."))
     gpu = CUDA.device()
     return (
-        commit=readchomp(`git -C $root rev-parse HEAD`),
+        commit=readchomp(
+            addenv(
+                `git -C $root rev-parse HEAD`,
+                "GIT_CONFIG_GLOBAL" => "/dev/null",
+            ),
+        ),
         gpu=CUDA.name(gpu),
         capability=CUDA.capability(gpu),
         driver=CUDA.driver_version(),
