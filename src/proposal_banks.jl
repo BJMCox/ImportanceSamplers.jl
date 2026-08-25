@@ -91,19 +91,6 @@ function _accelerator_proposal_limit(bank::ProposalBank)
         _is_packable_native_gaussian(proposal) || return :generic_proposal_cpu_only
     end
 
-    first_location = first(proposals).location
-    scalar_layout = first_location isa _NativeGaussianFloat
-    dimension = _gaussian_dimension(first_location)
-    float_type = _gaussian_float_type(first_location)
-    for proposal in Iterators.drop(proposals, 1)
-        location = proposal.location
-        (location isa _NativeGaussianFloat) == scalar_layout ||
-            return :mixed_dimension_proposal_cpu_only
-        _gaussian_dimension(location) == dimension ||
-            return :mixed_dimension_proposal_cpu_only
-        _gaussian_float_type(location) === float_type ||
-            return :mixed_float_proposal_cpu_only
-    end
     return nothing
 end
 

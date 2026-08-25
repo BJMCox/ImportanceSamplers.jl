@@ -130,10 +130,6 @@ function Base.showerror(io::IO, error::SamplerDeviceError)
         "factor Gaussian proposal banks are CPU-only"
     elseif error.reason === :transformed_proposal_cpu_only
         "transformed proposal banks are CPU-only"
-    elseif error.reason === :mixed_dimension_proposal_cpu_only
-        "proposal banks with mixed dimensions are CPU-only"
-    elseif error.reason === :mixed_float_proposal_cpu_only
-        "proposal banks with mixed floating types are CPU-only"
     elseif error.reason === :kernel_argument_unsupported
         "the target or context does not have a supported accelerator kernel " *
         "argument representation"
@@ -444,14 +440,19 @@ function _transfer_prepared_sampler(
             method_state,
             random_buffers,
         )
-        _owned_backend_rng(device, zero(UInt64))
+        source_rng = _clone_rng(device, sampler.rng)
         seed = try
-            Random.rand(sampler.rng, UInt64)
+            Random.rand(source_rng, UInt64)
         catch
             throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
         end
-        return _PreparedImportanceSampler(
-            _owned_backend_rng(device, seed),
+        backend_rng = try
+            _owned_backend_rng(device, seed)
+        catch
+            throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
+        end
+        destination = _PreparedImportanceSampler(
+            backend_rng,
             random_buffers,
             target,
             algorithm,
@@ -461,6 +462,8 @@ function _transfer_prepared_sampler(
             false,
             false,
         )
+        sampler.rng = source_rng
+        return destination
     end
 end
 

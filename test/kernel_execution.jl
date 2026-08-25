@@ -861,7 +861,9 @@ end
     destination_buffers = getfield(destination, :random_buffers)
     @test destination_rng isa Random.Xoshiro
     @test destination_rng !== getfield(source, :rng)
-    @test rand(source_rng, UInt64) == expected_next
+    @test getfield(source, :rng) !== source_rng
+    @test rand(source_rng, UInt64) == expected_seed
+    @test rand(getfield(source, :rng), UInt64) == expected_next
     @test getfield(destination_buffers, :uniform) isa Vector{Float64}
     @test getfield(destination_buffers, :normal) isa Vector{Float64}
     @test getfield(destination_buffers, :normal) !==

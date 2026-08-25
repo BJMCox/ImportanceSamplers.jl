@@ -44,6 +44,18 @@ end
     return value
 end
 
+@inline function static_mis_scalar_target(sample, context)
+    value = oftype(context.logmasses[1], -Inf)
+    @inbounds for proposal in eachindex(context.locations)
+        standardized =
+            (sample - context.locations[proposal]) / context.scales[proposal]
+        term = context.logmasses[proposal] + context.lognormalizers[proposal] -
+               typeof(value)(0.5) * abs2(standardized)
+        value = static_mis_logaddexp(value, term)
+    end
+    return value
+end
+
 function static_mis_case(::Type{T}, proposal_count, dimension) where {T}
     locations = Matrix{T}(undef, dimension, proposal_count)
     scales = Matrix{T}(undef, dimension, proposal_count)
@@ -78,6 +90,27 @@ function static_mis_case(::Type{T}, proposal_count, dimension) where {T}
     return ProposalBank(proposals, masses), context, expected_mean
 end
 
+function static_mis_scalar_case(::Type{T}) where {T}
+    locations = T[-1.25, 0.25, 1.5, 2.25]
+    scales = T[0.7, 1.1, 0.8, 1.35]
+    masses = T[1, 3, 0, 2]
+    masses ./= sum(masses)
+    proposals = [
+        SphericalGaussian(locations[proposal], scales[proposal]) for
+        proposal in eachindex(locations)
+    ]
+    active = findall(!iszero, masses)
+    active_scales = scales[active]
+    context = (
+        locations=locations[active],
+        scales=active_scales,
+        lognormalizers=-log.(active_scales) .-
+                       T(0.5) * log(T(2) * T(pi)),
+        logmasses=log.(masses[active]),
+    )
+    return ProposalBank(proposals, masses), context, T[sum(locations .* masses)]
+end
+
 static_mis_schemes(proposal_count) = (
     StratifiedMixture(),
     RandomMixture(),
@@ -93,9 +126,17 @@ scheme_name(::PartialDeterministicMixture) = :partial_deterministic_mixture
 function host_summary(result)
     weights = normalized_weights(result)
     samples = result.samples
-    mean = vec(samples * weights)
-    centered = samples .- mean
-    variance = vec(sum(abs2.(centered) .* reshape(weights, 1, :); dims=2))
+    mean, variance = if samples isa AbstractVector
+        scalar_mean = sum(samples .* weights)
+        [scalar_mean], [sum(abs2.(samples .- scalar_mean) .* weights)]
+    else
+        vector_mean = vec(samples * weights)
+        centered = samples .- vector_mean
+        vector_variance = vec(
+            sum(abs2.(centered) .* reshape(weights, 1, :); dims=2),
+        )
+        vector_mean, vector_variance
+    end
     ess = inv(sum(abs2, weights))
     mean_se = sqrt.(variance ./ ess)
     linear_weights = exp.(result.logweights)
@@ -160,8 +201,17 @@ function assert_assignment_counts(ids, masses, scheme)
     return counts
 end
 
-function correctness_case(device, ::Type{T}, scheme, case_index) where {T}
-    bank, context, expected_mean = static_mis_case(T, 4, 4)
+function correctness_case(
+    device,
+    ::Type{T},
+    scheme,
+    case_index;
+    scalar=false,
+) where {T}
+    bank, context, expected_mean = scalar ?
+                                   static_mis_scalar_case(T) :
+                                   static_mis_case(T, 4, 4)
+    target = scalar ? static_mis_scalar_target : static_mis_mixture_target
     algorithm = ImportanceSampling(
         bank;
         nsamples=CORRECTNESS_SAMPLES,
@@ -169,14 +219,14 @@ function correctness_case(device, ::Type{T}, scheme, case_index) where {T}
     )
     cpu = prepare_sampler(
         Xoshiro(STATIC_MIS_SEED + UInt(case_index)),
-        static_mis_mixture_target,
+        target,
         context,
         algorithm;
         threaded=false,
     )
     gpu_source = prepare_sampler(
         Xoshiro(STATIC_MIS_SEED + UInt(case_index)),
-        static_mis_mixture_target,
+        target,
         context,
         algorithm;
         threaded=true,
@@ -198,10 +248,11 @@ function correctness_case(device, ::Type{T}, scheme, case_index) where {T}
     @assert isfinite(device_normalizer)
 
     host_gpu = MLDataDevices.cpu_device()(first_result)
-    @assert host_gpu.samples isa Matrix{T}
+    @assert host_gpu.samples isa (scalar ? Vector{T} : Matrix{T})
     @assert host_gpu.logweights isa Vector
     @assert host_gpu.provenance.proposal_id isa Vector{Int}
-    @assert size(host_gpu.samples) == (4, CORRECTNESS_SAMPLES)
+    @assert size(host_gpu.samples) ==
+            (scalar ? (CORRECTNESS_SAMPLES,) : (4, CORRECTNESS_SAMPLES))
     counts = assert_assignment_counts(
         host_gpu.provenance.proposal_id,
         bank.masses,
@@ -240,6 +291,7 @@ function correctness_case(device, ::Type{T}, scheme, case_index) where {T}
     @assert transfers.bytes >= 3sizeof(T) + 3sizeof(UInt64)
     return (
         scalar_type=T,
+        sample_layout=scalar ? :scalar : :vector,
         scheme=scheme_name(scheme),
         counts,
         gpu=gpu_summary,
@@ -339,13 +391,23 @@ end
 function main()
     device = cuda_device()
     environment = environment_record()
-    correctness = RUN_CORRECTNESS ? [
+    vector_correctness = RUN_CORRECTNESS ? [
         correctness_case(device, T, scheme, case_index) for
         (case_index, (T, scheme)) in enumerate(Iterators.product(
             (Float32, Float64),
             static_mis_schemes(4),
         ))
     ] : NamedTuple[]
+    scalar_correctness = RUN_CORRECTNESS ? [
+        correctness_case(
+            device,
+            T,
+            StratifiedMixture(),
+            8 + case_index;
+            scalar=true,
+        ) for (case_index, T) in enumerate((Float32, Float64))
+    ] : NamedTuple[]
+    correctness = vcat(vector_correctness, scalar_correctness)
     benchmarks = RUN_BENCHMARKS ? [
         benchmark_case(device, T, scheme, proposal_count, dimension, nsamples) for
         T in (Float32, Float64) for

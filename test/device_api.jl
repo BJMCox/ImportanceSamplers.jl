@@ -108,9 +108,16 @@ MLDataDevices.functional(::KernelArgumentTestAccelerator) = true
 Adapt.adapt_storage(::KernelArgumentTestAccelerator, array::Array) =
     KernelArgumentTestArray(copy(array))
 
+struct LateFailAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
+MLDataDevices.functional(::LateFailAccelerator) = true
+Adapt.adapt_storage(::LateFailAccelerator, array::Array) =
+    KernelArgumentTestArray(copy(array))
+
 @eval ImportanceSamplers begin
     _owned_backend_rng(::Main.KernelArgumentTestAccelerator, seed::UInt64) =
         Random.Xoshiro(seed)
+    _owned_backend_rng(::Main.LateFailAccelerator, seed::UInt64) =
+        iszero(seed) ? Random.Xoshiro(seed) : error("late RNG construction failure")
 end
 
 const HOOK_ACCELERATOR_CURRENT = Ref(:caller)
@@ -594,7 +601,7 @@ end
     expected_source_rng = copy(getfield(source, :rng))
 
     @test IS._accelerator_proposal_limit(bank) === nothing
-    destination = device(source)
+    destination = @inferred device(source)
     method_state = getfield(destination, :method_state)
     packed = getfield(method_state, :bank)
     denominator = getfield(getfield(method_state, :design), :denominator)
@@ -623,6 +630,29 @@ end
     @test rand(getfield(source, :rng), UInt64) ==
           rand(expected_source_rng, UInt64)
 
+    full_source = prepare_sampler(
+        Random.Xoshiro(0x221d),
+        static_mis_device_target,
+        (shift=[0.25],),
+        ImportanceSampling(bank; nsamples=17, mis_scheme=StratifiedMixture());
+        threaded=true,
+    )
+    @test @inferred(device(full_source)) isa IS._PreparedImportanceSampler
+
+    late_source = prepare_sampler(
+        Random.Xoshiro(0x221e),
+        static_mis_device_target,
+        (shift=[0.25],),
+        algorithm;
+        threaded=true,
+    )
+    expected_late_rng = copy(getfield(late_source, :rng))
+    late_error = caught_device_error(() -> LateFailAccelerator()(late_source))
+    @test late_error isa SamplerDeviceError
+    @test late_error.reason === :accelerator_rng_unavailable
+    @test rand(getfield(late_source, :rng), UInt64) ==
+          rand(expected_late_rng, UInt64)
+
     generic = ProposalBank([TransferProposal([0.0]), TransferProposal([1.0])])
     factor = ProposalBank([
         FactorGaussian([0.0, 0.0], [1.0 0.0; 0.0 1.0]),
@@ -636,21 +666,11 @@ end
         ProductProposal((x=SphericalGaussian(0.0, 1.0),)),
         ProductProposal((x=SphericalGaussian(1.0, 1.0),)),
     ])
-    mixed_dimension = ProposalBank([
-        SphericalGaussian([0.0], 1.0),
-        SphericalGaussian([0.0, 1.0], 1.0),
-    ])
-    mixed_float = ProposalBank(Any[
-        SphericalGaussian(Float32[0], 1.0f0),
-        SphericalGaussian(Float64[0], 1.0),
-    ])
     limits = (
         generic => :generic_proposal_cpu_only,
         factor => :factor_proposal_cpu_only,
         transformed => :transformed_proposal_cpu_only,
         product => :product_proposal_cpu_only,
-        mixed_dimension => :mixed_dimension_proposal_cpu_only,
-        mixed_float => :mixed_float_proposal_cpu_only,
     )
     for (rejected_bank, reason) in limits
         @test IS._accelerator_proposal_limit(rejected_bank) === reason
@@ -674,6 +694,43 @@ end
         @test error isa SamplerDeviceError
         @test error.reason === reason
         @test rand(getfield(rejected, :rng), UInt64) == rand(expected_rng, UInt64)
+    end
+
+
+    for (seed, rejected_bank, error_type, message) in (
+        (
+            0x221f,
+            ProposalBank([
+                SphericalGaussian([0.0], 1.0),
+                SphericalGaussian([0.0, 1.0], 1.0),
+            ]),
+            DimensionMismatch,
+            "one common dimension",
+        ),
+        (
+            0x2220,
+            ProposalBank(Any[
+                SphericalGaussian(Float32[0], 1.0f0),
+                SphericalGaussian(Float64[0], 1.0),
+            ]),
+            ArgumentError,
+            "one floating type",
+        ),
+    )
+        rng = Random.Xoshiro(seed)
+        expected_rng = copy(rng)
+        error = caught_device_error() do
+            prepare_sampler(
+                rng,
+                static_mis_device_target,
+                (shift=[0.25],),
+                ImportanceSampling(rejected_bank; nsamples=17);
+                threaded=true,
+            )
+        end
+        @test error isa error_type
+        @test occursin(message, sprint(showerror, error))
+        @test rand(rng, UInt64) == rand(expected_rng, UInt64)
     end
 end
 

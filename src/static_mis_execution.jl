@@ -33,7 +33,36 @@ function _prepare_transferred_method_state(
     algorithm,
     method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
 )
-    return _copy_to_device(device, method_state)
+    bank = method_state.bank
+    transferred_bank = _PackedDiagonalGaussianBank(
+        _copy_to_device(device, bank.locations),
+        _copy_to_device(device, bank.scales),
+        _copy_to_device(device, bank.lognormalizers),
+        _copy_to_device(device, bank.logmasses),
+        _copy_to_device(device, bank.cdf),
+        _copy_to_device(device, bank.proposal_ids),
+        bank.layout,
+    )
+    design = method_state.design
+    transferred_design = _PreparedMISDesign(
+        design.assignment,
+        _transfer_static_mis_denominator(device, design.denominator),
+    )
+    return _PreparedStaticMIS(transferred_bank, transferred_design)
+end
+
+_transfer_static_mis_denominator(device, denominator) = denominator
+
+function _transfer_static_mis_denominator(
+    device,
+    denominator::_PartialMixtureDenominator,
+)
+    return _PartialMixtureDenominator(
+        _copy_to_device(device, denominator.group_of_slot),
+        _copy_to_device(device, denominator.offsets),
+        _copy_to_device(device, denominator.members),
+        _copy_to_device(device, denominator.logcoefficients),
+    )
 end
 
 _transferred_backend_state(
