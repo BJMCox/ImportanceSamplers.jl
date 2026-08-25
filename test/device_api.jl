@@ -639,6 +639,28 @@ end
     )
     @test @inferred(device(full_source)) isa IS._PreparedImportanceSampler
 
+    bigfloat_bank = ProposalBank(
+        [
+            SphericalGaussian([-1.0], 0.75),
+            SphericalGaussian([1.0], 1.25),
+        ],
+        BigFloat[1, 3],
+    )
+    bigfloat_source = prepare_sampler(
+        Random.Xoshiro(0x2221),
+        static_mis_device_target,
+        (shift=[0.25],),
+        ImportanceSampling(bigfloat_bank; nsamples=17);
+        threaded=true,
+    )
+    expected_bigfloat_rng = copy(getfield(bigfloat_source, :rng))
+    @test bigfloat_source.method_state.bank isa IS._ActiveProposalBank
+    bigfloat_error = caught_device_error(() -> device(bigfloat_source))
+    @test bigfloat_error isa SamplerDeviceError
+    @test bigfloat_error.reason === :generic_proposal_cpu_only
+    @test rand(getfield(bigfloat_source, :rng), UInt64) ==
+          rand(expected_bigfloat_rng, UInt64)
+
     late_source = prepare_sampler(
         Random.Xoshiro(0x221e),
         static_mis_device_target,

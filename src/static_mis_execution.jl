@@ -28,6 +28,10 @@ function _copy_accelerator_algorithm(
     return deepcopy(algorithm)
 end
 
+_accelerator_method_state_limit(
+    ::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+) = nothing
+
 function _prepare_transferred_method_state(
     device,
     algorithm,

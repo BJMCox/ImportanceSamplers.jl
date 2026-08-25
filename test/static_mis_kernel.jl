@@ -124,6 +124,26 @@ end
         @test vector.cdf == T[0.25, 1]
     end
 
+    coherent_bank = ProposalBank(
+        [SphericalGaussian(-1.0f0, 1.0f0), SphericalGaussian(1.0f0, 1.0f0)],
+        Float32[1.0f-8, 1.0f0],
+    )
+    coherent = @inferred ISK._pack_native_gaussian_bank(coherent_bank)
+    partial = prepare_sampler(
+        Random.Xoshiro(0x5408),
+        _ -> 0.0f0,
+        ImportanceSampling(
+            coherent_bank;
+            nsamples=8,
+            mis_scheme=PartialDeterministicMixture(((1, 2),)),
+        );
+        threaded=false,
+    )
+    check_static_mis_effective_coefficients(
+        coherent.cdf,
+        coherent.logmasses,
+        partial.method_state.design.denominator.logcoefficients,
+    )
 end
 
 @testset "packed native Gaussian bank validation precedes RNG" begin
@@ -270,7 +290,6 @@ end
 
 function static_mis_kernel_denominator(
     packed,
-    configured_bank,
     sample,
     generating_slot,
     scheme,
@@ -282,18 +301,20 @@ function static_mis_kernel_denominator(
         group = only(filter(group -> proposal_id in group, scheme.groups))
         [
             findfirst(==(id), packed.proposal_ids) for id in group if
-            !iszero(configured_bank.masses[id])
+            id in packed.proposal_ids
         ]
     else
         collect(eachindex(packed.proposal_ids))
     end
+    boundaries = BigFloat.(packed.cdf)
+    assignment_masses = diff(vcat(zero(BigFloat), boundaries))
     coefficients = if scheme isa StandardMIS
-        [one(eltype(packed.cdf))]
+        BigFloat[1]
     elseif scheme isa PartialDeterministicMixture
-        masses = [configured_bank.masses[packed.proposal_ids[slot]] for slot in slots]
+        masses = assignment_masses[slots]
         masses ./ sum(masses)
     else
-        exp.(packed.logmasses[slots])
+        assignment_masses[slots]
     end
     terms = [
         coefficients[index] *
@@ -303,7 +324,7 @@ function static_mis_kernel_denominator(
     return log(sum(terms))
 end
 
-function static_mis_kernel_oracle(rng, bank, packed, scheme, target, nsamples)
+function static_mis_kernel_oracle(rng, packed, scheme, target, nsamples)
     T = eltype(packed.locations)
     dimension = size(packed.locations, 1)
     uniforms = Vector{eltype(packed.cdf)}(undef, nsamples)
@@ -327,7 +348,6 @@ function static_mis_kernel_oracle(rng, bank, packed, scheme, target, nsamples)
     logweights = [
         target(samples[sample_index]) - static_mis_kernel_denominator(
             packed,
-            bank,
             samples[sample_index],
             assignments[sample_index],
             scheme,
@@ -383,7 +403,6 @@ end
             packed = sampler.method_state.bank
             oracle = static_mis_kernel_oracle(
                 copy(sampler.rng),
-                bank,
                 packed,
                 scheme,
                 target,

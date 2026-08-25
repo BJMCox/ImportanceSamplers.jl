@@ -26,6 +26,8 @@ end
 
 Adapt.@adapt_structure _PreparedStaticMIS
 
+_accelerator_method_state_limit(::_PreparedStaticMIS) = :generic_proposal_cpu_only
+
 struct _StaticMISRandomBuffers{A}
     assignments::A
 end
@@ -203,7 +205,6 @@ function _compile_partial_denominator(bank, active_bank, groups)
     for group in groups
         isempty(group) && throw(ArgumentError("partial-MIS groups cannot be empty"))
         first_member = length(members) + 1
-        group_mass = zero(eltype(bank.masses))
         for proposal_id in group
             proposal_id isa Integer && proposal_id !== true && proposal_id !== false || throw(
                 ArgumentError("partial-MIS proposal IDs must be integers"),
@@ -219,18 +220,24 @@ function _compile_partial_denominator(bank, active_bank, groups)
             slot = active_slot[id]
             iszero(slot) && continue
             push!(members, slot)
-            group_mass += bank.masses[id]
         end
         first_member > length(members) && continue
 
         active_group += 1
+        group_logmass = eltype(active_bank.logmasses)(-Inf)
+        for member_index in first_member:length(members)
+            slot = members[member_index]
+            group_logmass = LogExpFunctions.logaddexp(
+                group_logmass,
+                active_bank.logmasses[slot],
+            )
+        end
         for member_index in first_member:length(members)
             slot = members[member_index]
             group_of_slot[slot] = active_group
-            proposal_id = active_bank.proposal_ids[slot]
             push!(
                 logcoefficients,
-                log(bank.masses[proposal_id] / group_mass),
+                active_bank.logmasses[slot] - group_logmass,
             )
         end
         push!(offsets, length(members) + 1)

@@ -8,6 +8,7 @@ const STATIC_MIS_CPU_SEED = 0x7374617469636370
 const STATIC_MIS_CPU_COMMAND =
     "julia --project=validation validation/reproducers/static_mis.jl"
 const STATIC_MIS_DIRECT_SEED = 0x7374617469636d69
+const STATIC_MIS_DIRECT_SAMPLES = 10_003
 
 include(joinpath(@__DIR__, "..", "static_mis_capabilities.jl"))
 
@@ -18,16 +19,20 @@ include(joinpath(@__DIR__, "..", "static_mis_capabilities.jl"))
     return largest + log1p(exp(min(left, right) - largest))
 end
 
-function bank_logdensity(bank, sample; proposal_ids=eachindex(bank.proposals))
+function bank_logdensity(
+    bank::ProposalBank{P,M},
+    sample;
+    proposal_ids=eachindex(bank.proposals),
+) where {P,T,M<:AbstractVector{T}}
     total_mass = sum(bank.masses[proposal_ids])
-    value = -Inf
+    value = T(-Inf)
     for proposal_id in proposal_ids
         iszero(bank.masses[proposal_id]) && continue
         term = log(bank.masses[proposal_id] / total_mass) +
                DensityInterface.logdensityof(bank.proposals[proposal_id], sample)
         value = logaddexp(value, term)
     end
-    return value
+    return value::T
 end
 
 function denominator_logdensity(bank, ::Union{StratifiedMixture,RandomMixture}, sample, id)
@@ -158,27 +163,36 @@ function check_direct_normalizer_fixtures()
         row in STATIC_MIS_CAPABILITY_ROWS if !isnothing(row.direct) for
         T in row.direct.types for scheme in STATIC_MIS_COMPLETE_SCHEMES
     ]
+    @test length(cases) == 32
     for (case_index, case) in enumerate(cases)
-        case.type === Float32 || continue
         bank = case.row.factory(case.type)
         result = importance_sample(
             Xoshiro(STATIC_MIS_DIRECT_SEED + UInt(case_index)),
             sample -> bank_logdensity(bank, sample),
-            ImportanceSampling(bank; nsamples=10_003, mis_scheme=case.scheme.value);
+            ImportanceSampling(
+                bank;
+                nsamples=STATIC_MIS_DIRECT_SAMPLES,
+                mis_scheme=case.scheme.value,
+            );
             threaded=false,
         )
         weights = exp.(result.logweights)
         normalizer = sum(weights) / length(weights)
         variance = sum(weight -> abs2(weight - normalizer), weights) / length(weights)
         lognormalizer_se = sqrt(variance / length(weights)) / normalizer
-        @test abs(lognormalizer(result)) <= 7lognormalizer_se
-        @test abs(lognormalizer(result)) < 0.05
+        @testset "$(case.row.bank), $(case.type), $(case.scheme.label)" begin
+            @test abs(lognormalizer(result)) <= max(
+                7lognormalizer_se,
+                4096eps(case.type),
+            )
+        end
     end
     return nothing
 end
 
 function check_direct_sample_shapes()
     rows = filter(row -> !isnothing(row.direct), STATIC_MIS_CAPABILITY_ROWS)
+    @test length(rows) == 4
     for (case_index, row) in enumerate(rows)
         bank = row.factory(Float32)
         location = getfield(first(bank.proposals), :location)

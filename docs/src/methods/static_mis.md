@@ -25,6 +25,11 @@ assigned and never enters a denominator. Every run returns exactly `nsamples`
 samples. The aligned generating IDs are in
 `result.provenance.proposal_id`.
 
+A configured positive mass that would become zero during floating conversion or
+normalization is rejected. During preparation, denominator coefficients are
+derived from the finalized floating-point CDF intervals, so assignment and
+weighting use the same effective masses.
+
 `ProposalBank` is deliberately not a mixture distribution: it defines neither
 `rand` nor `DensityInterface.logdensityof`. Assignment and denominator choice
 are separate parts of an MIS scheme. A distribution package's mixture object

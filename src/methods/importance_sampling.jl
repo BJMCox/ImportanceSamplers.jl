@@ -306,6 +306,8 @@ _copy_accelerator_algorithm(device, algorithm, method_state) =
 _prepare_transferred_method_state(device, algorithm, method_state) =
     _prepare_method_state(algorithm)
 
+_accelerator_method_state_limit(method_state) = nothing
+
 function _clone_rng(device, rng::Random.AbstractRNG)
     cloned = try
         copy(rng)
@@ -410,6 +412,10 @@ function _transfer_prepared_sampler(
     )
     proposal_limit = _accelerator_proposal_limit(sampler.algorithm.proposal)
     isnothing(proposal_limit) || throw(SamplerDeviceError(device, proposal_limit))
+    method_state_limit = _accelerator_method_state_limit(sampler.method_state)
+    isnothing(method_state_limit) || throw(
+        SamplerDeviceError(device, method_state_limit),
+    )
     return _with_backend_device(device) do
         algorithm = _copy_accelerator_algorithm(
             device,

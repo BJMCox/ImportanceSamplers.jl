@@ -104,6 +104,27 @@ end
     @test eltype(ProposalBank(proposals, Float64[1, 1]).masses) === Float64
     @test eltype(ProposalBank(proposals, BigFloat[1, 1]).masses) === BigFloat
 
+    scaling_underflow = caught_static_mis_failure() do
+        ProposalBank(proposals, [nextfloat(0.0), floatmax(Float64)])
+    end
+    @test scaling_underflow isa ArgumentError
+    @test occursin(
+        "positive proposal mass",
+        sprint(showerror, scaling_underflow),
+    )
+
+    final_underflow = caught_static_mis_failure() do
+        ProposalBank(
+            [proposals; first(proposals)],
+            [nextfloat(0.0), 1.0, 1.0],
+        )
+    end
+    @test final_underflow isa ArgumentError
+    @test occursin(
+        "positive proposal mass",
+        sprint(showerror, final_underflow),
+    )
+
     @test_throws ArgumentError ProposalBank(typeof(proposals)())
     @test_throws ArgumentError ProposalBank(proposals, [1])
     @test_throws ArgumentError ProposalBank(proposals, Bool[true, false])
@@ -118,6 +139,35 @@ end
     @test_throws ArgumentError ProposalBank(proposals, ["1", "3"])
     @test_throws MethodError ProposalBank(Tuple(proposals))
     @test_throws MethodError ProposalBank(proposals, (1, 3))
+end
+
+@testset "Float32 assignment and denominator masses are coherent" begin
+    proposals = [StaticMISGaussian(-1.0), StaticMISGaussian(1.0)]
+    bank = ProposalBank(proposals, Float32[1.0f-8, 1.0f0])
+    full = prepare_sampler(
+        Random.Xoshiro(0x5310),
+        _ -> 0.0,
+        ImportanceSampling(bank; nsamples=8, mis_scheme=StratifiedMixture());
+        threaded=false,
+    )
+    partial = prepare_sampler(
+        Random.Xoshiro(0x5311),
+        _ -> 0.0,
+        ImportanceSampling(
+            bank;
+            nsamples=8,
+            mis_scheme=PartialDeterministicMixture(((1, 2),)),
+        );
+        threaded=false,
+    )
+
+    active_bank = full.method_state.bank
+    @test active_bank.proposal_ids == [1, 2]
+    check_static_mis_effective_coefficients(
+        active_bank.cdf,
+        active_bank.logmasses,
+        partial.method_state.design.denominator.logcoefficients,
+    )
 end
 
 @testset "stratified static-MIS identity and preparation" begin

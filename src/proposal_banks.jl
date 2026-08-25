@@ -15,7 +15,9 @@ abstract type AbstractProposalPopulation end
 
 Construct an explicit proposal population with copied proposals and normalized
 nonnegative masses. Omitted masses are equal. The readable `proposals` and
-`masses` fields preserve input order; masses sum to one.
+`masses` fields preserve input order; masses sum to one. A configured positive
+mass must remain positive through floating conversion and normalization;
+otherwise construction rejects the bank instead of making that proposal inert.
 
 Zero-mass proposals remain in the configuration and retain their stable
 one-based IDs, but are neither assigned nor evaluated. Positive-mass proposals
@@ -54,6 +56,7 @@ struct ProposalBank{P<:AbstractVector,M<:AbstractVector} <: AbstractProposalPopu
         )
 
         floating_masses = floating_type.(masses)
+        _require_preserved_positive_masses(masses, floating_masses, "floating conversion")
         all(isfinite, floating_masses) || throw(ArgumentError("masses must be finite"))
         all(>=(zero(floating_type)), floating_masses) || throw(
             ArgumentError("masses must be nonnegative"),
@@ -63,14 +66,35 @@ struct ProposalBank{P<:AbstractVector,M<:AbstractVector} <: AbstractProposalPopu
             ArgumentError("at least one mass must be positive"),
         )
 
-        normalized_masses = floating_masses ./ maximum_mass
-        normalized_masses ./= sum(normalized_masses)
+        scaled_masses = floating_masses ./ maximum_mass
+        _require_preserved_positive_masses(
+            floating_masses,
+            scaled_masses,
+            "maximum scaling",
+        )
+        normalized_masses = scaled_masses ./ sum(scaled_masses)
+        _require_preserved_positive_masses(
+            scaled_masses,
+            normalized_masses,
+            "final normalization",
+        )
         copied_proposals = copy(proposals)
         return new{typeof(copied_proposals),typeof(normalized_masses)}(
             copied_proposals,
             normalized_masses,
         )
     end
+end
+
+function _require_preserved_positive_masses(source, destination, operation)
+    for index in eachindex(source, destination)
+        source[index] > 0 && iszero(destination[index]) && throw(
+            ArgumentError(
+                "positive proposal mass at index $index became zero during $operation",
+            ),
+        )
+    end
+    return nothing
 end
 
 struct _ActiveProposalBank{P,M,C,I}
@@ -123,16 +147,20 @@ function _prepare_active_proposal_metadata(bank::ProposalBank)
     masses ./= sum(masses)
     cdf = cumsum(masses)
     cdf[end] = one(eltype(cdf))
+    logmasses = similar(cdf)
     previous = zero(eltype(cdf))
-    for boundary in cdf
+    for slot in eachindex(cdf)
+        boundary = cdf[slot]
         boundary > previous || throw(
             ArgumentError(
                 "every positive proposal mass must retain a positive assignment interval",
             ),
         )
+        logmasses[slot] = log(boundary - previous)
         previous = boundary
     end
-    return proposal_ids, masses, cdf
+    logmasses .-= LogExpFunctions.logsumexp(logmasses)
+    return proposal_ids, logmasses, cdf
 end
 
 function _is_packable_native_gaussian(proposal)
@@ -144,14 +172,14 @@ function _is_packable_native_gaussian(proposal)
 end
 
 function _pack_native_gaussian_bank(bank::ProposalBank)
-    proposal_ids, masses, cdf = _prepare_active_proposal_metadata(bank)
-    return _pack_native_gaussian_bank(bank, proposal_ids, masses, cdf)
+    proposal_ids, logmasses, cdf = _prepare_active_proposal_metadata(bank)
+    return _pack_native_gaussian_bank(bank, proposal_ids, logmasses, cdf)
 end
 
-function _pack_native_gaussian_bank(bank, proposal_ids, masses, cdf)
+function _pack_native_gaussian_bank(bank, proposal_ids, logmasses, cdf)
     proposals = view(bank.proposals, proposal_ids)
     all(_is_packable_native_gaussian, proposals) || return nothing
-    eltype(masses) <: _NativeGaussianFloat || return nothing
+    eltype(logmasses) <: _NativeGaussianFloat || return nothing
 
     first_proposal = first(proposals)
     first_location = first_proposal.location
@@ -200,7 +228,7 @@ function _pack_native_gaussian_bank(bank, proposal_ids, masses, cdf)
         locations,
         scales,
         lognormalizers,
-        log.(masses),
+        logmasses,
         cdf,
         proposal_ids,
         layout,
@@ -208,7 +236,7 @@ function _pack_native_gaussian_bank(bank, proposal_ids, masses, cdf)
 end
 
 function _prepare_active_proposal_bank(bank::ProposalBank)
-    proposal_ids, masses, cdf = _prepare_active_proposal_metadata(bank)
+    proposal_ids, logmasses, cdf = _prepare_active_proposal_metadata(bank)
     proposal_type = eltype(bank.proposals)
     native_candidate = Val(
         proposal_type <: _GaussianProposal || !isconcretetype(proposal_type),
@@ -216,7 +244,7 @@ function _prepare_active_proposal_bank(bank::ProposalBank)
     return _prepare_active_proposal_bank(
         bank,
         proposal_ids,
-        masses,
+        logmasses,
         cdf,
         native_candidate,
     )
@@ -225,26 +253,26 @@ end
 function _prepare_active_proposal_bank(
     bank,
     proposal_ids,
-    masses,
+    logmasses,
     cdf,
     ::Val{true},
 )
-    packed = _pack_native_gaussian_bank(bank, proposal_ids, masses, cdf)
+    packed = _pack_native_gaussian_bank(bank, proposal_ids, logmasses, cdf)
     isnothing(packed) || return packed
-    return _prepare_generic_active_proposal_bank(bank, proposal_ids, masses, cdf)
+    return _prepare_generic_active_proposal_bank(bank, proposal_ids, logmasses, cdf)
 end
 
 function _prepare_active_proposal_bank(
     bank,
     proposal_ids,
-    masses,
+    logmasses,
     cdf,
     ::Val{false},
 )
-    return _prepare_generic_active_proposal_bank(bank, proposal_ids, masses, cdf)
+    return _prepare_generic_active_proposal_bank(bank, proposal_ids, logmasses, cdf)
 end
 
-function _prepare_generic_active_proposal_bank(bank, proposal_ids, masses, cdf)
+function _prepare_generic_active_proposal_bank(bank, proposal_ids, logmasses, cdf)
     proposal_type = eltype(bank.proposals)
     isconcretetype(proposal_type) || throw(
         ArgumentError(
@@ -254,7 +282,7 @@ function _prepare_generic_active_proposal_bank(bank, proposal_ids, masses, cdf)
     proposals = bank.proposals[proposal_ids]
     return _ActiveProposalBank(
         proposals,
-        log.(masses),
+        logmasses,
         cdf,
         proposal_ids,
     )

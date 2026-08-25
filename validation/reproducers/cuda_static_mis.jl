@@ -105,11 +105,9 @@ function static_mis_direct_case(row, ::Type{T}) where {T}
     else
         error("unknown directly tested sample layout: $layout")
     end
-    proposal_scales = T[
-        getfield(getfield(proposal, :scale), :scale) for proposal in bank.proposals
-    ]
     if layout === :scalar
-        active_scales = proposal_scales[active]
+        scales = T[static_mis_proposal_scale(proposal, 1) for proposal in bank.proposals]
+        active_scales = scales[active]
         context = (
             locations=locations[active],
             scales=active_scales,
@@ -119,7 +117,10 @@ function static_mis_direct_case(row, ::Type{T}) where {T}
         )
         expected_mean = T[sum(locations .* masses)]
     else
-        scales = repeat(reshape(proposal_scales, 1, :), size(locations, 1), 1)
+        scales = T[
+            static_mis_proposal_scale(proposal, coordinate) for
+            coordinate in axes(locations, 1), proposal in bank.proposals
+        ]
         active_scales = scales[:, active]
         context = (
             locations=locations[:, active],
@@ -134,6 +135,13 @@ function static_mis_direct_case(row, ::Type{T}) where {T}
         expected_mean = locations * masses
     end
     return bank, context, expected_mean
+end
+
+@inline function static_mis_proposal_scale(proposal, coordinate)
+    scale = getfield(proposal, :scale)
+    return hasfield(typeof(scale), :scale) ?
+           getfield(scale, :scale) :
+           getfield(scale, :scales)[coordinate]
 end
 
 function static_mis_scheme(label, proposal_count)
@@ -428,7 +436,7 @@ function main()
         row in STATIC_MIS_CAPABILITY_ROWS if !isnothing(row.direct) for
         T in row.direct.types for scheme in row.direct.schemes
     ]
-    @assert length(direct_cases) == 16
+    @assert length(direct_cases) == 32
     correctness = RUN_CORRECTNESS ? [
         correctness_case(
             device,
@@ -439,7 +447,7 @@ function main()
         ) for (case_index, case) in enumerate(direct_cases)
     ] : NamedTuple[]
     @assert correctness isa Vector
-    @assert length(correctness) == (RUN_CORRECTNESS ? 16 : 0)
+    @assert length(correctness) == (RUN_CORRECTNESS ? length(direct_cases) : 0)
     direct_types = unique(case.type for case in direct_cases)
     benchmarks = RUN_BENCHMARKS ? [
         benchmark_case(device, T, scheme, proposal_count, dimension, nsamples) for

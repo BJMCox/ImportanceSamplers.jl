@@ -48,21 +48,27 @@ const STATIC_MIS_CAPABILITY_ROWS = (
     (
         bank="vector diagonal Gaussians",
         cpu="packed CPU execution",
-        factory=T -> ProposalBank([DiagonalGaussian(fill(T(x), 2), T[s, 2s]) for (x, s) in ((-1, 0.7), (0, 1.1), (1, 0.8), (2, 1.35))]),
+        factory=T -> ProposalBank(
+            [
+                DiagonalGaussian(fill(T(x), 2), T[s, 1.05s]) for
+                (x, s) in _STATIC_MIS_DIRECT_SPHERICAL_PARAMETERS
+            ],
+            T[1, 3, 0, 2],
+        ),
         device=:supported,
-        direct=nothing,
+        direct=merge(_STATIC_MIS_A100_ALL_SCHEMES, (sample_layout=:vector,)),
     ),
     (
         bank="mixed spherical/diagonal Gaussians with one layout, dimension, and float type",
         cpu="packed CPU execution",
         factory=T -> ProposalBank(Any[
-            SphericalGaussian(zeros(T, 2), one(T)),
-            DiagonalGaussian(ones(T, 2), T[0.75, 1.25]),
-            SphericalGaussian(fill(T(2), 2), T(1.1)),
-            DiagonalGaussian(fill(T(3), 2), T[1.25, 0.75]),
-        ], T[1, 3, 2, 4]),
+            SphericalGaussian(fill(T(-0.45), 2), one(T)),
+            DiagonalGaussian(fill(T(-0.1), 2), T[1.0, 1.2]),
+            SphericalGaussian(fill(T(0.2), 2), T(0.9)),
+            DiagonalGaussian(fill(T(0.5), 2), T[1.2, 1.0]),
+        ], T[1, 3, 0, 2]),
         device=:supported,
-        direct=nothing,
+        direct=merge(_STATIC_MIS_A100_ALL_SCHEMES, (sample_layout=:vector,)),
     ),
     (
         bank="factor Gaussian banks",
