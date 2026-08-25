@@ -14,6 +14,8 @@ const _STATIC_MIS_A100_ALL_SCHEMES = (
     types=(Float32, Float64),
     schemes=Tuple(scheme.label for scheme in STATIC_MIS_COMPLETE_SCHEMES),
 )
+const _STATIC_MIS_DIRECT_SPHERICAL_PARAMETERS =
+    ((-0.45, 1.0), (-0.1, 1.1), (0.2, 0.9), (0.5, 1.2))
 
 const STATIC_MIS_CAPABILITY_ROWS = (
     (
@@ -27,7 +29,7 @@ const STATIC_MIS_CAPABILITY_ROWS = (
         bank="scalar spherical Gaussians",
         cpu="packed CPU execution",
         factory=T -> ProposalBank(
-            [SphericalGaussian(T(x), T(s)) for (x, s) in ((-0.45, 1.0), (-0.1, 1.1), (0.2, 0.9), (0.5, 1.2))],
+            [SphericalGaussian(T(x), T(s)) for (x, s) in _STATIC_MIS_DIRECT_SPHERICAL_PARAMETERS],
             T[1, 3, 0, 2],
         ),
         device=:supported,
@@ -37,7 +39,7 @@ const STATIC_MIS_CAPABILITY_ROWS = (
         bank="vector spherical Gaussians",
         cpu="packed CPU execution",
         factory=T -> ProposalBank(
-            [SphericalGaussian(fill(T(x), 2), T(s)) for (x, s) in ((-1, 0.7), (0, 1.1), (1, 0.8), (2, 1.35))],
+            [SphericalGaussian(fill(T(x), 2), T(s)) for (x, s) in _STATIC_MIS_DIRECT_SPHERICAL_PARAMETERS],
             T[1, 3, 0, 2],
         ),
         device=:supported,

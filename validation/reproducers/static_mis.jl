@@ -152,17 +152,19 @@ function check_generating_and_partial_identities()
     return nothing
 end
 
-function check_scalar_direct_fixture()
-    row = only(filter(
-        row -> !isnothing(row.direct) && row.direct.sample_layout === :scalar,
-        STATIC_MIS_CAPABILITY_ROWS,
-    ))
-    for (case_index, scheme) in enumerate(STATIC_MIS_COMPLETE_SCHEMES)
-        bank = row.factory(Float32)
+function check_direct_normalizer_fixtures()
+    cases = [
+        (row=row, type=T, scheme=scheme) for
+        row in STATIC_MIS_CAPABILITY_ROWS if !isnothing(row.direct) for
+        T in row.direct.types for scheme in STATIC_MIS_COMPLETE_SCHEMES
+    ]
+    for (case_index, case) in enumerate(cases)
+        case.type === Float32 || continue
+        bank = case.row.factory(case.type)
         result = importance_sample(
             Xoshiro(STATIC_MIS_DIRECT_SEED + UInt(case_index)),
             sample -> bank_logdensity(bank, sample),
-            ImportanceSampling(bank; nsamples=10_003, mis_scheme=scheme.value);
+            ImportanceSampling(bank; nsamples=10_003, mis_scheme=case.scheme.value);
             threaded=false,
         )
         weights = exp.(result.logweights)
@@ -170,6 +172,7 @@ function check_scalar_direct_fixture()
         variance = sum(weight -> abs2(weight - normalizer), weights) / length(weights)
         lognormalizer_se = sqrt(variance / length(weights)) / normalizer
         @test abs(lognormalizer(result)) <= 7lognormalizer_se
+        @test abs(lognormalizer(result)) < 0.05
     end
     return nothing
 end
@@ -208,7 +211,7 @@ function main()
         check_full_mixture_identities()
         check_stratified_count_bound()
         check_generating_and_partial_identities()
-        check_scalar_direct_fixture()
+        check_direct_normalizer_fixtures()
         check_direct_sample_shapes()
     end
     return (
