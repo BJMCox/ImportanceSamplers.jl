@@ -137,6 +137,19 @@ end
     ]
 end
 
+@testset "DM-PMC large Float32 round counts stay exact" begin
+    round_size = 2^24 + 3
+    masses = Float32[0.5, 0.5]
+    first_round = @inferred DMPMCIS._dm_pmc_round_counts(masses, round_size, 1)
+    second_round = @inferred DMPMCIS._dm_pmc_round_counts(masses, round_size, 2)
+
+    @test first_round == [8_388_610, 8_388_609]
+    @test second_round == [8_388_609, 8_388_610]
+    @test sum(first_round) == round_size
+    @test sum(second_round) == round_size
+    @test @allocated(DMPMCIS._dm_pmc_round_counts(masses, round_size, 1)) < 1_000_000
+end
+
 @testset "DM-PMC allocation rejects uncovered active proposals before RNG use" begin
     bank = ProposalBank(
         [SphericalGaussian(Float64(id), 1.0) for id in 1:3],
@@ -225,6 +238,83 @@ end
     @test configured_bank.proposals == original_proposals
     @test configured_bank.masses == original_masses
     @test inert_generic.draw_count[] == 0
+end
+
+@testset "DM-PMC Float32 CPU transfer converts complete Gaussian state" begin
+    diagonal_bank = ProposalBank(
+        [
+            DiagonalGaussian([-1.0, 0.0], [1.0, 2.0]),
+            DiagonalGaussian([1.0, 0.0], [2.0, 1.0]),
+        ],
+        [3.0, 1.0],
+    )
+    factor_bank = ProposalBank(
+        [
+            FactorGaussian([-1.0, 0.0], [1.0 0.0; 0.25 2.0]),
+            FactorGaussian([1.0, 0.0], [2.0 0.0; -0.25 1.0]),
+        ],
+        [1.0, 3.0],
+    )
+    diagonal_source = prepare_sampler(
+        Random.Xoshiro(0x5607),
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(diagonal_bank; rounds=2, round_size=[4, 5]);
+        threaded=false,
+    )
+    factor_source = prepare_sampler(
+        Random.Xoshiro(0x5608),
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(factor_bank; rounds=2, round_size=4);
+        threaded=false,
+    )
+    cpu32 = MLDataDevices.cpu_device(Float32)
+    diagonal = cpu32(diagonal_source)
+    factor = cpu32(factor_source)
+
+    @test eltype(diagonal.algorithm.bank.masses) === Float32
+    @test all(
+        proposal -> eltype(proposal.location) === Float32,
+        diagonal.algorithm.bank.proposals,
+    )
+    @test all(
+        proposal -> eltype(proposal.scale.scales) === Float32,
+        diagonal.algorithm.bank.proposals,
+    )
+    @test all(
+        proposal -> proposal.lognormalizer isa Float32,
+        diagonal.algorithm.bank.proposals,
+    )
+    @test eltype(diagonal.method_state.bank.locations) === Float32
+    @test eltype(diagonal.method_state.bank.scales) === Float32
+    @test eltype(diagonal.method_state.bank.lognormalizers) === Float32
+    @test eltype(diagonal.method_state.bank.logmasses) === Float32
+    @test eltype(diagonal.method_state.plan.logcoefficients) === Float32
+    @test diagonal.method_state.bank.proposal_ids ==
+          diagonal_source.method_state.bank.proposal_ids == [2, 1]
+
+    @test eltype(factor.algorithm.bank.masses) === Float32
+    @test all(
+        proposal -> eltype(proposal.location) === Float32,
+        factor.algorithm.bank.proposals,
+    )
+    @test all(
+        proposal -> eltype(proposal.scale.factor) === Float32,
+        factor.algorithm.bank.proposals,
+    )
+    @test all(
+        proposal -> proposal.lognormalizer isa Float32,
+        factor.algorithm.bank.proposals,
+    )
+    @test eltype(factor.method_state.bank.locations) === Float32
+    @test eltype(factor.method_state.bank.factors) === Float32
+    @test eltype(factor.method_state.bank.lognormalizers) === Float32
+    @test eltype(factor.method_state.bank.logmasses) === Float32
+    @test eltype(factor.method_state.plan.logcoefficients) === Float32
+    @test factor.method_state.bank.proposal_ids ==
+          factor_source.method_state.bank.proposal_ids == [1, 2]
+
+    @test eltype(diagonal_source.method_state.bank.locations) === Float64
+    @test eltype(factor_source.method_state.bank.locations) === Float64
 end
 
 @testset "DM-PMC rejects unsupported banks before RNG use" begin

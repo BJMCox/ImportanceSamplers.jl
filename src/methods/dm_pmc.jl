@@ -106,6 +106,43 @@ function _prepare_dm_pmc_bank(bank::ProposalBank)
     return packed
 end
 
+function _dm_pmc_round_counts(active_masses, round_size, round)
+    active_count = length(active_masses)
+    exact_masses = Vector{Rational{BigInt}}(undef, active_count)
+    for slot in eachindex(active_masses)
+        exact_masses[slot] = rationalize(
+            BigInt,
+            active_masses[slot];
+            tol=0,
+        )
+    end
+    total_mass = sum(exact_masses)
+    counts = Vector{Int}(undef, active_count)
+    remainders = similar(exact_masses)
+    for slot in eachindex(exact_masses)
+        quota = exact_masses[slot] * round_size / total_mass
+        counts[slot] = floor(Int, quota)
+        remainders[slot] = quota - counts[slot]
+    end
+
+    remaining = round_size - sum(counts)
+    0 <= remaining < active_count || error("invalid DM-PMC allocation remainder")
+    first_tie_slot = mod1(round, active_count)
+    tie_order = collect(1:active_count)
+    sort!(
+        tie_order;
+        by=slot -> (
+            -remainders[slot],
+            mod(slot - first_tie_slot, active_count),
+        ),
+        alg=Base.Sort.MergeSort,
+    )
+    for index in 1:remaining
+        counts[tie_order[index]] += 1
+    end
+    return counts
+end
+
 function _dm_pmc_allocation_plan(bank, active_masses, schedule)
     active_count = length(bank.proposal_ids)
     rounds = length(schedule)
@@ -113,33 +150,11 @@ function _dm_pmc_allocation_plan(bank, active_masses, schedule)
     assignments = zeros(Int, maximum(schedule), rounds)
     logcoefficients = Matrix{eltype(active_masses)}(undef, active_count, rounds)
     offsets = Vector{Int}(undef, rounds + 1)
-    remainders = similar(active_masses)
-    tie_order = collect(1:active_count)
     offsets[1] = 1
 
     for round in eachindex(schedule)
         round_size = schedule[round]
-        for slot in eachindex(active_masses)
-            quota = active_masses[slot] * round_size
-            count = floor(Int, quota)
-            counts[slot, round] = count
-            remainders[slot] = quota - count
-        end
-
-        remaining = round_size - sum(view(counts, :, round))
-        0 <= remaining <= active_count || error("invalid DM-PMC allocation remainder")
-        first_tie_slot = mod1(round, active_count)
-        sort!(
-            tie_order;
-            by=slot -> (
-                -remainders[slot],
-                mod(slot - first_tie_slot, active_count),
-            ),
-            alg=Base.Sort.MergeSort,
-        )
-        for index in 1:remaining
-            counts[tie_order[index], round] += 1
-        end
+        counts[:, round] .= _dm_pmc_round_counts(active_masses, round_size, round)
 
         all(>(0), view(counts, :, round)) || throw(
             ArgumentError(
@@ -187,9 +202,30 @@ function _allocate_random_buffers(
     return _NoRandomBuffers()
 end
 
+function _copy_dm_pmc_active_proposal(device, proposal::_GaussianProposal)
+    adapted = _copy_to_device(device, proposal)
+    T = _gaussian_float_type(adapted.location)
+    return _GaussianProposal(
+        adapted.family,
+        adapted.location,
+        adapted.scale,
+        convert(T, adapted.lognormalizer),
+    )
+end
+
+function _copy_dm_pmc_bank(device, bank::ProposalBank)
+    proposals = map(eachindex(bank.proposals, bank.masses)) do proposal_id
+        proposal = bank.proposals[proposal_id]
+        iszero(bank.masses[proposal_id]) && return deepcopy(proposal)
+        return _copy_dm_pmc_active_proposal(device, proposal)
+    end
+    masses = _copy_to_device(device, bank.masses)
+    return ProposalBank(proposals, masses)
+end
+
 function _copy_algorithm(device, algorithm::DeterministicMixturePMC)
     return DeterministicMixturePMC(
-        _copy_to_device(device, algorithm.bank);
+        _copy_dm_pmc_bank(device, algorithm.bank);
         rounds=algorithm.rounds,
         round_size=algorithm.round_size,
     )
