@@ -144,25 +144,10 @@ end
            getfield(scale, :scales)[coordinate]
 end
 
-function static_mis_scheme(label, proposal_count)
-    label === :stratified_mixture && return StratifiedMixture()
-    label === :random_mixture && return RandomMixture()
-    label === :standard_mis && return StandardMIS()
-    label === :partial_deterministic_mixture && return PartialDeterministicMixture(
-        (Tuple(1:2:proposal_count), Tuple(2:2:proposal_count)),
-    )
-    error("unknown static-MIS scheme metadata label: $label")
-end
-
 static_mis_schemes(proposal_count) = Tuple(
-    static_mis_scheme(scheme.label, proposal_count) for
+    (label=scheme.label, value=scheme.factory(proposal_count)) for
     scheme in STATIC_MIS_COMPLETE_SCHEMES
 )
-
-scheme_name(::StratifiedMixture) = :stratified_mixture
-scheme_name(::RandomMixture) = :random_mixture
-scheme_name(::StandardMIS) = :standard_mis
-scheme_name(::PartialDeterministicMixture) = :partial_deterministic_mixture
 
 function host_summary(result)
     weights = normalized_weights(result)
@@ -255,7 +240,7 @@ function correctness_case(
     algorithm = ImportanceSampling(
         bank;
         nsamples=CORRECTNESS_SAMPLES,
-        mis_scheme=scheme,
+        mis_scheme=scheme.value,
     )
     cpu = prepare_sampler(
         Xoshiro(STATIC_MIS_SEED + UInt(case_index)),
@@ -296,9 +281,9 @@ function correctness_case(
     counts = assert_assignment_counts(
         host_gpu.provenance.proposal_id,
         bank.masses,
-        scheme,
+        scheme.value,
     )
-    if scheme isa Union{StratifiedMixture,RandomMixture}
+    if scheme.value isa Union{StratifiedMixture,RandomMixture}
         @assert maximum(abs, host_gpu.logweights) <= T(4096) * eps(T)
     end
 
@@ -332,7 +317,7 @@ function correctness_case(
     return (
         scalar_type=T,
         sample_layout=row.direct.sample_layout,
-        scheme=scheme_name(scheme),
+        scheme=scheme.label,
         counts,
         gpu=gpu_summary,
         cpu=cpu_summary,
@@ -358,7 +343,7 @@ function benchmark_case(device, ::Type{T}, scheme, proposal_count, dimension, ns
         Xoshiro(STATIC_MIS_SEED),
         static_mis_mixture_target,
         context,
-        ImportanceSampling(bank; nsamples, mis_scheme=scheme);
+        ImportanceSampling(bank; nsamples, mis_scheme=scheme.value);
         threaded=true,
     ) |> device
     warm_result = synchronized_sample!(sampler)
@@ -369,7 +354,7 @@ function benchmark_case(device, ::Type{T}, scheme, proposal_count, dimension, ns
     copy_estimate = BenchmarkTools.median(copy_trial)
     record = (
         scalar_type=string(T),
-        scheme=string(scheme_name(scheme)),
+        scheme=string(scheme.label),
         proposal_count,
         dimension,
         nsamples,
@@ -434,14 +419,15 @@ function main()
     direct_cases = [
         (row=row, type=T, scheme=scheme) for
         row in STATIC_MIS_CAPABILITY_ROWS if !isnothing(row.direct) for
-        T in row.direct.types for scheme in row.direct.schemes
+        T in row.direct.types for scheme in static_mis_schemes(4) if
+        scheme.label in row.direct.schemes
     ]
     @assert length(direct_cases) == 32
     correctness = RUN_CORRECTNESS ? [
         correctness_case(
             device,
             case.type,
-            static_mis_scheme(case.scheme, 4),
+            case.scheme,
             case_index;
             row=case.row,
         ) for (case_index, case) in enumerate(direct_cases)

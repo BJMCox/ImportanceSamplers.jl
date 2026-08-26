@@ -9,9 +9,17 @@ const STATIC_MIS_SMOKE = "--smoke" in ARGS
 const STATIC_MIS_BENCHMARK_SEED = 0x737461746963626d
 const STATIC_MIS_BENCHMARK_SAMPLES = STATIC_MIS_SMOKE ? 3 : 30
 const STATIC_MIS_BENCHMARK_SECONDS = STATIC_MIS_SMOKE ? 0.2 : 5.0
-const STATIC_MIS_SAMPLE_COUNT = STATIC_MIS_SMOKE ? 256 : 10_000
-const STATIC_MIS_PROPOSAL_COUNT = STATIC_MIS_SMOKE ? 4 : 8
-const STATIC_MIS_DIMENSION = STATIC_MIS_SMOKE ? 2 : 4
+const STATIC_MIS_CPU_CASES = STATIC_MIS_SMOKE ?
+    ((nsamples=256, dimension=2, proposal_count=4),) :
+    Tuple(
+        (; nsamples, dimension, proposal_count) for
+        nsamples in (10_000, 100_000) for
+        dimension in (1, 4, 16) for
+        proposal_count in (2, 8, 32)
+    )
+const STATIC_MIS_CUDA_TRANSFER_CASE = STATIC_MIS_SMOKE ?
+    first(STATIC_MIS_CPU_CASES) :
+    (nsamples=10_000, dimension=4, proposal_count=8)
 
 struct BenchmarkGaussian{T<:AbstractFloat}
     location::Vector{T}
@@ -101,10 +109,29 @@ function trial_record(trial; nsamples=nothing)
     )
 end
 
-function benchmark_cpu_case(bank, bank_kind, scheme_case)
+function expected_density_evaluations(scheme, result, proposal_count)
+    nsamples = length(result.logweights)
+    scheme isa StandardMIS && return nsamples
+    scheme isa PartialDeterministicMixture || return nsamples * proposal_count
+
+    group_sizes = Dict(
+        proposal_id => length(group) for group in scheme.groups for
+        proposal_id in group
+    )
+    return sum(group_sizes[proposal_id] for proposal_id in result.provenance.proposal_id)
+end
+
+function benchmark_cpu_case(
+    bank,
+    bank_kind,
+    scheme_case,
+    nsamples,
+    dimension,
+    proposal_count,
+)
     algorithm = ImportanceSampling(
         bank;
-        nsamples=STATIC_MIS_SAMPLE_COUNT,
+        nsamples,
         mis_scheme=scheme_case.value,
     )
     preparation_rng = Xoshiro(STATIC_MIS_BENCHMARK_SEED)
@@ -126,27 +153,48 @@ function benchmark_cpu_case(bank, bank_kind, scheme_case)
     execution = @benchmarkable importance_sample!($sampler)
     execution_record = trial_record(
         run_trial(execution);
-        nsamples=STATIC_MIS_SAMPLE_COUNT,
+        nsamples,
     )
 
-    density_evaluations = nothing
+    summary_sampler = prepare_sampler(
+        Xoshiro(STATIC_MIS_BENCHMARK_SEED),
+        benchmark_target,
+        algorithm;
+        threaded=false,
+    )
+    bank_kind === :generic && reset_density_evaluations!(bank)
+    result = importance_sample!(summary_sampler)
+    observed_density_evaluations = nothing
     if bank_kind === :generic
-        reset_density_evaluations!(bank)
-        importance_sample!(sampler)
-        density_evaluations = sum(
+        observed_density_evaluations = sum(
             proposal.density_evaluations[] for proposal in bank.proposals
         )
     end
+    weights = normalized_weights(result)
+    effective_sample_size = inv(sum(abs2, weights))
     return (
+        nsamples,
+        dimension,
+        proposal_count,
         bank=bank_kind,
         scheme=scheme_case.label,
         preparation=preparation_record,
         execution=execution_record,
-        proposal_density_evaluations=density_evaluations,
+        expected_proposal_density_evaluations=expected_density_evaluations(
+            scheme_case.value,
+            result,
+            proposal_count,
+        ),
+        observed_proposal_density_evaluations=observed_density_evaluations,
+        effective_sample_size,
+        ess_fraction=effective_sample_size / nsamples,
+        effective_samples_per_second=(
+            effective_sample_size / (execution_record.time_ns / 1.0e9)
+        ),
     )
 end
 
-function cuda_result_transfer_record(bank)
+function cuda_result_transfer_record(bank, nsamples)
     CUDA.functional() || return nothing
     CUDA.allowscalar(false)
     physical = CUDA.device()
@@ -156,7 +204,7 @@ function cuda_result_transfer_record(bank)
         benchmark_target,
         ImportanceSampling(
             bank;
-            nsamples=STATIC_MIS_SAMPLE_COUNT,
+            nsamples,
             mis_scheme=StratifiedMixture(),
         );
         threaded=true,
@@ -176,22 +224,36 @@ function cuda_result_transfer_record(bank)
 end
 
 function main()
-    banks = benchmark_banks(STATIC_MIS_PROPOSAL_COUNT, STATIC_MIS_DIMENSION)
     cpu = [
-        benchmark_cpu_case(bank, bank_kind, scheme_case) for
-        (bank_kind, bank) in pairs(banks) for
-        scheme_case in scheme_cases(STATIC_MIS_PROPOSAL_COUNT)
+        benchmark_cpu_case(
+            bank,
+            bank_kind,
+            scheme_case,
+            case.nsamples,
+            case.dimension,
+            case.proposal_count,
+        ) for
+        case in STATIC_MIS_CPU_CASES for
+        (bank_kind, bank) in pairs(
+            benchmark_banks(case.proposal_count, case.dimension),
+        ) for
+        scheme_case in scheme_cases(case.proposal_count)
     ]
+    transfer_case = STATIC_MIS_CUDA_TRANSFER_CASE
+    transfer_banks = benchmark_banks(
+        transfer_case.proposal_count,
+        transfer_case.dimension,
+    )
     return (
         command="julia --project=benchmark benchmark/static_mis.jl" *
                 (STATIC_MIS_SMOKE ? " --smoke" : ""),
         julia=VERSION,
         smoke=STATIC_MIS_SMOKE,
-        nsamples=STATIC_MIS_SAMPLE_COUNT,
-        proposal_count=STATIC_MIS_PROPOSAL_COUNT,
-        dimension=STATIC_MIS_DIMENSION,
         cpu,
-        cuda_result_transfer=cuda_result_transfer_record(banks.packed),
+        cuda_result_transfer=cuda_result_transfer_record(
+            transfer_banks.packed,
+            transfer_case.nsamples,
+        ),
     )
 end
 

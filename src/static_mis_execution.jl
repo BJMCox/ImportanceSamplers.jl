@@ -5,18 +5,10 @@ function _allocate_random_buffers(
     nsamples,
 )
     bank = method_state.bank
-    uniform = Vector{eltype(bank.cdf)}(undef, nsamples)
-    normal = Vector{eltype(bank.locations)}(
-        undef,
-        size(bank.locations, 1) * nsamples,
-    )
-    assignments = Vector{Int}(undef, nsamples)
-    failure_scratch = _allocate_native_failure_scratch(normal, nsamples)
-    return _PackedStaticMISRandomBuffers(
-        uniform,
-        normal,
-        assignments,
-        failure_scratch,
+    return _allocate_packed_static_mis_random_buffers(
+        bank.locations,
+        bank,
+        nsamples,
     )
 end
 
@@ -109,6 +101,14 @@ function _allocate_random_buffers(
 )
     bank = method_state.bank
     prototype = device(Vector{eltype(bank.locations)}(undef, 0))
+    return _allocate_packed_static_mis_random_buffers(prototype, bank, nsamples)
+end
+
+function _allocate_packed_static_mis_random_buffers(
+    prototype,
+    bank::_PackedDiagonalGaussianBank,
+    nsamples,
+)
     uniform = similar(prototype, eltype(bank.cdf), nsamples)
     normal = similar(
         prototype,

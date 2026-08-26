@@ -1,11 +1,29 @@
 const STATIC_MIS_COMPLETE_SCHEMES = (
-    (label=:stratified_mixture, name="`StratifiedMixture`", value=StratifiedMixture()),
-    (label=:random_mixture, name="`RandomMixture`", value=RandomMixture()),
-    (label=:standard_mis, name="`StandardMIS`", value=StandardMIS()),
+    (
+        label=:stratified_mixture,
+        name="`StratifiedMixture`",
+        value=StratifiedMixture(),
+        factory=_ -> StratifiedMixture(),
+    ),
+    (
+        label=:random_mixture,
+        name="`RandomMixture`",
+        value=RandomMixture(),
+        factory=_ -> RandomMixture(),
+    ),
+    (
+        label=:standard_mis,
+        name="`StandardMIS`",
+        value=StandardMIS(),
+        factory=_ -> StandardMIS(),
+    ),
     (
         label=:partial_deterministic_mixture,
         name="`PartialDeterministicMixture`",
         value=PartialDeterministicMixture(((1, 3), (2, 4))),
+        factory=proposal_count -> PartialDeterministicMixture(
+            (Tuple(1:2:proposal_count), Tuple(2:2:proposal_count)),
+        ),
     ),
 )
 
