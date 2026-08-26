@@ -47,12 +47,19 @@ target and algorithm arguments. The proposal alone determines sample shape.
   proposals, prepared reuse, threading, results, and failures.
 - [Static multiple importance sampling](@ref) covers proposal banks, all four
   complete assignment/denominator schemes, provenance, and CPU/CUDA limits.
+- [Deterministic-mixture population Monte Carlo](@ref) covers adaptive spatial
+  mixtures, global resampling, retained proposal state, and CPU/CUDA limits.
 - [Native proposals](@ref) explains the Gaussian scale and factor contracts.
 - [Transforms](@ref) covers constrained and structured parameters, including
   the simplex reference measure.
 - [Accelerators](@ref) gives the complete CUDA example, transfer boundary,
   exact support matrix, and runnable validation.
 - [Public API](@ref) lists every exported binding.
+
+Runnable workflows include the public
+[DM-PMC example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/dm_pmc.jl)
+and a plain numerical-integration example for
+[`integral(exp(-x^2)) = sqrt(pi)`](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/numerical_integration.jl).
 
 For mathematical background, see Elvira and Martino's open-access
 [“Advances in Importance Sampling”](https://arxiv.org/abs/2102.05407) and

@@ -140,14 +140,15 @@ end
 @testset "DM-PMC large Float32 round counts stay exact" begin
     round_size = 2^24 + 3
     masses = Float32[0.5, 0.5]
-    first_round = @inferred DMPMCIS._dm_pmc_round_counts(masses, round_size, 1)
-    second_round = @inferred DMPMCIS._dm_pmc_round_counts(masses, round_size, 2)
+    exact_masses = DMPMCIS._dm_pmc_exact_mass_proportions(masses)
+    first_round = @inferred DMPMCIS._dm_pmc_round_counts(exact_masses, round_size, 1)
+    second_round = @inferred DMPMCIS._dm_pmc_round_counts(exact_masses, round_size, 2)
 
     @test first_round == [8_388_610, 8_388_609]
     @test second_round == [8_388_609, 8_388_610]
     @test sum(first_round) == round_size
     @test sum(second_round) == round_size
-    @test @allocated(DMPMCIS._dm_pmc_round_counts(masses, round_size, 1)) < 1_000_000
+    @test @allocated(DMPMCIS._dm_pmc_round_counts(exact_masses, round_size, 1)) < 1_000_000
 end
 
 @testset "DM-PMC allocation converts exact masses once per plan" begin
@@ -854,6 +855,62 @@ end
     @test second_result.samples[1] ≈
           first_oracle.locations[sampler.method_state.plan.assignments[1, 1]] +
           scales[sampler.method_state.plan.assignments[1, 1]] * case.normal_batches[4][1]
+end
+
+@testset "DM-PMC current proposal snapshots are independent" begin
+    inert = FactorGaussian([9.0, -9.0], [2.0 0.0; 0.5 1.5])
+    bank = ProposalBank(
+        Union{
+            typeof(DiagonalGaussian([-1.0, 0.0], [0.8, 1.2])),
+            typeof(inert),
+        }[
+            DiagonalGaussian([-1.0, 0.0], [0.8, 1.2]),
+            inert,
+            DiagonalGaussian([1.0, 0.0], [1.1, 0.7]),
+        ],
+        [1.0, 0.0, 2.0],
+    )
+    sampler = prepare_sampler(
+        Random.Xoshiro(0x43555252454e54),
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(bank; rounds=2, round_size=[5, 7]);
+        threaded=false,
+    )
+
+    initial = @inferred current_proposal(sampler)
+    @test initial isa ProposalBank
+    @test initial.masses == bank.masses
+    @test length(initial.proposals) == 3
+    @test initial.proposals[2].location == inert.location
+    @test initial.proposals[2] !== sampler.algorithm.bank.proposals[2]
+    @test initial.proposals[2].location !== sampler.algorithm.bank.proposals[2].location
+    @test initial.proposals[2].scale.factor !==
+          sampler.algorithm.bank.proposals[2].scale.factor
+
+    importance_sample!(sampler)
+    adapted = @inferred current_proposal(sampler)
+    @test adapted.masses == bank.masses
+    @test adapted.proposals[1].location == sampler.method_state.bank.locations[:, 1]
+    @test adapted.proposals[3].location == sampler.method_state.bank.locations[:, 2]
+    @test adapted.proposals[2].location == inert.location
+
+    retained_locations = copy(sampler.method_state.bank.locations)
+    adapted.proposals[1].location[1] = 1.0e6
+    adapted.proposals[2].location[1] = -1.0e6
+    adapted.proposals[2].scale.factor[1, 1] = 1.0e6
+    adapted.masses[1] = 0.0
+    @test sampler.method_state.bank.locations == retained_locations
+    @test sampler.algorithm.bank.proposals[2].location == inert.location
+    @test sampler.algorithm.bank.proposals[2].scale.factor == inert.scale.factor
+    @test sampler.algorithm.bank.masses == bank.masses
+
+    plain = prepare_sampler(
+        Random.Xoshiro(0x43555252454e55),
+        DMPMCTarget{Float64}(),
+        ImportanceSampling(SphericalGaussian(0.0, 1.0); nsamples=2);
+        threaded=false,
+    )
+    @test_throws MethodError current_proposal(plain)
 end
 
 @testset "DM-PMC vector diagonal and factor CPU execution" begin

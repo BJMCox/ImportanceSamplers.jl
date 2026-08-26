@@ -39,9 +39,10 @@ end
     @test public_result.diagnostics.transfers !== adopted.diagnostics.transfers
 
     reported = ImportanceSamplers._ResultTransferCounter(0, 0)
-    ImportanceSamplers._record_dm_pmc_transfers!(
+    ImportanceSamplers._record_reported_transfer!(
         reported,
-        (count=1, bytes=3sizeof(UInt64)),
+        1,
+        3sizeof(UInt64),
         Val(:failure_snapshot),
     )
     reported_copy = ImportanceSamplers._transfer_result_storage(nothing, reported)

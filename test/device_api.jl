@@ -859,6 +859,16 @@ end
         @test getfield(destination, :algorithm).bank.proposals isa Vector
         @test getfield(destination, :algorithm).bank.masses isa Vector
 
+        snapshot_error = try
+            current_proposal(destination)
+            nothing
+        catch error
+            error
+        end
+        @test snapshot_error isa ArgumentError
+        @test occursin("cpu_device()(sampler)", snapshot_error.msg)
+        @test bank.locations isa KernelArgumentTestArray
+
         round_size = maximum(plan.schedule)
         representative_arguments = (
             IS._sample_view(workspace.round_samples, 1:round_size),

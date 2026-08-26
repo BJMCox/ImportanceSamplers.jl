@@ -75,6 +75,72 @@ _algorithm_proposal(algorithm::DeterministicMixturePMC) = algorithm.bank
 _algorithm_sample_budget(algorithm::DeterministicMixturePMC) =
     sum(_resolve_round_schedule(algorithm))
 
+"""
+    current_proposal(sampler)
+
+Return an independent snapshot of the proposal population currently owned by a
+CPU-prepared [`DeterministicMixturePMC`](@ref) sampler. Active proposals use the
+latest adapted locations; their configured scales or factors and masses remain
+fixed. Inert zero-mass proposals retain their configured positions and stable
+IDs.
+
+The returned [`ProposalBank`](@ref) does not alias the sampler. Accelerator-
+prepared samplers are rejected rather than copied implicitly. Take the snapshot
+on CPU, for example with `current_proposal(MLDataDevices.cpu_device()(sampler))`,
+before transferring the prepared sampler to an accelerator; prepared samplers
+cannot migrate back from an accelerator. Other prepared algorithms do not
+currently implement this accessor.
+"""
+function current_proposal(
+    sampler::_PreparedImportanceSampler{R,B,T,A,M,D},
+) where {
+    R,
+    B,
+    T,
+    A<:DeterministicMixturePMC,
+    M,
+    D,
+}
+    sampler.device isa MLDataDevices.AbstractAcceleratorDevice && throw(
+        ArgumentError(
+            "current_proposal does not copy accelerator state implicitly; " *
+            "call current_proposal(MLDataDevices.cpu_device()(sampler)) before " *
+            "transferring the prepared sampler to an accelerator",
+        ),
+    )
+    packed = sampler.method_state.bank
+    locations = Array(packed.locations)
+    proposal_ids = Array(packed.proposal_ids)
+    proposals = deepcopy(sampler.algorithm.bank.proposals)
+    for (slot, proposal_id) in pairs(proposal_ids)
+        proposal = proposals[proposal_id]
+        location = _dm_pmc_snapshot_location(locations, slot, packed)
+        proposals[proposal_id] = _dm_pmc_with_location(proposal, location)
+    end
+    return ProposalBank(proposals, sampler.algorithm.bank.masses)
+end
+
+_dm_pmc_snapshot_location(locations, slot, bank::_PackedDiagonalGaussianBank) =
+    _dm_pmc_snapshot_location(locations, slot, bank.layout)
+
+_dm_pmc_snapshot_location(locations, slot, ::_ScalarGaussianLayout) =
+    locations[1, slot]
+
+_dm_pmc_snapshot_location(locations, slot, ::_VectorGaussianLayout) =
+    copy(view(locations, :, slot))
+
+_dm_pmc_snapshot_location(locations, slot, ::_PackedFactorGaussianBank) =
+    copy(view(locations, :, slot))
+
+function _dm_pmc_with_location(proposal::_GaussianProposal, location)
+    return _GaussianProposal(
+        proposal.family,
+        location,
+        deepcopy(proposal.scale),
+        proposal.lognormalizer,
+    )
+end
+
 struct _DMPMCAllocationPlan{S,C,A,L,O}
     schedule::S
     counts::C
@@ -213,11 +279,6 @@ function _dm_pmc_round_counts(
         counts[tie_order[index]] += 1
     end
     return counts
-end
-
-function _dm_pmc_round_counts(active_masses, round_size, round)
-    exact_mass_proportions = _dm_pmc_exact_mass_proportions(active_masses)
-    return _dm_pmc_round_counts(exact_mass_proportions, round_size, round)
 end
 
 function _dm_pmc_allocation_plan(bank, active_masses, schedule)

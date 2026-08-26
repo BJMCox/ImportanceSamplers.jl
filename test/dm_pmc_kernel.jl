@@ -171,9 +171,10 @@ end
 
 @testset "DM-PMC reported explicit transfers retain bounded reasons" begin
     transfers = DMPMCKernelIS._ResultTransferCounter(0, 0)
-    DMPMCKernelIS._record_dm_pmc_transfers!(
+    DMPMCKernelIS._record_reported_transfer!(
         transfers,
-        (count=1, bytes=3sizeof(UInt64)),
+        1,
+        3sizeof(UInt64),
         Val(:failure_snapshot),
     )
     for reason in (

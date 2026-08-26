@@ -1,3 +1,12 @@
+"""
+    DMPMCRoundError
+
+Exception thrown when a DM-PMC round cannot complete atomically. `round` and
+`phase` locate the failure, `cause` stores the underlying exception, and
+`diagnostics` reports the requested round size and number of previously
+committed rounds. The prepared sampler retains its last committed proposal
+population.
+"""
 struct DMPMCRoundError{E,D<:NamedTuple} <: Exception
     round::Int
     phase::Symbol
@@ -238,19 +247,6 @@ function _dm_pmc_round_summary(
     )
 end
 
-function _record_dm_pmc_transfers!(
-    counter::_ResultTransferCounter,
-    transfers,
-    reason::Val,
-)
-    return _record_reported_transfer!(
-        counter,
-        transfers.count,
-        transfers.bytes,
-        reason,
-    )
-end
-
 function _capture_dm_pmc_round(f, round, phase, round_size, committed_rounds)
     try
         return f()
@@ -337,9 +333,10 @@ function _importance_sample_cpu!(
                 execution,
             )
             snapshot = _device_failure_snapshot(buffers.failure_scratch.record)
-            _record_dm_pmc_transfers!(
+            _record_reported_transfer!(
                 transfers,
-                snapshot.transfers,
+                snapshot.transfers.count,
+                snapshot.transfers.bytes,
                 Val(:failure_snapshot),
             )
             _throw_native_failures(

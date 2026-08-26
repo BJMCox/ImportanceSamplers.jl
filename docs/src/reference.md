@@ -5,9 +5,11 @@
 ```@docs
 AbstractImportanceSampler
 ImportanceSampling
+DeterministicMixturePMC
 prepare_sampler
 importance_sample
 importance_sample!
+current_proposal
 ```
 
 ## Proposal populations and MIS schemes
@@ -59,4 +61,5 @@ SamplerBusyError
 SamplerAlreadyExecutedError
 SamplerDeviceError
 SamplerExecutionError
+DMPMCRoundError
 ```
