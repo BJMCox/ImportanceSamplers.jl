@@ -262,8 +262,16 @@ end
 
 _transfer_result_storage(device, storage::Tuple) =
     map(value -> _transfer_result_storage(device, value), storage)
-_transfer_result_storage(device, counter::_ResultTransferCounter) =
-    _ResultTransferCounter(counter.count, counter.bytes)
+function _transfer_result_storage(device, counter::_ResultTransferCounter)
+    copy = _ResultTransferCounter(counter.count, counter.bytes)
+    for reason in fieldnames(_ReportedTransferReasons)
+        source = getfield(counter.reasons, reason)
+        destination = getfield(copy.reasons, reason)
+        destination.count = source.count
+        destination.bytes = source.bytes
+    end
+    return copy
+end
 _transfer_result_storage(device, value) = value
 
 function _new_weighted_samples(samples, logweights, provenance, diagnostics)
@@ -374,6 +382,14 @@ function _validate_diagnostic_value(value::_ResultTransferCounter)
     value.count >= 0 && value.bytes >= 0 || throw(
         ArgumentError("diagnostic transfer count and bytes must be nonnegative"),
     )
+    for reason in fieldnames(_ReportedTransferReasons)
+        record = getfield(value.reasons, reason)
+        record.count >= 0 && record.bytes >= 0 || throw(
+            ArgumentError(
+                "diagnostic reason transfer count and bytes must be nonnegative",
+            ),
+        )
+    end
     return nothing
 end
 

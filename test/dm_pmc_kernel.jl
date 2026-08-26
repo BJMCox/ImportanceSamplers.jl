@@ -168,3 +168,38 @@ end
         @test isfinite(concentrated.lognormalizer)
     end
 end
+
+@testset "DM-PMC reported explicit transfers retain bounded reasons" begin
+    transfers = DMPMCKernelIS._ResultTransferCounter(0, 0)
+    DMPMCKernelIS._record_dm_pmc_transfers!(
+        transfers,
+        (count=1, bytes=3sizeof(UInt64)),
+        Val(:failure_snapshot),
+    )
+    for reason in (
+        Val(:cdf_maximum),
+        Val(:cdf_sum),
+        Val(:summary_maximum),
+        Val(:summary_scaled_sum),
+        Val(:summary_scaled_square_sum),
+    )
+        DMPMCKernelIS._record_scalar_transfer!(transfers, Float32, reason)
+    end
+
+    @test transfers.count == 6
+    @test transfers.bytes == 3sizeof(UInt64) + 5sizeof(Float32)
+    @test fieldnames(typeof(transfers.reasons)) == (
+        :failure_snapshot,
+        :cdf_maximum,
+        :cdf_sum,
+        :summary_maximum,
+        :summary_scaled_sum,
+        :summary_scaled_square_sum,
+    )
+    @test transfers.reasons.failure_snapshot.count == 1
+    @test transfers.reasons.failure_snapshot.bytes == 3sizeof(UInt64)
+    for reason in fieldnames(typeof(transfers.reasons))[2:end]
+        @test getfield(transfers.reasons, reason).count == 1
+        @test getfield(transfers.reasons, reason).bytes == sizeof(Float32)
+    end
+end

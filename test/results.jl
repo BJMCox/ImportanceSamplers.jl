@@ -38,6 +38,22 @@ end
     @test public_result.diagnostics.trace !== diagnostics.trace
     @test public_result.diagnostics.transfers !== adopted.diagnostics.transfers
 
+    reported = ImportanceSamplers._ResultTransferCounter(0, 0)
+    ImportanceSamplers._record_dm_pmc_transfers!(
+        reported,
+        (count=1, bytes=3sizeof(UInt64)),
+        Val(:failure_snapshot),
+    )
+    reported_copy = ImportanceSamplers._transfer_result_storage(nothing, reported)
+    @test reported_copy !== reported
+    @test reported_copy.count == reported.count == 1
+    @test reported_copy.bytes == reported.bytes == 3sizeof(UInt64)
+    @test reported_copy.reasons !== reported.reasons
+    @test reported_copy.reasons.failure_snapshot !==
+          reported.reasons.failure_snapshot
+    @test reported_copy.reasons.failure_snapshot.count == 1
+    @test reported_copy.reasons.failure_snapshot.bytes == 3sizeof(UInt64)
+
     @test_throws ArgumentError ImportanceSamplers._adopt_weighted_samples(
         [1.0],
         [Inf],

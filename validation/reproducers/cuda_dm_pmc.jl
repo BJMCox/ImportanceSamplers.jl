@@ -251,7 +251,47 @@ function assert_dm_pmc_residence(prepared, result)
     return nothing
 end
 
-function public_execution_case(device, ::Type{T}, kind) where {T}
+function reported_transfer_record(transfers)
+    reason_names = fieldnames(typeof(transfers.reasons))
+    reason_values = map(reason_names) do reason
+        record = getfield(transfers.reasons, reason)
+        (count=record.count, bytes=record.bytes)
+    end
+    reasons = NamedTuple{reason_names}(reason_values)
+    @test sum(record.count for record in values(reasons)) == transfers.count
+    @test sum(record.bytes for record in values(reasons)) == transfers.bytes
+    return (count=transfers.count, bytes=transfers.bytes, reasons)
+end
+
+function assert_dm_pmc_reported_transfers(transfers, rounds, ::Type{T}) where {T}
+    record = reported_transfer_record(transfers)
+    @test record.count == 6rounds
+    @test record.bytes == rounds * (3sizeof(UInt64) + 5sizeof(T))
+    @test record.reasons.failure_snapshot == (
+        count=rounds,
+        bytes=rounds * 3sizeof(UInt64),
+    )
+    for reason in (
+        :cdf_maximum,
+        :cdf_sum,
+        :summary_maximum,
+        :summary_scaled_sum,
+        :summary_scaled_square_sum,
+    )
+        @test getfield(record.reasons, reason) == (
+            count=rounds,
+            bytes=rounds * sizeof(T),
+        )
+    end
+    return record
+end
+
+function public_execution_case(
+    device,
+    ::Type{T},
+    kind;
+    repeated=false,
+) where {T}
     schedule = [9, 11, 13]
     bank = dm_pmc_validation_bank(T, Val(kind))
     source = prepare_sampler(
@@ -265,6 +305,17 @@ function public_execution_case(device, ::Type{T}, kind) where {T}
         threaded=true,
     )
     prepared = device(source)
+    initial_locations = Array(prepared.method_state.bank.locations)
+    active_ids = Array(prepared.method_state.bank.proposal_ids)
+    assignments = Array(prepared.method_state.plan.assignments)
+    expected_rounds = reduce(vcat, [fill(round, size) for (round, size) in pairs(schedule)])
+    expected_proposal_ids = reduce(
+        vcat,
+        [
+            active_ids[assignments[1:size, round]] for
+            (round, size) in pairs(schedule)
+        ],
+    )
     for proposal in prepared.algorithm.bank.proposals
         fill!(proposal.location, T(NaN))
     end
@@ -278,38 +329,67 @@ function public_execution_case(device, ::Type{T}, kind) where {T}
         round=Array(first_result.provenance.round),
         proposal_id=Array(first_result.provenance.proposal_id),
     )
-    first_transfers = first_result.diagnostics.transfers
-    @test first_transfers.count == 6length(schedule)
-    @test first_transfers.bytes ==
-          length(schedule) * (3sizeof(UInt64) + 5sizeof(T))
-    @test all(isfinite, Array(first_result.logweights))
-
-    second_result = importance_sample!(prepared)
-    CUDA.synchronize()
-    assert_dm_pmc_residence(prepared, second_result)
-    @test Array(first_result.samples) == first_snapshot.samples
-    @test Array(first_result.logweights) == first_snapshot.logweights
-    @test Array(first_result.provenance.round) == first_snapshot.round
-    @test Array(first_result.provenance.proposal_id) == first_snapshot.proposal_id
-    @test first_result.samples !== second_result.samples
-    @test first_result.logweights !== second_result.logweights
-    @test first_result.provenance.round !== second_result.provenance.round
-    @test first_result.provenance.proposal_id !== second_result.provenance.proposal_id
-    @test Array(prepared.method_state.bank.locations) != retained_after_first
+    diagnostics = first_result.diagnostics
+    first_transfers = assert_dm_pmc_reported_transfers(
+        diagnostics.transfers,
+        length(schedule),
+        T,
+    )
     @test length(first_result) == sum(schedule)
-    @test [count(==(round), first_snapshot.round) for round in eachindex(schedule)] ==
-          schedule
+    @test first_snapshot.round == expected_rounds
+    @test first_snapshot.proposal_id == expected_proposal_ids
+    @test all(isfinite, first_snapshot.logweights)
+    @test diagnostics.method === :deterministic_mixture_pmc
+    @test diagnostics.execution === :threaded
+    @test diagnostics.threaded
+    @test diagnostics.rounds == length(schedule)
+    @test diagnostics.round_sizes == schedule
+    @test length(diagnostics.round_ess) == length(schedule)
+    @test length(diagnostics.round_lognormalizers) == length(schedule)
+    @test all(isfinite, diagnostics.round_ess)
+    @test all(isfinite, diagnostics.round_lognormalizers)
+    @test diagnostics.failures == 0
+    @test retained_after_first != initial_locations
+
+    second_transfers = nothing
+    earlier_result_independent = nothing
+    retained_population_repeated = nothing
+    if repeated
+        second_result = importance_sample!(prepared)
+        CUDA.synchronize()
+        assert_dm_pmc_residence(prepared, second_result)
+        @test Array(first_result.samples) == first_snapshot.samples
+        @test Array(first_result.logweights) == first_snapshot.logweights
+        @test Array(first_result.provenance.round) == first_snapshot.round
+        @test Array(first_result.provenance.proposal_id) == first_snapshot.proposal_id
+        @test first_result.samples !== second_result.samples
+        @test first_result.logweights !== second_result.logweights
+        @test first_result.provenance.round !== second_result.provenance.round
+        @test first_result.provenance.proposal_id !==
+              second_result.provenance.proposal_id
+        @test Array(prepared.method_state.bank.locations) != retained_after_first
+        second_transfers = assert_dm_pmc_reported_transfers(
+            second_result.diagnostics.transfers,
+            length(schedule),
+            T,
+        )
+        earlier_result_independent = true
+        retained_population_repeated = true
+    end
     return (
         scalar_type=T,
         bank=kind,
         schedule=Tuple(schedule),
-        first_transfers=(count=first_transfers.count, bytes=first_transfers.bytes),
-        second_transfers=(
-            count=second_result.diagnostics.transfers.count,
-            bytes=second_result.diagnostics.transfers.bytes,
-        ),
+        count=length(first_result),
+        provenance=true,
+        residence=true,
+        finite_raw_logweights=true,
+        diagnostics=true,
+        first_transfers,
+        second_transfers,
         retained_population=true,
-        earlier_result_independent=true,
+        retained_population_repeated,
+        earlier_result_independent,
     )
 end
 
@@ -333,6 +413,7 @@ function transfer_scaling_case(device, ::Type{T}) where {T}
         result = importance_sample!(prepared)
         CUDA.synchronize()
         transfers = result.diagnostics.transfers
+        assert_dm_pmc_reported_transfers(transfers, length(schedule), T)
         return (count=transfers.count, bytes=transfers.bytes)
     end
     two_rounds = run(configured, [9, 11])
@@ -405,7 +486,14 @@ function strict_resampling_and_ess_case(::Type{T}) where {T}
     @test isfinite(summary.lognormalizer)
     @test transfers.count == 3
     @test transfers.bytes == 3sizeof(T)
-    return (; selected, ess=summary.ess, transfers=(count=transfers.count, bytes=transfers.bytes))
+    reason_record = reported_transfer_record(transfers)
+    @test reason_record.reasons.summary_maximum ==
+          (count=1, bytes=sizeof(T))
+    @test reason_record.reasons.summary_scaled_sum ==
+          (count=1, bytes=sizeof(T))
+    @test reason_record.reasons.summary_scaled_square_sum ==
+          (count=1, bytes=sizeof(T))
+    return (; selected, ess=summary.ess, transfers=reason_record)
 end
 
 function environment_record()
@@ -439,10 +527,17 @@ function main()
     device = cuda_device()
     caller_device = CUDA.device()
     @test CUDA.name(caller_device) == DM_PMC_CUDA_HARDWARE
-    parity = Dict{Tuple{DataType,Symbol},NamedTuple}()
+    private_prefilled_parity = Dict{Tuple{DataType,Symbol},NamedTuple}()
+    public_execution = Dict{Tuple{DataType,Symbol},NamedTuple}()
     static_factor = NamedTuple[]
     for T in (Float32, Float64), kind in (:diagonal, :factor)
-        parity[(T, kind)] = parity_case(device, T, kind)
+        private_prefilled_parity[(T, kind)] = parity_case(device, T, kind)
+        public_execution[(T, kind)] = public_execution_case(
+            device,
+            T,
+            kind;
+            repeated=T === Float64 && kind === :factor,
+        )
         kind === :factor && push!(static_factor, static_factor_case(device, T))
         @test CUDA.device() == caller_device
     end
@@ -455,8 +550,7 @@ function main()
     )
     @test unequal.zero_mass
     @test unequal.schedule == (7, 10)
-    @test parity[(Float64, :diagonal)].duplicate_ancestors
-    public = public_execution_case(device, Float64, :factor)
+    @test private_prefilled_parity[(Float64, :diagonal)].duplicate_ancestors
     transfer_scaling = transfer_scaling_case(device, Float64)
     strict = (
         Float32 => strict_resampling_and_ess_case(Float32),
@@ -473,23 +567,40 @@ function main()
         :repeated_prepared_execution,
     )
     rows = (
-        float32_diagonal=parity[(Float32, :diagonal)],
-        float64_diagonal=parity[(Float64, :diagonal)],
-        float32_factor=parity[(Float32, :factor)],
-        float64_factor=parity[(Float64, :factor)],
-        unequal_masses_with_zero=unequal,
+        float32_diagonal=(
+            public_execution=public_execution[(Float32, :diagonal)],
+            private_prefilled_parity=private_prefilled_parity[(Float32, :diagonal)],
+        ),
+        float64_diagonal=(
+            public_execution=public_execution[(Float64, :diagonal)],
+            private_prefilled_parity=private_prefilled_parity[(Float64, :diagonal)],
+        ),
+        float32_factor=(
+            public_execution=public_execution[(Float32, :factor)],
+            private_prefilled_parity=private_prefilled_parity[(Float32, :factor)],
+        ),
+        float64_factor=(
+            public_execution=public_execution[(Float64, :factor)],
+            private_prefilled_parity=private_prefilled_parity[(Float64, :factor)],
+        ),
+        unequal_masses_with_zero=(private_prefilled_parity=unequal,),
         unequal_round_sizes=(schedule=unequal.schedule,),
         duplicate_resampled_ancestors=(
-            duplicate=parity[(Float64, :diagonal)].duplicate_ancestors,
+            duplicate=private_prefilled_parity[(Float64, :diagonal)].duplicate_ancestors,
             strict,
         ),
-        repeated_prepared_execution=merge(public, (; transfer_scaling)),
+        repeated_prepared_execution=merge(
+            public_execution[(Float64, :factor)],
+            (; transfer_scaling),
+        ),
     )
     @test all(row -> hasproperty(rows, row.label), DM_PMC_CUDA_CAPABILITY_ROWS)
     @test CUDA.device() == caller_device
     return (
         environment=environment_record(),
         static_factor,
+        private_prefilled_parity,
+        public_execution,
         rows,
     )
 end

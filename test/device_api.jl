@@ -90,6 +90,8 @@ end
 
 struct KernelArgumentTestAdaptor end
 
+const KERNEL_ARGUMENT_TEST_ARGUMENTS = Tuple{DataType,DataType}[]
+
 Adapt.adapt_storage(
     ::KernelArgumentTestAdaptor,
     array::KernelArgumentTestArray{T,N},
@@ -98,10 +100,25 @@ Adapt.adapt_storage(
     size(array.storage),
 )
 
-KernelAbstractions.argconvert(
-    ::KernelAbstractions.Kernel{KernelArgumentTestBackend},
+kernel_argument_test_adapt(argument) =
+    Adapt.adapt(KernelArgumentTestAdaptor(), argument)
+
+function kernel_argument_test_adapt(
+    argument::SubArray{T,N,<:KernelArgumentTestArray},
+) where {T,N}
+    return KernelArgumentTestDeviceArray{T,N}(
+        pointer(parent(argument).storage),
+        size(argument),
+    )
+end
+
+function KernelAbstractions.argconvert(
+    kernel::KernelAbstractions.Kernel{KernelArgumentTestBackend},
     argument,
-) = Adapt.adapt(KernelArgumentTestAdaptor(), argument)
+)
+    push!(KERNEL_ARGUMENT_TEST_ARGUMENTS, (typeof(kernel), typeof(argument)))
+    return kernel_argument_test_adapt(argument)
+end
 
 struct KernelArgumentTestAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
 MLDataDevices.functional(::KernelArgumentTestAccelerator) = true
@@ -799,6 +816,7 @@ end
     ])
 
     function assert_dm_pmc_transfer(source, bank_type)
+        empty!(KERNEL_ARGUMENT_TEST_ARGUMENTS)
         destination = device(source)
         method_state = getfield(destination, :method_state)
         bank = getfield(method_state, :bank)
@@ -840,6 +858,34 @@ end
         @test getfield(destination, :algorithm) !== getfield(source, :algorithm)
         @test getfield(destination, :algorithm).bank.proposals isa Vector
         @test getfield(destination, :algorithm).bank.masses isa Vector
+
+        round_size = maximum(plan.schedule)
+        representative_arguments = (
+            IS._sample_view(workspace.round_samples, 1:round_size),
+            view(workspace.round_logweights, 1:round_size),
+            view(workspace.round_proposal_ids, 1:round_size),
+            view(plan.assignments, 1:round_size, 1),
+            view(workspace.resampling_cdf, 1:round_size),
+        )
+        @test ndims.(representative_arguments) == (2, 1, 1, 1, 1)
+        @test all(argument -> argument isa SubArray, representative_arguments)
+        backend = KernelAbstractions.get_backend(buffers.normals)
+        round_kernel = IS._mis_round_kernel!(backend)
+        finalize_kernel = IS._dm_pmc_finalize_cdf_kernel!(backend)
+        select_kernel = IS._dm_pmc_select_ancestors_kernel!(backend)
+        gather_kernel = IS._dm_pmc_gather_ancestors_kernel!(backend)
+        for (kernel, argument) in (
+            (round_kernel, representative_arguments[1]),
+            (round_kernel, representative_arguments[2]),
+            (round_kernel, representative_arguments[3]),
+            (round_kernel, representative_arguments[4]),
+            (finalize_kernel, representative_arguments[5]),
+            (select_kernel, representative_arguments[5]),
+            (gather_kernel, representative_arguments[1]),
+        )
+            @test (typeof(kernel), typeof(argument)) in
+                  KERNEL_ARGUMENT_TEST_ARGUMENTS
+        end
         return destination
     end
 

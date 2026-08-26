@@ -299,7 +299,7 @@ function _prepare_method_state(algorithm::DeterministicMixturePMC, prepared_targ
 end
 
 function _allocate_random_buffers(
-    ::MLDataDevices.AbstractCPUDevice,
+    ::MLDataDevices.AbstractDevice,
     ::ProposalBank,
     method_state::_PreparedDMPMC,
     sample_budget,
@@ -327,32 +327,17 @@ function _allocate_random_buffers(
     )
 end
 
-function _allocate_random_buffers(
-    ::MLDataDevices.AbstractAcceleratorDevice,
-    ::ProposalBank,
-    method_state::_PreparedDMPMC,
-    sample_budget,
-)
-    bank = method_state.bank
-    maximum_round_size = maximum(method_state.plan.schedule)
-    normals = similar(
-        bank.locations,
-        eltype(bank.locations),
-        size(bank.locations, 1) * maximum_round_size,
-    )
-    resampling_uniforms = similar(
-        bank.cdf,
-        eltype(bank.cdf),
-        _active_proposal_count(bank),
-    )
-    failure_scratch = _allocate_native_failure_scratch(
-        normals,
-        maximum_round_size,
-    )
-    return _DMPMCRandomBuffers(
-        normals,
-        resampling_uniforms,
-        failure_scratch,
+function _dm_pmc_round_views(method_state::_PreparedDMPMC, round)
+    plan = method_state.plan
+    workspace = method_state.workspace
+    round_size = plan.schedule[round]
+    return (
+        round_size=round_size,
+        samples=_sample_view(workspace.round_samples, 1:round_size),
+        logweights=view(workspace.round_logweights, 1:round_size),
+        proposal_ids=view(workspace.round_proposal_ids, 1:round_size),
+        assignments=view(plan.assignments, 1:round_size, round),
+        cdf=view(workspace.resampling_cdf, 1:round_size),
     )
 end
 
@@ -427,18 +412,21 @@ function _preflight_accelerator_method(
     )
     target_argument = _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
     backend = KernelAbstractions.get_backend(buffers.normals)
+    representative_round = findmax(plan.schedule)[2]
+    round_views = _dm_pmc_round_views(method_state, representative_round)
 
     round_kernel = _mis_round_kernel!(backend)
-    denominator = _DMPMCRoundDenominator(plan.logcoefficients, 1)
+    denominator =
+        _DMPMCRoundDenominator(plan.logcoefficients, representative_round)
     for argument in (
-        workspace.round_samples,
-        workspace.round_logweights,
-        workspace.round_proposal_ids,
+        round_views.samples,
+        round_views.logweights,
+        round_views.proposal_ids,
         buffers.failure_scratch.record.storage,
         buffers.normals,
         target_argument,
         bank,
-        plan.assignments,
+        round_views.assignments,
         denominator,
         workspace.solve_scratch,
     )
@@ -446,22 +434,22 @@ function _preflight_accelerator_method(
     end
 
     finalize_kernel = _dm_pmc_finalize_cdf_kernel!(backend)
-    for argument in (workspace.resampling_cdf, maximum(plan.schedule))
+    for argument in (round_views.cdf, round_views.round_size)
         _preflight_kernel_argument(device, finalize_kernel, argument)
     end
     select_kernel = _dm_pmc_select_ancestors_kernel!(backend)
     for argument in (
         workspace.ancestors,
         buffers.resampling_uniforms,
-        workspace.resampling_cdf,
-        maximum(plan.schedule),
+        round_views.cdf,
+        round_views.round_size,
     )
         _preflight_kernel_argument(device, select_kernel, argument)
     end
     gather_kernel = _dm_pmc_gather_ancestors_kernel!(backend)
     for argument in (
         workspace.candidate_locations,
-        workspace.round_samples,
+        round_views.samples,
         workspace.ancestors,
     )
         _preflight_kernel_argument(device, gather_kernel, argument)

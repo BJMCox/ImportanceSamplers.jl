@@ -1,9 +1,52 @@
 struct _SerialCPUExecution end
 struct _ThreadedCPUExecution end
 
+mutable struct _ReportedTransfer
+    count::Int
+    bytes::Int
+end
+
+mutable struct _ReportedTransferReasons
+    failure_snapshot::_ReportedTransfer
+    cdf_maximum::_ReportedTransfer
+    cdf_sum::_ReportedTransfer
+    summary_maximum::_ReportedTransfer
+    summary_scaled_sum::_ReportedTransfer
+    summary_scaled_square_sum::_ReportedTransfer
+end
+
+function _ReportedTransferReasons()
+    return _ReportedTransferReasons(
+        _ReportedTransfer(0, 0),
+        _ReportedTransfer(0, 0),
+        _ReportedTransfer(0, 0),
+        _ReportedTransfer(0, 0),
+        _ReportedTransfer(0, 0),
+        _ReportedTransfer(0, 0),
+    )
+end
+
 mutable struct _ResultTransferCounter
     count::Int
     bytes::Int
+    reasons::_ReportedTransferReasons
+end
+
+_ResultTransferCounter(count::Int, bytes::Int) =
+    _ResultTransferCounter(count, bytes, _ReportedTransferReasons())
+
+function _record_reported_transfer!(
+    counter::_ResultTransferCounter,
+    count,
+    bytes,
+    ::Val{R},
+) where {R}
+    reason = getfield(counter.reasons, R)
+    counter.count += count
+    counter.bytes += bytes
+    reason.count += count
+    reason.bytes += bytes
+    return nothing
 end
 
 function _record_scalar_transfer!(counter::_ResultTransferCounter, ::Type{T}) where {T}
@@ -12,8 +55,20 @@ function _record_scalar_transfer!(counter::_ResultTransferCounter, ::Type{T}) wh
     return nothing
 end
 
+function _record_scalar_transfer!(
+    counter::_ResultTransferCounter,
+    ::Type{T},
+    reason::Val,
+) where {T}
+    return _record_reported_transfer!(counter, 1, sizeof(T), reason)
+end
+
 _record_device_scalar_transfer!(counter, storage, type::Type) =
     _is_host_storage(storage) ? nothing : _record_scalar_transfer!(counter, type)
+
+_record_device_scalar_transfer!(counter, storage, type::Type, reason::Val) =
+    _is_host_storage(storage) ?
+    nothing : _record_scalar_transfer!(counter, type, reason)
 
 struct _KernelExecution{E}
     cpu_execution::E
@@ -43,8 +98,6 @@ struct _DMPMCRandomBuffers{N,U,F}
     resampling_uniforms::U
     failure_scratch::F
 end
-
-Adapt.@adapt_structure _DMPMCRandomBuffers
 
 struct _DeviceFailureRecord{A}
     storage::A

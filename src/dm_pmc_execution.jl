@@ -26,7 +26,6 @@ struct _DMPMCWorkspace{S,W,I,Q,C,A,L}
     ancestors::A
     candidate_locations::L
 end
-Adapt.@adapt_structure _DMPMCWorkspace
 
 struct _DMPMCRoundDenominator{L}
     logcoefficients::L
@@ -175,11 +174,21 @@ function _dm_pmc_resampling_cdf!(
     transfers::_ResultTransferCounter=_ResultTransferCounter(0, 0),
 )
     maximum_logweight = maximum(logweights)
-    _record_device_scalar_transfer!(transfers, logweights, eltype(logweights))
+    _record_device_scalar_transfer!(
+        transfers,
+        logweights,
+        eltype(logweights),
+        Val(:cdf_maximum),
+    )
     maximum_logweight == -Inf && throw(AllZeroWeightsError())
     cdf .= exp.(logweights .- maximum_logweight)
     total = sum(cdf)
-    _record_device_scalar_transfer!(transfers, cdf, eltype(cdf))
+    _record_device_scalar_transfer!(
+        transfers,
+        cdf,
+        eltype(cdf),
+        Val(:cdf_sum),
+    )
     isfinite(total) && total > zero(total) || throw(AllZeroWeightsError())
     cdf ./= total
     cumsum!(cdf, cdf)
@@ -191,21 +200,36 @@ function _dm_pmc_round_summary(
     transfers::_ResultTransferCounter=_ResultTransferCounter(0, 0),
 )
     maximum_logweight = maximum(logweights)
-    _record_device_scalar_transfer!(transfers, logweights, eltype(logweights))
+    _record_device_scalar_transfer!(
+        transfers,
+        logweights,
+        eltype(logweights),
+        Val(:summary_maximum),
+    )
     scaled_sum = mapreduce(
         value -> exp(value - maximum_logweight),
         +,
         logweights;
         init=zero(eltype(logweights)),
     )
-    _record_device_scalar_transfer!(transfers, logweights, eltype(logweights))
+    _record_device_scalar_transfer!(
+        transfers,
+        logweights,
+        eltype(logweights),
+        Val(:summary_scaled_sum),
+    )
     scaled_square_sum = mapreduce(
         value -> abs2(exp(value - maximum_logweight)),
         +,
         logweights;
         init=zero(eltype(logweights)),
     )
-    _record_device_scalar_transfer!(transfers, logweights, eltype(logweights))
+    _record_device_scalar_transfer!(
+        transfers,
+        logweights,
+        eltype(logweights),
+        Val(:summary_scaled_square_sum),
+    )
     T = eltype(logweights)
     return (
         ess=abs2(scaled_sum) / scaled_square_sum,
@@ -214,10 +238,17 @@ function _dm_pmc_round_summary(
     )
 end
 
-function _record_dm_pmc_transfers!(counter::_ResultTransferCounter, transfers)
-    counter.count += transfers.count
-    counter.bytes += transfers.bytes
-    return nothing
+function _record_dm_pmc_transfers!(
+    counter::_ResultTransferCounter,
+    transfers,
+    reason::Val,
+)
+    return _record_reported_transfer!(
+        counter,
+        transfers.count,
+        transfers.bytes,
+        reason,
+    )
 end
 
 function _capture_dm_pmc_round(f, round, phase, round_size, committed_rounds)
@@ -280,15 +311,13 @@ function _importance_sample_cpu!(
     end
 
     for round in eachindex(plan.schedule)
-        round_size = plan.schedule[round]
-        round_samples = _sample_view(
-            workspace.round_samples,
-            1:round_size,
-        )
-        round_logweights = view(workspace.round_logweights, 1:round_size)
-        round_proposal_ids = view(workspace.round_proposal_ids, 1:round_size)
-        assignments = view(plan.assignments, 1:round_size, round)
-        cdf = view(workspace.resampling_cdf, 1:round_size)
+        round_views = _dm_pmc_round_views(method_state, round)
+        round_size = round_views.round_size
+        round_samples = round_views.samples
+        round_logweights = round_views.logweights
+        round_proposal_ids = round_views.proposal_ids
+        assignments = round_views.assignments
+        cdf = round_views.cdf
 
         _capture_dm_pmc_round(round, :normal_buffer, round_size, round - 1) do
             Random.randn!(sampler.rng, buffers.normals)
@@ -308,7 +337,11 @@ function _importance_sample_cpu!(
                 execution,
             )
             snapshot = _device_failure_snapshot(buffers.failure_scratch.record)
-            _record_dm_pmc_transfers!(transfers, snapshot.transfers)
+            _record_dm_pmc_transfers!(
+                transfers,
+                snapshot.transfers,
+                Val(:failure_snapshot),
+            )
             _throw_native_failures(
                 snapshot.failure,
                 snapshot.draw_failure,
