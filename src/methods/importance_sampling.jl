@@ -265,7 +265,7 @@ function _prepare_importance_sampler(rng, target, algorithm, threaded)
     proposal = _algorithm_proposal(algorithm)
     sample_budget = _algorithm_sample_budget(algorithm)
     prepared_target = _resolve_prepared_target(target, proposal)
-    method_state = _prepare_method_state(algorithm)
+    method_state = _prepare_method_state(algorithm, prepared_target)
     device = MLDataDevices.CPUDevice()
     random_buffers = _allocate_random_buffers(
         device,
@@ -289,6 +289,8 @@ end
 _prepare_method_state(
     ::ImportanceSampling{P,_SingleProposalScheme},
 ) where {P} = _SingleProposalMethodState()
+
+_prepare_method_state(algorithm, target) = _prepare_method_state(algorithm)
 
 function _copy_to_device(device, value)
     return device(deepcopy(value))
@@ -378,7 +380,8 @@ function _transfer_prepared_sampler(
     )
     algorithm = _copy_algorithm(device, sampler.algorithm)
     proposal = _algorithm_proposal(algorithm)
-    method_state = _prepare_method_state(algorithm)
+    transferred_target = _transfer_prepared_target(device, sampler.target)
+    method_state = _prepare_method_state(algorithm, transferred_target)
     random_buffers = _allocate_random_buffers(
         device,
         proposal,
@@ -388,7 +391,7 @@ function _transfer_prepared_sampler(
     return _PreparedImportanceSampler(
         _clone_rng(device, sampler.rng),
         random_buffers,
-        _transfer_prepared_target(device, sampler.target),
+        transferred_target,
         algorithm,
         method_state,
         device,

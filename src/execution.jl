@@ -24,6 +24,12 @@ end
 
 Adapt.@adapt_structure _PackedStaticMISRandomBuffers
 
+struct _DMPMCRandomBuffers{N,U,F}
+    normals::N
+    resampling_uniforms::U
+    failure_scratch::F
+end
+
 struct _DeviceFailureRecord{A}
     storage::A
 end
@@ -141,7 +147,11 @@ end
 
 _native_failure_scratch(::_NoRandomBuffers) = _NoNativeFailureScratch()
 _native_failure_scratch(
-    buffers::Union{_RandomBuffers,_PackedStaticMISRandomBuffers},
+    buffers::Union{
+        _RandomBuffers,
+        _PackedStaticMISRandomBuffers,
+        _DMPMCRandomBuffers,
+    },
 ) = buffers.failure_scratch
 
 function _fill_random_buffers!(

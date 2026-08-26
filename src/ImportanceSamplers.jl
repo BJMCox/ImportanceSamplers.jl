@@ -19,6 +19,7 @@ export AbstractImportanceSampler,
     AllZeroWeightsError,
     DiagonalGaussian,
     DeterministicMixturePMC,
+    DMPMCRoundError,
     FactorGaussian,
     ImportanceSampling,
     IdentityTransform,
@@ -61,6 +62,7 @@ include("methods/dm_pmc.jl")
 include("native_execution.jl")
 include("mis_execution.jl")
 include("static_mis_execution.jl")
+include("dm_pmc_execution.jl")
 include("results.jl")
 
 end # module ImportanceSamplers

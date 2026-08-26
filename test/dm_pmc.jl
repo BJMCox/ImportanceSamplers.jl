@@ -224,8 +224,8 @@ end
     @test eltype(diagonal_sampler.method_state.plan.logcoefficients) === Float64
     @test factor_sampler.method_state.bank isa DMPMCIS._PackedFactorGaussianBank
     @test eltype(factor_sampler.method_state.plan.logcoefficients) === Float64
-    @test sampler32.random_buffers isa DMPMCIS._NoRandomBuffers
-    @test factor_sampler.random_buffers isa DMPMCIS._NoRandomBuffers
+    @test sampler32.random_buffers isa DMPMCIS._DMPMCRandomBuffers
+    @test factor_sampler.random_buffers isa DMPMCIS._DMPMCRandomBuffers
 
     copied_factor_sampler = @inferred MLDataDevices.cpu_device()(factor_sampler)
     @test copied_factor_sampler !== factor_sampler
@@ -640,4 +640,345 @@ end
     @test sampler.method_state isa DMPMCIS._SingleProposalMethodState
     @test length(result) == 8
     @test result.diagnostics.method === :importance_sampling
+end
+
+@testset "DM-PMC execution is available" begin
+    bank = ProposalBank([
+        SphericalGaussian(-1.0, 1.0),
+        SphericalGaussian(1.0, 1.0),
+    ])
+    sampler = prepare_sampler(
+        Random.Xoshiro(0x5630),
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(bank; rounds=2, round_size=4);
+        threaded=false,
+    )
+
+    result = importance_sample!(sampler)
+
+    @test result isa WeightedSamples
+    @test length(result) == 8
+end
+
+dm_pmc_context_target(sample, context) = context.shift - abs2(sample) / 2
+
+@testset "DM-PMC one-shot execution" begin
+    algorithm = DeterministicMixturePMC(
+        ProposalBank([SphericalGaussian(-1.0, 1.0), SphericalGaussian(1.0, 1.0)]);
+        rounds=2,
+        round_size=4,
+    )
+
+    context_free = importance_sample(
+        Random.Xoshiro(0x5631),
+        DMPMCTarget{Float64}(),
+        algorithm;
+        threaded=false,
+    )
+    contextual = importance_sample(
+        Random.Xoshiro(0x5632),
+        dm_pmc_context_target,
+        (shift=0.25,),
+        algorithm;
+        threaded=false,
+    )
+
+    @test length(context_free) == 8
+    @test length(contextual) == 8
+    @test contextual.diagnostics.method === :deterministic_mixture_pmc
+end
+
+function caught_dm_pmc_error(f)
+    try
+        f()
+    catch error
+        return error
+    end
+    return nothing
+end
+
+function make_dm_pmc_oracle_case(::Type{T}, repeats=1) where {T}
+    schedule = [11, 13, 17]
+    maximum_round_size = maximum(schedule)
+    normal_batches = [
+        T.([mod(index + 3round, 11) - 5 for index in 1:maximum_round_size]) ./ T(7)
+        for round in 1:(3repeats)
+    ]
+    uniform_batches = [
+        T[mod(T(0.17) * round, one(T)), mod(T(0.73) * round, one(T))]
+        for round in 1:(3repeats)
+    ]
+    bank = ProposalBank(
+        [
+            SphericalGaussian(T(-2), T(0.75)),
+            SphericalGaussian(T(99), one(T)),
+            SphericalGaussian(T(2), T(1.25)),
+        ],
+        T[1, 0, 1],
+    )
+    algorithm = DeterministicMixturePMC(bank; rounds=3, round_size=schedule)
+    return (; schedule, normal_batches, uniform_batches, bank, algorithm)
+end
+
+@testset "DM-PMC all-round result, oracle, and inference" begin
+    for T in (Float32, Float64)
+        case = make_dm_pmc_oracle_case(T)
+        rng = DMPMCPrefilledRNG(case.normal_batches, case.uniform_batches)
+        sampler = @inferred prepare_sampler(
+            rng,
+            DMPMCTarget{T}(),
+            case.algorithm;
+            threaded=false,
+        )
+        initial_locations = vec(copy(sampler.method_state.bank.locations))
+        scales = vec(copy(sampler.method_state.bank.scales))
+        oracle = dm_pmc_scalar_oracle(
+            initial_locations,
+            scales,
+            sampler.method_state.bank.proposal_ids,
+            sampler.method_state.plan,
+            case.normal_batches,
+            case.uniform_batches,
+            DMPMCTarget{T}(),
+        )
+
+        result = @inferred importance_sample!(sampler)
+
+        @test length(result) == 41
+        @test result.samples ≈ oracle.samples rtol = 32eps(T)
+        @test result.logweights ≈ oracle.logweights rtol = 64eps(T)
+        @test result.provenance.round == oracle.rounds
+        @test result.provenance.proposal_id == oracle.proposal_ids
+        @test count(==(1), result.provenance.round) == 11
+        @test count(==(2), result.provenance.round) == 13
+        @test count(==(3), result.provenance.round) == 17
+        @test unique(result.provenance.proposal_id) == [1, 3]
+        @test vec(sampler.method_state.bank.locations) ≈ oracle.locations rtol = 32eps(T)
+        expected_logz = LogExpFunctions.logsumexp(oracle.logweights) - log(T(41))
+        @test lognormalizer(result) ≈ expected_logz rtol = 64eps(T)
+        @test eltype(result.samples) === T
+        @test eltype(result.logweights) === T
+        @test sampler.method_state.workspace isa DMPMCIS._DMPMCWorkspace
+        @test result.diagnostics.method === :deterministic_mixture_pmc
+        @test result.diagnostics.execution === :serial
+        @test result.diagnostics.round_sizes == case.schedule
+        @test length(result.diagnostics.round_ess) == 3
+        @test length(result.diagnostics.round_lognormalizers) == 3
+        @test result.diagnostics.failures == 0
+        @test result.diagnostics.transfers.count == 0
+        @test result.diagnostics.transfers.bytes == 0
+    end
+end
+
+@testset "DM-PMC prepared state persists without result aliasing" begin
+    T = Float64
+    case = make_dm_pmc_oracle_case(T, 2)
+    sampler = prepare_sampler(
+        DMPMCPrefilledRNG(case.normal_batches, case.uniform_batches),
+        DMPMCTarget{T}(),
+        case.algorithm;
+        threaded=false,
+    )
+    initial_locations = vec(copy(sampler.method_state.bank.locations))
+    scales = vec(copy(sampler.method_state.bank.scales))
+    first_oracle = dm_pmc_scalar_oracle(
+        initial_locations,
+        scales,
+        sampler.method_state.bank.proposal_ids,
+        sampler.method_state.plan,
+        case.normal_batches[1:3],
+        case.uniform_batches[1:3],
+        DMPMCTarget{T}(),
+    )
+    second_oracle = dm_pmc_scalar_oracle(
+        first_oracle.locations,
+        scales,
+        sampler.method_state.bank.proposal_ids,
+        sampler.method_state.plan,
+        case.normal_batches[4:6],
+        case.uniform_batches[4:6],
+        DMPMCTarget{T}(),
+    )
+
+    first_result = importance_sample!(sampler)
+    first_snapshot = (
+        samples=copy(first_result.samples),
+        logweights=copy(first_result.logweights),
+        round=copy(first_result.provenance.round),
+        proposal_id=copy(first_result.provenance.proposal_id),
+    )
+    second_result = importance_sample!(sampler)
+
+    @test first_result.samples == first_snapshot.samples
+    @test first_result.logweights == first_snapshot.logweights
+    @test first_result.provenance.round == first_snapshot.round
+    @test first_result.provenance.proposal_id == first_snapshot.proposal_id
+    @test first_result.samples !== second_result.samples
+    @test first_result.logweights !== second_result.logweights
+    @test second_result.samples ≈ second_oracle.samples rtol = 32eps(T)
+    @test vec(sampler.method_state.bank.locations) ≈ second_oracle.locations rtol = 32eps(T)
+    @test second_result.samples[1] ≈
+          first_oracle.locations[sampler.method_state.plan.assignments[1, 1]] +
+          scales[sampler.method_state.plan.assignments[1, 1]] * case.normal_batches[4][1]
+end
+
+@testset "DM-PMC vector diagonal and factor CPU execution" begin
+    for (index, bank) in pairs((
+        ProposalBank([
+            DiagonalGaussian([-1.0, 0.0], [1.0, 2.0]),
+            DiagonalGaussian([1.0, 0.0], [2.0, 1.0]),
+        ]),
+        ProposalBank([
+            FactorGaussian([-1.0, 0.0], [1.0 0.0; 0.25 2.0]),
+            FactorGaussian([1.0, 0.0], [2.0 0.0; -0.25 1.0]),
+        ]),
+    ))
+        algorithm = DeterministicMixturePMC(bank; rounds=2, round_size=[5, 7])
+        result = @inferred importance_sample!(
+            prepare_sampler(
+                Random.Xoshiro(0x5640 + index),
+                DMPMCTarget{Float64}(),
+                algorithm;
+                threaded=false,
+            ),
+        )
+
+        @test size(result.samples) == (2, 12)
+        @test length(result.logweights) == 12
+        @test count(==(1), result.provenance.round) == 5
+        @test count(==(2), result.provenance.round) == 7
+    end
+end
+
+@testset "DM-PMC warmed allocations are result-sized" begin
+    round_size = 4_096
+    rounds = 3
+    sampler = prepare_sampler(
+        Random.Xoshiro(0x5650),
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(
+            ProposalBank([
+                SphericalGaussian(-1.0, 0.75),
+                SphericalGaussian(1.0, 1.25),
+            ]);
+            rounds,
+            round_size,
+        );
+        threaded=false,
+    )
+    importance_sample!(sampler)
+    allocation = @allocated importance_sample!(sampler)
+    result_storage = rounds * round_size * (
+        2sizeof(Float64) + 2sizeof(Int)
+    )
+
+    @test allocation <= result_storage + 128_000
+end
+
+@testset "DM-PMC serial and threaded consume identical prefilled buffers" begin
+    T = Float64
+    case = make_dm_pmc_oracle_case(T)
+    serial = prepare_sampler(
+        DMPMCPrefilledRNG(deepcopy(case.normal_batches), deepcopy(case.uniform_batches)),
+        DMPMCTarget{T}(),
+        case.algorithm;
+        threaded=false,
+    )
+    threaded = prepare_sampler(
+        DMPMCPrefilledRNG(deepcopy(case.normal_batches), deepcopy(case.uniform_batches)),
+        DMPMCTarget{T}(),
+        case.algorithm;
+        threaded=true,
+    )
+
+    serial_result = importance_sample!(serial)
+    threaded_result = importance_sample!(threaded)
+
+    @test threaded_result.samples == serial_result.samples
+    @test threaded_result.logweights == serial_result.logweights
+    @test threaded_result.provenance == serial_result.provenance
+    @test threaded.method_state.bank.locations == serial.method_state.bank.locations
+end
+
+@testset "DM-PMC exact mixture weights and duplicate ancestors" begin
+    for T in (Float32, Float64)
+        bank = ProposalBank(
+            [SphericalGaussian(T(-1), one(T)), SphericalGaussian(T(1), one(T))],
+            T[1, 1],
+        )
+        target = DMPMCMixtureTarget(T[-1, 1], T[1, 1], T[log(T(0.5)), log(T(0.5))])
+        sampler = prepare_sampler(
+            DMPMCPrefilledRNG([T[-1, 0, 1, 0.5]], [T[0.1, 0.1]]),
+            target,
+            DeterministicMixturePMC(bank; rounds=1, round_size=4);
+            threaded=false,
+        )
+
+        result = @inferred importance_sample!(sampler)
+
+        @test all(iszero, result.logweights)
+        @test sampler.method_state.workspace.ancestors == [1, 1]
+        @test vec(sampler.method_state.bank.locations) == fill(result.samples[1], 2)
+    end
+end
+
+@testset "DM-PMC round failures preserve the last committed population" begin
+    T = Float64
+    schedule = [4, 4, 4]
+    normals = [fill(T(round) / 10, 4) for round in 1:3]
+    uniforms = [T[0.1, 0.9] for _ in 1:3]
+    bank = ProposalBank([SphericalGaussian(T(-1), one(T)), SphericalGaussian(T(1), one(T))])
+    algorithm = DeterministicMixturePMC(bank; rounds=3, round_size=schedule)
+
+    target_failure_target = DMPMCFailAfterTarget(T, 5)
+    target_failure_rng = DMPMCPrefilledRNG(deepcopy(normals), deepcopy(uniforms))
+    target_failure_sampler = prepare_sampler(
+        target_failure_rng,
+        target_failure_target,
+        algorithm;
+        threaded=false,
+    )
+    target_oracle = dm_pmc_scalar_oracle(
+        T[-1, 1],
+        T[1, 1],
+        [1, 2],
+        target_failure_sampler.method_state.plan,
+        normals[1:1],
+        uniforms[1:1],
+        DMPMCTarget{T}(),
+    )
+    target_failure = caught_dm_pmc_error() do
+        importance_sample!(target_failure_sampler)
+    end
+
+    @test target_failure isa DMPMCRoundError
+    @test target_failure.round == 2
+    @test target_failure.phase == :sample_and_weight
+    @test target_failure.cause isa SamplerExecutionError
+    @test vec(target_failure_sampler.method_state.bank.locations) == target_oracle.locations
+    @test target_failure_rng.normal_index == 3
+    @test target_failure_rng.uniform_index == 2
+    @test occursin("round 2", sprint(showerror, target_failure))
+    @test occursin("sample_and_weight", sprint(showerror, target_failure))
+    @test occursin("intentional DM-PMC target failure", sprint(showerror, target_failure))
+
+    zero_target = DMPMCNegativeInfinityAfterTarget(T, 4)
+    zero_rng = DMPMCPrefilledRNG(deepcopy(normals), deepcopy(uniforms))
+    zero_sampler = prepare_sampler(
+        zero_rng,
+        zero_target,
+        algorithm;
+        threaded=false,
+    )
+    zero_failure = caught_dm_pmc_error() do
+        importance_sample!(zero_sampler)
+    end
+
+    @test zero_failure isa DMPMCRoundError
+    @test zero_failure.round == 2
+    @test zero_failure.phase == :resampling
+    @test zero_failure.cause isa AllZeroWeightsError
+    @test vec(zero_sampler.method_state.bank.locations) == target_oracle.locations
+    @test zero_rng.normal_index == 3
+    @test zero_rng.uniform_index == 2
 end

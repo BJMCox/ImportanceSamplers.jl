@@ -1,9 +1,154 @@
 import DensityInterface
+import LogExpFunctions
 import Random
 
 struct DMPMCTarget{T<:AbstractFloat} end
 
 (::DMPMCTarget{T})(sample) where {T} = -T(0.5) * sum(abs2, sample)
+
+mutable struct DMPMCPrefilledRNG{T<:AbstractFloat} <: Random.AbstractRNG
+    normal_batches::Vector{Vector{T}}
+    uniform_batches::Vector{Vector{T}}
+    normal_index::Int
+    uniform_index::Int
+end
+
+function DMPMCPrefilledRNG(
+    normal_batches::Vector{Vector{T}},
+    uniform_batches::Vector{Vector{T}},
+) where {T<:AbstractFloat}
+    return DMPMCPrefilledRNG{T}(normal_batches, uniform_batches, 1, 1)
+end
+
+function Random.randn!(rng::DMPMCPrefilledRNG, destination::AbstractArray)
+    batch = rng.normal_batches[rng.normal_index]
+    length(batch) >= length(destination) || throw(
+        DimensionMismatch("prefilled normal batch is too short"),
+    )
+    copyto!(destination, 1, batch, 1, length(destination))
+    rng.normal_index += 1
+    return destination
+end
+
+function Random.rand!(rng::DMPMCPrefilledRNG, destination::AbstractArray)
+    batch = rng.uniform_batches[rng.uniform_index]
+    length(batch) >= length(destination) || throw(
+        DimensionMismatch("prefilled uniform batch is too short"),
+    )
+    copyto!(destination, 1, batch, 1, length(destination))
+    rng.uniform_index += 1
+    return destination
+end
+
+struct DMPMCMixtureTarget{T,V<:AbstractVector{T}}
+    locations::V
+    scales::V
+    logcoefficients::V
+end
+
+function dm_pmc_normal_logdensity(location::T, scale::T, sample::T) where {T}
+    return -log(scale) - T(0.5) * log(T(2) * T(pi)) -
+           T(0.5) * abs2((sample - location) / scale)
+end
+
+function (target::DMPMCMixtureTarget{T})(sample) where {T}
+    value = T(-Inf)
+    for slot in eachindex(target.locations, target.scales, target.logcoefficients)
+        term = target.logcoefficients[slot] + dm_pmc_normal_logdensity(
+            target.locations[slot],
+            target.scales[slot],
+            T(sample),
+        )
+        value = LogExpFunctions.logaddexp(value, term)
+    end
+    return value
+end
+
+mutable struct DMPMCFailAfterTarget{T<:AbstractFloat}
+    evaluations::Base.RefValue{Int}
+    fail_after::Int
+end
+
+DMPMCFailAfterTarget(::Type{T}, fail_after) where {T<:AbstractFloat} =
+    DMPMCFailAfterTarget{T}(Ref(0), fail_after)
+
+function (target::DMPMCFailAfterTarget{T})(sample) where {T}
+    target.evaluations[] += 1
+    target.evaluations[] >= target.fail_after && error("intentional DM-PMC target failure")
+    return -T(0.5) * sum(abs2, sample)
+end
+
+mutable struct DMPMCNegativeInfinityAfterTarget{T<:AbstractFloat}
+    evaluations::Base.RefValue{Int}
+    switch_after::Int
+end
+
+DMPMCNegativeInfinityAfterTarget(::Type{T}, switch_after) where {T<:AbstractFloat} =
+    DMPMCNegativeInfinityAfterTarget{T}(Ref(0), switch_after)
+
+function (target::DMPMCNegativeInfinityAfterTarget{T})(sample) where {T}
+    target.evaluations[] += 1
+    target.evaluations[] > target.switch_after && return T(-Inf)
+    return -T(0.5) * sum(abs2, sample)
+end
+
+function dm_pmc_multinomial_oracle(cdf, uniforms)
+    return [searchsortedfirst(cdf, uniform) for uniform in uniforms]
+end
+
+function dm_pmc_scalar_oracle(
+    initial_locations,
+    scales,
+    proposal_ids,
+    plan,
+    normal_batches,
+    uniform_batches,
+    target,
+)
+    T = eltype(initial_locations)
+    locations = copy(initial_locations)
+    samples = T[]
+    logweights = T[]
+    rounds = Int[]
+    generated_ids = Int[]
+    round_ancestors = Vector{Vector{Int}}()
+    for round in eachindex(normal_batches, uniform_batches)
+        round_size = plan.schedule[round]
+        assignments = view(plan.assignments, 1:round_size, round)
+        round_samples = Vector{T}(undef, round_size)
+        round_logweights = Vector{T}(undef, round_size)
+        for sample_index in 1:round_size
+            slot = assignments[sample_index]
+            sample = locations[slot] + scales[slot] * normal_batches[round][sample_index]
+            round_samples[sample_index] = sample
+            denominator = T(-Inf)
+            for denominator_slot in eachindex(locations)
+                term = plan.logcoefficients[denominator_slot, round] +
+                       dm_pmc_normal_logdensity(
+                    locations[denominator_slot],
+                    scales[denominator_slot],
+                    sample,
+                )
+                denominator = LogExpFunctions.logaddexp(denominator, term)
+            end
+            round_logweights[sample_index] = target(sample) - denominator
+        end
+        normalized = exp.(round_logweights .- LogExpFunctions.logsumexp(round_logweights))
+        cdf = cumsum(normalized)
+        cdf[end] = one(T)
+        ancestors = dm_pmc_multinomial_oracle(
+            cdf,
+            view(uniform_batches[round], 1:length(locations)),
+        )
+        locations .= round_samples[ancestors]
+        append!(samples, round_samples)
+        append!(logweights, round_logweights)
+        append!(rounds, fill(round, round_size))
+        append!(generated_ids, proposal_ids[assignments])
+        push!(round_ancestors, ancestors)
+    end
+    return (; samples, logweights, rounds, proposal_ids=generated_ids, locations, round_ancestors)
+end
 
 mutable struct DMPMCGenericProposal
     draw_count::Base.RefValue{Int}

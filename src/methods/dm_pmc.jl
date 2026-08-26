@@ -83,9 +83,10 @@ struct _DMPMCAllocationPlan{S,C,A,L,O}
     offsets::O
 end
 
-mutable struct _PreparedDMPMC{B,P}
+mutable struct _PreparedDMPMC{B,P,W}
     bank::B
     plan::P
+    workspace::W
 end
 
 _accelerator_method_state_limit(::_PreparedDMPMC) = :unsupported_device
@@ -261,21 +262,64 @@ function _dm_pmc_allocation_plan(bank, active_masses, schedule)
     )
 end
 
-function _prepare_method_state(algorithm::DeterministicMixturePMC)
+function _prepare_dm_pmc_state(algorithm::DeterministicMixturePMC)
     schedule = _resolve_round_schedule(algorithm)
     bank = _prepare_dm_pmc_bank(algorithm.bank)
     active_masses = algorithm.bank.masses[bank.proposal_ids]
     plan = _dm_pmc_allocation_plan(bank, active_masses, schedule)
-    return _PreparedDMPMC(bank, plan)
+    return bank, plan
+end
+
+function _prepare_method_state(algorithm::DeterministicMixturePMC)
+    bank, plan = _prepare_dm_pmc_state(algorithm)
+    workspace = _allocate_dm_pmc_workspace(
+        bank,
+        plan,
+        eltype(bank.lognormalizers),
+    )
+    return _PreparedDMPMC(bank, plan, workspace)
+end
+
+function _prepare_method_state(algorithm::DeterministicMixturePMC, prepared_target)
+    bank, plan = _prepare_dm_pmc_state(algorithm)
+    binding_sample = _dm_pmc_binding_sample(bank)
+    target = _bind_resolved_target(prepared_target, binding_sample)
+    log_type = _resolve_packed_static_mis_logweight_type(
+        target,
+        bank,
+        typeof(binding_sample),
+    )
+    workspace = _allocate_dm_pmc_workspace(bank, plan, log_type)
+    return _PreparedDMPMC(bank, plan, workspace)
 end
 
 function _allocate_random_buffers(
     ::MLDataDevices.AbstractCPUDevice,
     ::ProposalBank,
-    ::_PreparedDMPMC,
+    method_state::_PreparedDMPMC,
     sample_budget,
 )
-    return _NoRandomBuffers()
+    bank = method_state.bank
+    maximum_round_size = maximum(method_state.plan.schedule)
+    normals = similar(
+        bank.locations,
+        eltype(bank.locations),
+        size(bank.locations, 1) * maximum_round_size,
+    )
+    resampling_uniforms = similar(
+        bank.cdf,
+        eltype(bank.cdf),
+        _active_proposal_count(bank),
+    )
+    failure_scratch = _allocate_native_failure_scratch(
+        normals,
+        maximum_round_size,
+    )
+    return _DMPMCRandomBuffers(
+        normals,
+        resampling_uniforms,
+        failure_scratch,
+    )
 end
 
 function _copy_dm_pmc_active_proposal(device, proposal::_GaussianProposal)
