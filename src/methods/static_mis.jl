@@ -76,9 +76,21 @@ _prepare_static_mis_bank(bank, ::Val{:diagonal}) =
     _prepare_active_proposal_bank(bank)
 
 function _prepare_static_mis_bank(bank, ::Val{:factor})
-    packed = _pack_native_gaussian_bank(bank)
+    proposal_ids, logmasses, cdf = _prepare_active_proposal_metadata(bank)
+    packed = _pack_native_gaussian_bank(
+        bank,
+        proposal_ids,
+        logmasses,
+        cdf,
+        Val(:factor),
+    )
     isnothing(packed) || return packed
-    return _prepare_active_proposal_bank(bank)
+    return _prepare_generic_active_proposal_bank(
+        bank,
+        proposal_ids,
+        logmasses,
+        cdf,
+    )
 end
 
 function _prepare_static_mis_bank(bank, ::Val{:dynamic})

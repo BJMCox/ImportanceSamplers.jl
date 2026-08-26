@@ -85,6 +85,14 @@ function packed_factor_density_allocated(
     )
 end
 
+function static_mis_bank_preparation_allocated(bank)
+    return @allocated ISK._prepare_static_mis_bank(bank)
+end
+
+function generic_bank_preparation_allocated(bank)
+    return @allocated ISK._prepare_active_proposal_bank(bank)
+end
+
 function Random.rand(
     rng::Random.AbstractRNG,
     proposal::StaticMISKernelExternalGaussian{T},
@@ -419,6 +427,21 @@ end
     big_mass_factor_result = @inferred importance_sample!(big_mass_factor_sampler)
     @test size(big_mass_factor_result.samples) == (2, 8)
     @test eltype(big_mass_factor_result.logweights) === BigFloat
+
+    allocation_bank = ProposalBank(
+        [
+            FactorGaussian(
+                [Float64(index), 0.0],
+                [1.0 0.0; 0.25 1.0],
+            ) for index in 1:32
+        ],
+        fill(BigFloat(1), 32),
+    )
+    ISK._prepare_static_mis_bank(allocation_bank)
+    ISK._prepare_active_proposal_bank(allocation_bank)
+    static_allocation = static_mis_bank_preparation_allocated(allocation_bank)
+    generic_allocation = generic_bank_preparation_allocated(allocation_bank)
+    @test 2static_allocation <= 3generic_allocation
 
     erased_factor_sampler = prepare_sampler(
         Random.Xoshiro(0x5409),
