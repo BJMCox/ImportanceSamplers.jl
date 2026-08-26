@@ -103,8 +103,68 @@ end
         )
 
         @test cdf[end] == one(T)
-        @test ancestors == expected_ancestors == [1, 1, 2, 4]
+        @test ancestors == expected_ancestors == [1, 2, 2, 4]
         @test candidates == samples[:, expected_ancestors]
-        @test count(==(1), ancestors) == 2
+        @test count(==(2), ancestors) == 2
+    end
+end
+
+@testset "DM-PMC multinomial CDF plateaus use strict upper bounds" begin
+    for T in (Float32, Float64)
+        samples = T[10, 20, 30, 40]
+        cases = (
+            (
+                cdf=T[0, 0, 0.5, 1],
+                uniforms=T[0, prevfloat(T(0.5)), T(0.5), prevfloat(one(T))],
+                ancestors=[3, 3, 4, 4],
+            ),
+            (
+                cdf=T[0.25, 1, 1, 1],
+                uniforms=T[0, T(0.25), nextfloat(T(0.25)), prevfloat(one(T))],
+                ancestors=[1, 2, 2, 2],
+            ),
+            (
+                cdf=T[0.25, 0.5, 0.75, 1],
+                uniforms=T[one(T)],
+                ancestors=[4],
+            ),
+        )
+        for case in cases
+            ancestors = zeros(Int, length(case.uniforms))
+            candidates = zeros(T, length(case.uniforms))
+
+            DMPMCKernelIS._launch_dm_pmc_resampling!(
+                copy(case.cdf),
+                case.uniforms,
+                ancestors,
+                samples,
+                candidates,
+                DMPMCKernelIS._SerialCPUExecution(),
+            )
+
+            @test ancestors == case.ancestors
+            @test candidates == samples[case.ancestors]
+        end
+    end
+end
+
+@testset "DM-PMC round ESS is stable for extreme finite weights" begin
+    for T in (Float32, Float64)
+        equal_positive = DMPMCKernelIS._dm_pmc_round_summary(
+            T[floatmax(T), floatmax(T)],
+        )
+        equal_negative = DMPMCKernelIS._dm_pmc_round_summary(
+            T[-floatmax(T), -floatmax(T)],
+        )
+        concentrated = DMPMCKernelIS._dm_pmc_round_summary(
+            T[floatmax(T), -floatmax(T)],
+        )
+
+        @test equal_positive.ess === T(2)
+        @test equal_negative.ess === T(2)
+        @test concentrated.ess === one(T)
+        @test isfinite(equal_positive.lognormalizer)
+        @test isfinite(equal_negative.lognormalizer)
+        @test isfinite(concentrated.lognormalizer)
     end
 end

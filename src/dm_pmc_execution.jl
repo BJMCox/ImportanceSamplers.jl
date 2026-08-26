@@ -5,35 +5,6 @@ struct DMPMCRoundError{E,D<:NamedTuple} <: Exception
     diagnostics::D
 end
 
-function importance_sample(
-    rng::Random.AbstractRNG,
-    logtarget,
-    algorithm::DeterministicMixturePMC;
-    threaded=true,
-)
-    return importance_sample!(
-        prepare_sampler(rng, logtarget, algorithm; threaded=threaded),
-    )
-end
-
-function importance_sample(
-    rng::Random.AbstractRNG,
-    logtarget,
-    context,
-    algorithm::DeterministicMixturePMC;
-    threaded=true,
-)
-    return importance_sample!(
-        prepare_sampler(
-            rng,
-            logtarget,
-            context,
-            algorithm;
-            threaded=threaded,
-        ),
-    )
-end
-
 function Base.showerror(io::IO, error::DMPMCRoundError)
     print(
         io,
@@ -126,7 +97,7 @@ end
     last = last_index
     while first < last
         middle = first + ((last - first) >> 1)
-        if uniform <= @inbounds(cdf[middle])
+        if uniform < @inbounds(cdf[middle])
             last = middle
         else
             first = middle + 1
@@ -207,33 +178,25 @@ function _dm_pmc_resampling_cdf!(cdf, logweights)
     return cdf
 end
 
-function _dm_pmc_logsumexp(values)
-    return mapreduce(
-        _logsumexp_accumulator,
-        _merge_logsumexp_accumulators,
-        values;
-        init=_LogSumExpAccumulator(
-            eltype(values)(-Inf),
-            zero(eltype(values)),
-        ),
-    ) |> _finish_logsumexp
-end
-
 function _dm_pmc_round_summary(logweights)
-    logsum = _dm_pmc_logsumexp(logweights)
-    doubled_logsum = mapreduce(
-        value -> _logsumexp_accumulator(value + value),
-        _merge_logsumexp_accumulators,
+    maximum_logweight = maximum(logweights)
+    scaled_sum = mapreduce(
+        value -> exp(value - maximum_logweight),
+        +,
         logweights;
-        init=_LogSumExpAccumulator(
-            eltype(logweights)(-Inf),
-            zero(eltype(logweights)),
-        ),
-    ) |> _finish_logsumexp
+        init=zero(eltype(logweights)),
+    )
+    scaled_square_sum = mapreduce(
+        value -> abs2(exp(value - maximum_logweight)),
+        +,
+        logweights;
+        init=zero(eltype(logweights)),
+    )
     T = eltype(logweights)
     return (
-        ess=exp(logsum + logsum - doubled_logsum),
-        lognormalizer=logsum - log(T(length(logweights))),
+        ess=abs2(scaled_sum) / scaled_square_sum,
+        lognormalizer=maximum_logweight + log(scaled_sum) -
+                      log(T(length(logweights))),
     )
 end
 

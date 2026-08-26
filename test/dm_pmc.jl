@@ -686,6 +686,40 @@ dm_pmc_context_target(sample, context) = context.shift - abs2(sample) / 2
     @test length(context_free) == 8
     @test length(contextual) == 8
     @test contextual.diagnostics.method === :deterministic_mixture_pmc
+
+    importance_algorithm = ImportanceSampling(
+        SphericalGaussian(0.0, 1.0);
+        nsamples=4,
+    )
+    context_free_method = which(
+        importance_sample,
+        (Random.Xoshiro, DMPMCTarget{Float64}, typeof(algorithm)),
+    )
+    importance_method = which(
+        importance_sample,
+        (Random.Xoshiro, DMPMCTarget{Float64}, typeof(importance_algorithm)),
+    )
+    contextual_method = which(
+        importance_sample,
+        (
+            Random.Xoshiro,
+            typeof(dm_pmc_context_target),
+            @NamedTuple{shift::Float64},
+            typeof(algorithm),
+        ),
+    )
+    contextual_importance_method = which(
+        importance_sample,
+        (
+            Random.Xoshiro,
+            typeof(dm_pmc_context_target),
+            @NamedTuple{shift::Float64},
+            typeof(importance_algorithm),
+        ),
+    )
+
+    @test context_free_method === importance_method
+    @test contextual_method === contextual_importance_method
 end
 
 function caught_dm_pmc_error(f)

@@ -93,7 +93,11 @@ function (target::DMPMCNegativeInfinityAfterTarget{T})(sample) where {T}
 end
 
 function dm_pmc_multinomial_oracle(cdf, uniforms)
-    return [searchsortedfirst(cdf, uniform) for uniform in uniforms]
+    last_index = lastindex(cdf)
+    return [
+        min(searchsortedlast(cdf, uniform) + 1, last_index) for
+        uniform in uniforms
+    ]
 end
 
 function dm_pmc_scalar_oracle(

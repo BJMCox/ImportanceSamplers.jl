@@ -510,22 +510,21 @@ end
     importance_sample(rng, logtarget, algorithm; threaded=true)
     importance_sample(rng, logtarget, p, algorithm; threaded=true)
 
-Run one complete plain-importance-sampling estimator.
+Run one complete importance-sampling estimator.
 
 This is the one-shot form of [`prepare_sampler`](@ref) followed by
 [`importance_sample!`](@ref). `logtarget` returns a log density, not a linear
 density. The contextual overload calls `logtarget(sample, p)`. The one-shot
 form executes on CPU; apply a device to a prepared sampler for CUDA execution.
 
-The result stores canonical raw log weights
-`logtarget(sample) - logdensityof(proposal, sample)`. Use
-[`normalized_weights`](@ref) for weights that sum to one and
-[`lognormalizer`](@ref) for the complete estimator's log normalizer.
+The result stores the algorithm's canonical raw log weights. Use
+[`normalized_weights`](@ref) for weights that sum to one and [`lognormalizer`](@ref)
+for the complete estimator's log normalizer.
 """
 function importance_sample(
     rng::Random.AbstractRNG,
     logtarget,
-    algorithm::ImportanceSampling;
+    algorithm::AbstractImportanceSampler;
     threaded=true,
 )
     sampler = prepare_sampler(
@@ -541,7 +540,7 @@ function importance_sample(
     rng::Random.AbstractRNG,
     logtarget,
     context,
-    algorithm::ImportanceSampling;
+    algorithm::AbstractImportanceSampler;
     threaded=true,
 )
     sampler = prepare_sampler(
