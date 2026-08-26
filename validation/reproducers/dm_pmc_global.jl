@@ -5,7 +5,6 @@ using Pkg
 using Random
 using Test
 
-const DM_PMC_GLOBAL_SEED = 0x646d706d636f7263
 const DM_PMC_GLOBAL_COMMAND =
     "julia --project=validation validation/reproducers/dm_pmc_global.jl"
 
@@ -60,38 +59,6 @@ function oracle_gaussian_logdensity(proposal::OracleGaussian{T}, sample) where {
     return proposal.lognormalizer - T(0.5) * sum(abs2, standardized)
 end
 
-function oracle_active_ids(masses)
-    ids = findall(!iszero, masses)
-    sort!(ids; by=id -> masses[id], alg=Base.Sort.MergeSort)
-    return ids
-end
-
-function oracle_exact_mass_proportions(masses)
-    proportions = [rationalize(BigInt, mass; tol=0) for mass in masses]
-    proportions ./= sum(proportions)
-    return proportions
-end
-
-function oracle_round_counts(exact_proportions, round_size, round)
-    counts = [floor(Int, proportion * round_size) for proportion in exact_proportions]
-    remainders = [
-        exact_proportions[slot] * round_size - counts[slot] for
-        slot in eachindex(counts)
-    ]
-    remaining = round_size - sum(counts)
-    first_tie_slot = mod1(round, length(counts))
-    order = collect(eachindex(counts))
-    sort!(
-        order;
-        by=slot -> (-remainders[slot], mod(slot - first_tie_slot, length(counts))),
-        alg=Base.Sort.MergeSort,
-    )
-    for index in 1:remaining
-        counts[order[index]] += 1
-    end
-    return counts
-end
-
 function oracle_assignment(counts)
     return reduce(vcat, (fill(slot, count) for (slot, count) in pairs(counts)))
 end
@@ -102,16 +69,18 @@ end
 
 function oracle_dm_pmc(
     configured_proposals,
-    configured_masses,
+    active_ids,
     schedule,
+    expected_counts,
     normal_batches,
     uniform_batches,
     target,
 )
-    T = eltype(configured_masses)
-    active_ids = oracle_active_ids(configured_masses)
+    T = eltype(first(configured_proposals).location)
     proposals = configured_proposals[active_ids]
-    exact_proportions = oracle_exact_mass_proportions(configured_masses[active_ids])
+    length(expected_counts) == length(schedule) || throw(
+        DimensionMismatch("one explicit allocation row is required per round"),
+    )
     locations = reduce(hcat, (copy(proposal.location) for proposal in proposals))
     factors = [copy(proposal.factor) for proposal in proposals]
     all_samples = Matrix{T}(undef, size(locations, 1), 0)
@@ -123,7 +92,13 @@ function oracle_dm_pmc(
 
     for round in eachindex(schedule)
         round_size = schedule[round]
-        counts = oracle_round_counts(exact_proportions, round_size, round)
+        counts = copy(expected_counts[round])
+        length(counts) == length(active_ids) || throw(
+            DimensionMismatch("explicit allocation width does not match active proposals"),
+        )
+        sum(counts) == round_size || throw(
+            DimensionMismatch("explicit allocation row does not sum to round size"),
+        )
         assignments = oracle_assignment(counts)
         round_proposals = [
             OracleGaussian(
@@ -210,7 +185,7 @@ end
 function oracle_case(::Type{T}, kind) where {T}
     dimension = 4
     configured_count = 4
-    masses = T[1, 3, 2, 0]
+    configured_mass_ratios = T[1, 3, 2, 0]
     oracle_proposals = OracleGaussian{T}[]
     package_proposals = Any[]
     for slot in 1:configured_count
@@ -231,8 +206,11 @@ function oracle_case(::Type{T}, kind) where {T}
             OracleGaussian(copy(location), copy(factor), lognormalizer),
         )
     end
-    bank = ProposalBank(package_proposals, masses)
+    bank = ProposalBank(package_proposals, configured_mass_ratios)
     schedule = [7, 10, 13]
+    active_ids = [1, 3, 2]
+    expected_counts = (Int[1, 2, 4], Int[2, 3, 5], Int[2, 4, 7])
+    expected_counts_by_id = (Int[1, 4, 2, 0], Int[2, 5, 3, 0], Int[2, 7, 4, 0])
     capacity = maximum(schedule)
     normal_batches = [
         T[
@@ -241,18 +219,63 @@ function oracle_case(::Type{T}, kind) where {T}
             index in 1:(dimension * capacity)
         ] for round in eachindex(schedule)
     ]
-    active_count = count(!iszero, masses)
+    active_count = length(active_ids)
     uniform_values = T[0.25, 0.75, 0.5]
     uniform_batches = [fill(uniform_values[round], active_count) for round in eachindex(schedule)]
     return (;
         bank,
-        masses=copy(bank.masses),
+        masses=copy(configured_mass_ratios),
+        active_ids,
+        expected_counts,
+        expected_counts_by_id,
         oracle_proposals,
         schedule,
         normal_batches,
         uniform_batches,
         target=OracleQuadraticTarget{T}(dimension),
     )
+end
+
+function validate_oracle_tie_rotation(::Type{T}) where {T}
+    configured_mass_ratios = T[1, 1, 1, 0]
+    proposals = [DiagonalGaussian(T[0.15 * (slot - 2.5)], T[1]) for slot in 1:4]
+    schedule = [4, 4, 4]
+    expected_counts_by_id = (Int[2, 1, 1, 0], Int[1, 2, 1, 0], Int[1, 1, 2, 0])
+    normal_batches = [
+        T[0.2 * sin(0.7 * index + round) for index in 1:maximum(schedule)] for
+        round in eachindex(schedule)
+    ]
+    uniform_batches = [fill(T(0.5), 3) for _ in eachindex(schedule)]
+    target = OracleQuadraticTarget{T}(1)
+    sampler = prepare_sampler(
+        OraclePrefilledRNG(normal_batches, uniform_batches),
+        target,
+        DeterministicMixturePMC(
+            ProposalBank(proposals, configured_mass_ratios);
+            rounds=length(schedule),
+            round_size=schedule,
+        );
+        threaded=false,
+    )
+    result = importance_sample!(sampler)
+    observed = Tuple(
+        [
+            count(
+                index -> result.provenance.round[index] == round &&
+                         result.provenance.proposal_id[index] == proposal_id,
+                eachindex(result.logweights),
+            ) for proposal_id in eachindex(configured_mass_ratios)
+        ] for round in eachindex(schedule)
+    )
+    @test observed == expected_counts_by_id
+    return (; configured_mass_ratios, expected_counts_by_id, observed)
+end
+
+function validate_oracle_cdf_boundaries(::Type{T}) where {T}
+    cdf = T[0.25, 0.75, 1]
+    @test oracle_strict_upper_bound(cdf, T(0.25)) == 2
+    @test oracle_strict_upper_bound(cdf, T(0.75)) == 3
+    return (cdf=Tuple(cdf), selected=(2, 3))
 end
 
 function infer_round_locations(round_samples, assignments, factors, normals)
@@ -287,8 +310,9 @@ function validate_oracle_case(::Type{T}, kind) where {T}
     case = oracle_case(T, kind)
     oracle = oracle_dm_pmc(
         case.oracle_proposals,
-        case.masses,
+        case.active_ids,
         case.schedule,
+        case.expected_counts,
         case.normal_batches,
         case.uniform_batches,
         case.target,
@@ -320,7 +344,7 @@ function validate_oracle_case(::Type{T}, kind) where {T}
     @test 4 ∉ result.provenance.proposal_id
     @test all(round -> length(unique(round.ancestors)) < length(round.ancestors), oracle.rounds)
 
-    factors = [proposal.factor for proposal in case.oracle_proposals[oracle.active_ids]]
+    factors = [proposal.factor for proposal in case.oracle_proposals[case.active_ids]]
     inferred_ancestors = Vector{Vector{Int}}()
     for round in 2:length(case.schedule)
         observed_range = (sum(case.schedule[1:(round - 1)]) + 1):sum(case.schedule[1:round])
@@ -362,13 +386,7 @@ function validate_oracle_case(::Type{T}, kind) where {T}
             ) for proposal_id in 1:length(case.bank.proposals)
         ] for round in eachindex(case.schedule)
     ]
-    @test round_counts == [
-        [
-            proposal_id in oracle.active_ids ?
-            oracle.rounds[round].counts[findfirst(==(proposal_id), oracle.active_ids)] : 0 for
-            proposal_id in 1:length(case.bank.proposals)
-        ] for round in eachindex(case.schedule)
-    ]
+    @test Tuple(round_counts) == case.expected_counts_by_id
 
     return (;
         scalar_type=T,
@@ -402,18 +420,27 @@ function run_dm_pmc_global_reproducer()
         validate_oracle_case(T, kind) for
         (T, kind) in ((Float64, :diagonal), (Float32, :factor))
     ]
+    tie_rotation = validate_oracle_tie_rotation(Float64)
+    cdf_boundaries = (
+        Float32=validate_oracle_cdf_boundaries(Float32),
+        Float64=validate_oracle_cdf_boundaries(Float64),
+    )
     return (;
         status=:passed,
         classification=:paper_equation_and_mechanism_check,
         paper_equations=(12, 14, 18, 19, 20),
         command=DM_PMC_GLOBAL_COMMAND,
-        seed=DM_PMC_GLOBAL_SEED,
+        deterministic_buffer_identity=:trigonometric_normals_and_fixed_uniforms,
         julia=VERSION,
         packages=package_versions(),
         rows,
+        tie_rotation,
+        cdf_boundaries,
     )
 end
 
 @testset "DM-PMC independent global-resampling reproducer" begin
+    fixture = oracle_case(Float64, :diagonal)
+    @test fixture.masses == Float64[1, 3, 2, 0]
     @test run_dm_pmc_global_reproducer().status === :passed
 end
