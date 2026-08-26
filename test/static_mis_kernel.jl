@@ -402,6 +402,24 @@ end
     factor_result = @inferred importance_sample!(factor_sampler)
     @test size(factor_result.samples) == (2, 4)
 
+    big_mass_factor_bank = ProposalBank(
+        [
+            FactorGaussian([0.0, 0.0], [1.0 0.0; 0.25 1.0]),
+            FactorGaussian([1.0, 1.0], [1.0 0.0; 0.25 1.0]),
+        ],
+        BigFloat[1, 3],
+    )
+    big_mass_factor_sampler = @inferred prepare_sampler(
+        Random.Xoshiro(0x540a),
+        StaticMISKernelVectorTarget{Float64}(),
+        ImportanceSampling(big_mass_factor_bank; nsamples=8);
+        threaded=false,
+    )
+    @test big_mass_factor_sampler.method_state.bank isa ISK._ActiveProposalBank
+    big_mass_factor_result = @inferred importance_sample!(big_mass_factor_sampler)
+    @test size(big_mass_factor_result.samples) == (2, 8)
+    @test eltype(big_mass_factor_result.logweights) === BigFloat
+
     erased_factor_sampler = prepare_sampler(
         Random.Xoshiro(0x5409),
         StaticMISKernelVectorTarget{Float64}(),

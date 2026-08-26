@@ -75,8 +75,11 @@ _prepare_static_mis_bank(bank, ::Val{false}) =
 _prepare_static_mis_bank(bank, ::Val{:diagonal}) =
     _prepare_active_proposal_bank(bank)
 
-_prepare_static_mis_bank(bank, ::Val{:factor}) =
-    _pack_native_gaussian_bank(bank)
+function _prepare_static_mis_bank(bank, ::Val{:factor})
+    packed = _pack_native_gaussian_bank(bank)
+    isnothing(packed) || return packed
+    return _prepare_active_proposal_bank(bank)
+end
 
 function _prepare_static_mis_bank(bank, ::Val{:dynamic})
     packed = _pack_native_gaussian_bank(bank)
