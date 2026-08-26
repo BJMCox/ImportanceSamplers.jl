@@ -14,10 +14,11 @@ struct _RandomBuffers{U,N,F}
     failure_scratch::F
 end
 
-struct _PackedStaticMISRandomBuffers{U,N,A,F}
+struct _PackedStaticMISRandomBuffers{U,N,A,S,F}
     uniform::U
     normal::N
     assignments::A
+    solve_scratch::S
     failure_scratch::F
 end
 

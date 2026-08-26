@@ -51,10 +51,43 @@ function _StaticMISDenominatorEvaluator(
     )
 end
 
+function _prepare_static_mis_bank(bank::ProposalBank)
+    proposal_type = eltype(bank.proposals)
+    native_candidate = Val(
+        proposal_type <: _GaussianProposal || !isconcretetype(proposal_type),
+    )
+    return _prepare_static_mis_bank(
+        bank,
+        native_candidate,
+    )
+end
+
+function _prepare_static_mis_bank(bank, ::Val{true})
+    return _prepare_static_mis_bank(
+        bank,
+        _native_gaussian_pack_kind(eltype(bank.proposals)),
+    )
+end
+
+_prepare_static_mis_bank(bank, ::Val{false}) =
+    _prepare_active_proposal_bank(bank)
+
+_prepare_static_mis_bank(bank, ::Val{:diagonal}) =
+    _prepare_active_proposal_bank(bank)
+
+_prepare_static_mis_bank(bank, ::Val{:factor}) =
+    _pack_native_gaussian_bank(bank)
+
+function _prepare_static_mis_bank(bank, ::Val{:dynamic})
+    packed = _pack_native_gaussian_bank(bank)
+    isnothing(packed) || return packed
+    return _prepare_active_proposal_bank(bank)
+end
+
 function _prepare_method_state(
     algorithm::ImportanceSampling{<:ProposalBank,<:StratifiedMixture},
 )
-    bank = _prepare_active_proposal_bank(algorithm.proposal)
+    bank = _prepare_static_mis_bank(algorithm.proposal)
     design = _PreparedMISDesign(
         _StratifiedAssignment(),
         _FullMixtureDenominator(),
@@ -65,7 +98,7 @@ end
 function _prepare_method_state(
     algorithm::ImportanceSampling{<:ProposalBank,<:RandomMixture},
 )
-    bank = _prepare_active_proposal_bank(algorithm.proposal)
+    bank = _prepare_static_mis_bank(algorithm.proposal)
     design = _PreparedMISDesign(
         _RandomAssignment(),
         _FullMixtureDenominator(),
@@ -76,7 +109,7 @@ end
 function _prepare_method_state(
     algorithm::ImportanceSampling{<:ProposalBank,<:StandardMIS},
 )
-    bank = _prepare_active_proposal_bank(algorithm.proposal)
+    bank = _prepare_static_mis_bank(algorithm.proposal)
     design = _PreparedMISDesign(
         _StratifiedAssignment(),
         _GeneratingDenominator(),
@@ -87,7 +120,7 @@ end
 function _prepare_method_state(
     algorithm::ImportanceSampling{<:ProposalBank,<:PartialDeterministicMixture},
 )
-    bank = _prepare_active_proposal_bank(algorithm.proposal)
+    bank = _prepare_static_mis_bank(algorithm.proposal)
     denominator = _compile_partial_denominator(
         algorithm.proposal,
         bank,
@@ -381,34 +414,6 @@ end
     term_index,
 ) where {T} = (term_index, zero(T))
 
-@inline function _mis_logdenominator_core(
-    ::Type{T},
-    bank,
-    denominator,
-    generating_slot,
-    sample,
-) where {T}
-    value = T(-Inf)
-    generating_logdensity = zero(T)
-    first_term, last_term = _mis_term_bounds(bank, denominator, generating_slot)
-    for term_index in first_term:last_term
-        proposal_slot, logmass = _mis_denominator_term(
-            T,
-            bank,
-            denominator,
-            term_index,
-        )
-        logdensity = _mis_proposal_logdensity(T, bank, sample, proposal_slot)
-        proposal_slot == generating_slot && (generating_logdensity = logdensity)
-        value = LogExpFunctions.logaddexp(value, logmass + logdensity)
-    end
-    reason = (
-        isnan(generating_logdensity) || generating_logdensity == -Inf ||
-        isnan(value) || value == -Inf
-    ) ? _NATIVE_PROPOSAL_INVALID : UInt16(0)
-    return value, generating_logdensity, reason
-end
-
 function _mis_logdenominator(
     ::Type{T},
     bank,
@@ -424,6 +429,8 @@ function _mis_logdenominator(
             denominator,
             generating_slot,
             sample,
+            nothing,
+            sample_index,
         )
         if !iszero(reason)
             _validate_generating_logdensity(generating_logdensity)

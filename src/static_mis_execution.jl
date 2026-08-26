@@ -1,7 +1,10 @@
 function _allocate_random_buffers(
     ::MLDataDevices.AbstractCPUDevice,
     ::ProposalBank,
-    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    method_state::_PreparedStaticMIS{<:Union{
+        _PackedDiagonalGaussianBank,
+        _PackedFactorGaussianBank,
+    }},
     nsamples,
 )
     bank = method_state.bank
@@ -106,7 +109,7 @@ end
 
 function _allocate_packed_static_mis_random_buffers(
     prototype,
-    bank::_PackedDiagonalGaussianBank,
+    bank::Union{_PackedDiagonalGaussianBank,_PackedFactorGaussianBank},
     nsamples,
 )
     uniform = similar(prototype, eltype(bank.cdf), nsamples)
@@ -116,11 +119,13 @@ function _allocate_packed_static_mis_random_buffers(
         size(bank.locations, 1) * nsamples,
     )
     assignments = similar(prototype, Int, nsamples)
+    solve_scratch = _allocate_mis_solve_scratch(prototype, bank, nsamples)
     failure_scratch = _allocate_native_failure_scratch(normal, nsamples)
     return _PackedStaticMISRandomBuffers(
         uniform,
         normal,
         assignments,
+        solve_scratch,
         failure_scratch,
     )
 end
@@ -141,89 +146,25 @@ end
     )
 end
 
-@kernel function _static_mis_sampling_kernel!(
-    samples,
-    logweights,
-    proposal_ids,
-    failure_storage,
-    normal_buffer,
-    target,
-    bank,
-    assignments,
-    denominator_policy,
-)
-    sample_index = @index(Global, Linear)
-    generating_slot = @inbounds assignments[sample_index]
-    dimension = size(bank.locations, 1)
-    normal_offset = (sample_index - 1) * dimension + 1
-    valid = _native_store_gaussian!(
-        samples,
-        sample_index,
-        bank,
-        normal_buffer,
-        normal_offset,
-        generating_slot,
-    )
-    if !valid
-        _record_native_failure!(
-            failure_storage,
-            sample_index,
-            0,
-            _NATIVE_GENERATED_NONFINITE,
-        )
-    else
-        sample = _native_sample_at(samples, sample_index)
-        target_log, target_reason, target_failed = target(sample, sample_index)
-        if target_failed
-            iszero(target_reason) || _record_native_failure!(
-                failure_storage,
-                sample_index,
-                0,
-                target_reason,
-            )
-        else
-            denominator, _, denominator_reason = _mis_logdenominator_core(
-                typeof(target_log),
-                bank,
-                denominator_policy,
-                generating_slot,
-                sample,
-            )
-            if !iszero(denominator_reason)
-                _record_native_failure!(
-                    failure_storage,
-                    sample_index,
-                    0,
-                    denominator_reason,
-                )
-            else
-                logweight, logweight_reason = _subtract_logweight(
-                    target_log,
-                    denominator,
-                )
-                if iszero(logweight_reason)
-                    @inbounds logweights[sample_index] = logweight
-                    @inbounds proposal_ids[sample_index] =
-                        bank.proposal_ids[generating_slot]
-                else
-                    _record_native_failure!(
-                        failure_storage,
-                        sample_index,
-                        0,
-                        logweight_reason,
-                    )
-                end
-            end
-        end
-    end
-end
-
 function _allocate_packed_static_mis_samples(
     prototype,
     bank::_PackedDiagonalGaussianBank{L,S,N,M,C,I,<:_ScalarGaussianLayout},
     nsamples,
 ) where {L,S,N,M,C,I}
     return similar(prototype, eltype(bank.locations), nsamples)
+end
+
+function _allocate_packed_static_mis_samples(
+    prototype,
+    bank::_PackedFactorGaussianBank,
+    nsamples,
+)
+    return similar(
+        prototype,
+        eltype(bank.locations),
+        size(bank.locations, 1),
+        nsamples,
+    )
 end
 
 function _allocate_packed_static_mis_samples(
@@ -269,7 +210,7 @@ function _preflight_packed_static_mis_kernel_target(
         _preflight_kernel_argument(device, assignment_kernel, argument)
     end
 
-    sampling_kernel = _static_mis_sampling_kernel!(backend)
+    sampling_kernel = _mis_round_kernel!(backend)
     for argument in (
         samples,
         logweights,
@@ -280,6 +221,7 @@ function _preflight_packed_static_mis_kernel_target(
         bank,
         buffers.assignments,
         method_state.design.denominator,
+        buffers.solve_scratch,
     )
         _preflight_kernel_argument(device, sampling_kernel, argument)
     end
@@ -319,8 +261,7 @@ function _launch_packed_static_mis!(
     )
     KernelAbstractions.synchronize(backend)
 
-    sampling_kernel = _static_mis_sampling_kernel!(backend)
-    sampling_kernel(
+    _launch_mis_round!(
         samples,
         logweights,
         proposal_ids,
@@ -329,17 +270,19 @@ function _launch_packed_static_mis!(
         target,
         method_state.bank,
         buffers.assignments,
-        method_state.design.denominator;
-        ndrange=length(logweights),
-        workgroupsize=_native_workgroupsize(execution, length(logweights)),
+        method_state.design.denominator,
+        buffers.solve_scratch,
+        execution,
     )
-    KernelAbstractions.synchronize(backend)
     return nothing
 end
 
 function _importance_sample_cpu!(
     sampler,
-    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    method_state::_PreparedStaticMIS{<:Union{
+        _PackedDiagonalGaussianBank,
+        _PackedFactorGaussianBank,
+    }},
     threaded,
 )
     cpu_execution = threaded ? _ThreadedCPUExecution() : _SerialCPUExecution()

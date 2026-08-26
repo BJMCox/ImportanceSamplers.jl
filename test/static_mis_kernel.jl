@@ -2,6 +2,7 @@ using Test
 using ImportanceSamplers
 import DensityInterface
 import LinearAlgebra
+import LogExpFunctions
 import Random
 
 const ISK = ImportanceSamplers
@@ -82,10 +83,6 @@ function packed_factor_density_allocated(
         solve_scratch,
         sample_index,
     )
-end
-
-function factor_bank_preparation_allocated(bank)
-    return @allocated ISK._prepare_active_proposal_bank(bank)
 end
 
 function Random.rand(
@@ -399,28 +396,34 @@ end
         threaded=false,
     )
 
-    for generic_sampler in (
-        factor_sampler,
-        transformed_sampler,
-        product_sampler,
+    @test factor_sampler.method_state.bank isa ISK._PackedFactorGaussianBank
+    @test factor_sampler.random_buffers isa ISK._PackedStaticMISRandomBuffers
+    @test size(factor_sampler.random_buffers.solve_scratch) == (2, 4)
+    factor_result = @inferred importance_sample!(factor_sampler)
+    @test size(factor_result.samples) == (2, 4)
+
+    erased_factor_sampler = prepare_sampler(
+        Random.Xoshiro(0x5409),
+        StaticMISKernelVectorTarget{Float64}(),
+        ImportanceSampling(
+            ProposalBank(
+                Any[
+                    SphericalGaussian([0.0, 0.0], 1.0),
+                    FactorGaussian([1.0, 1.0], [1.0 0.0; 0.25 1.0]),
+                ],
+            );
+            nsamples=4,
+        );
+        threaded=false,
     )
+    @test erased_factor_sampler.method_state.bank isa
+          ISK._PackedFactorGaussianBank
+    @test length(importance_sample!(erased_factor_sampler)) == 4
+
+    for generic_sampler in (transformed_sampler, product_sampler)
         @test generic_sampler.method_state.bank isa ISK._ActiveProposalBank
         @test length(importance_sample!(generic_sampler)) == 4
     end
-
-    dimension = 32
-    proposal_count = 16
-    large_factor = Matrix{Float64}(LinearAlgebra.I, dimension, dimension)
-    large_factor_bank = ProposalBank(
-        [
-            FactorGaussian(fill(Float64(index), dimension), large_factor) for
-            index in 1:proposal_count
-        ],
-    )
-    ISK._prepare_active_proposal_bank(large_factor_bank)
-    preparation_allocation =
-        factor_bank_preparation_allocated(large_factor_bank)
-    @test preparation_allocation <= 16_000
 end
 
 function static_mis_kernel_assignment(uniform, sample_index, nsamples, scheme, cdf)
@@ -430,29 +433,13 @@ function static_mis_kernel_assignment(uniform, sample_index, nsamples, scheme, c
 end
 
 function static_mis_kernel_sample(bank, normals, sample_index, slot)
-    dimension = size(bank.locations, 1)
-    offset = (sample_index - 1) * dimension
-    values = [
-        bank.locations[coordinate, slot] +
-        bank.scales[coordinate, slot] * normals[offset + coordinate] for
-        coordinate in 1:dimension
-    ]
-    return bank.layout isa ISK._ScalarGaussianLayout ? only(values) : values
+    values = static_mis_prefilled_sample(bank, normals, sample_index, slot)
+    return bank isa ISK._PackedDiagonalGaussianBank &&
+           bank.layout isa ISK._ScalarGaussianLayout ? only(values) : values
 end
 
 function static_mis_kernel_logdensity(bank, sample, slot)
-    squared_radius = if sample isa Real
-        abs2((sample - bank.locations[1, slot]) / bank.scales[1, slot])
-    else
-        sum(eachindex(sample)) do coordinate
-            abs2(
-                (sample[coordinate] - bank.locations[coordinate, slot]) /
-                bank.scales[coordinate, slot],
-            )
-        end
-    end
-    return bank.lognormalizers[slot] -
-           oftype(bank.lognormalizers[slot], 0.5) * squared_radius
+    return static_mis_prefilled_logdensity(bank, sample, slot)
 end
 
 function static_mis_kernel_denominator(
@@ -533,6 +520,180 @@ function static_mis_kernel_oracle(rng, packed, scheme, target, nsamples)
     )
 end
 
+function static_mis_prefilled_sample(bank, normals, sample_index, proposal_slot)
+    T = eltype(bank.locations)
+    dimension = size(bank.locations, 1)
+    offset = (sample_index - 1) * dimension
+    sample = Vector{T}(undef, dimension)
+    for row in 1:dimension
+        value = bank.locations[row, proposal_slot]
+        if bank isa ISK._PackedFactorGaussianBank
+            for column in 1:row
+                value += bank.factors[row, column, proposal_slot] *
+                         normals[offset + column]
+            end
+        else
+            value += bank.scales[row, proposal_slot] * normals[offset + row]
+        end
+        sample[row] = value
+    end
+    return sample
+end
+
+function static_mis_prefilled_logdensity(bank, sample, proposal_slot)
+    T = eltype(bank.lognormalizers)
+    squared_radius = zero(T)
+    dimension = size(bank.locations, 1)
+    solved = Vector{T}(undef, dimension)
+    for row in 1:dimension
+        coordinate = sample isa Real ? sample : sample[row]
+        standardized = coordinate - bank.locations[row, proposal_slot]
+        if bank isa ISK._PackedFactorGaussianBank
+            for column in 1:(row - 1)
+                standardized -= bank.factors[row, column, proposal_slot] *
+                                solved[column]
+            end
+            standardized /= bank.factors[row, row, proposal_slot]
+        else
+            standardized /= bank.scales[row, proposal_slot]
+        end
+        solved[row] = standardized
+        squared_radius += abs2(standardized)
+    end
+    return bank.lognormalizers[proposal_slot] - T(0.5) * squared_radius
+end
+
+function static_mis_prefilled_oracle(bank, normals, assignments, target)
+    T = eltype(bank.locations)
+    samples = [
+        static_mis_prefilled_sample(bank, normals, sample_index, proposal_slot)
+        for (sample_index, proposal_slot) in pairs(assignments)
+    ]
+    logweights = [
+        let
+            sample = samples[sample_index]
+            denominator = T(-Inf)
+            for proposal_slot in axes(bank.locations, 2)
+                term = bank.logmasses[proposal_slot] +
+                       static_mis_prefilled_logdensity(
+                    bank,
+                    sample,
+                    proposal_slot,
+                )
+                denominator = LogExpFunctions.logaddexp(denominator, term)
+            end
+            target(sample) - denominator
+        end for (sample_index, generating_slot) in pairs(assignments)
+    ]
+    return (
+        samples=reduce(hcat, samples),
+        logweights,
+        proposal_ids=bank.proposal_ids[assignments],
+    )
+end
+
+function run_static_mis_prefilled_round(
+    bank,
+    normals,
+    assignments,
+    target,
+    execution,
+)
+    T = eltype(bank.locations)
+    nsamples = length(assignments)
+    samples = Matrix{T}(undef, size(bank.locations, 1), nsamples)
+    logweights = Vector{T}(undef, nsamples)
+    proposal_ids = Vector{Int}(undef, nsamples)
+    failure_storage = zeros(UInt64, 3)
+    solve_scratch = ISK._allocate_mis_solve_scratch(normals, bank, nsamples)
+    target_evaluator = ISK._NativeDeviceTarget{T,typeof(target)}(target)
+    ISK._launch_mis_round!(
+        samples,
+        logweights,
+        proposal_ids,
+        failure_storage,
+        normals,
+        target_evaluator,
+        bank,
+        assignments,
+        ISK._FullMixtureDenominator(),
+        solve_scratch,
+        execution,
+    )
+    return (; samples, logweights, proposal_ids, failure_storage, solve_scratch)
+end
+
+@testset "shared packed MIS round execution" begin
+    for T in (Float32, Float64)
+        diagonal_bank = @inferred ISK._pack_native_gaussian_bank(
+            ProposalBank(
+                [
+                    DiagonalGaussian(T[-1, 1], T[0.5, 2]),
+                    DiagonalGaussian(T[1, -1], T[2, 0.5]),
+                ],
+                T[1, 3],
+            ),
+        )
+        factor_bank = @inferred ISK._pack_native_gaussian_bank(
+            ProposalBank(
+                [
+                    FactorGaussian(T[-1, 1], T[1 0; 0.5 2]),
+                    FactorGaussian(T[1, -1], T[2 0; -0.5 1]),
+                ],
+                T[1, 3],
+            ),
+        )
+        normals = T[1, -2, -1, 2, 0.5, -0.5, -0.5, 0.5]
+        assignments = [1, 2, 1, 2]
+        target = StaticMISKernelVectorTarget{T}()
+
+        for bank in (diagonal_bank, factor_bank)
+            oracle = static_mis_prefilled_oracle(
+                bank,
+                normals,
+                assignments,
+                target,
+            )
+            serial = @inferred run_static_mis_prefilled_round(
+                bank,
+                normals,
+                assignments,
+                target,
+                ISK._SerialCPUExecution(),
+            )
+            threaded = @inferred run_static_mis_prefilled_round(
+                bank,
+                normals,
+                assignments,
+                target,
+                ISK._ThreadedCPUExecution(),
+            )
+
+            @test serial.samples == oracle.samples
+            @test serial.logweights == oracle.logweights
+            @test serial.proposal_ids == oracle.proposal_ids
+            @test iszero(serial.failure_storage)
+            @test threaded.samples == serial.samples
+            @test threaded.logweights == serial.logweights
+            @test threaded.proposal_ids == serial.proposal_ids
+            @test threaded.failure_storage == serial.failure_storage
+        end
+
+        diagonal_scratch = ISK._allocate_mis_solve_scratch(
+            normals,
+            diagonal_bank,
+            length(assignments),
+        )
+        factor_scratch = ISK._allocate_mis_solve_scratch(
+            normals,
+            factor_bank,
+            length(assignments),
+        )
+        @test size(diagonal_scratch) == (0, 0)
+        @test size(factor_scratch) == (2, length(assignments))
+    end
+end
+
 @testset "packed native Gaussian CPU parity" begin
     schemes = (
         StratifiedMixture(),
@@ -588,6 +749,51 @@ end
     end
 end
 
+@testset "packed factor Gaussian CPU parity" begin
+    schemes = (
+        StratifiedMixture(),
+        RandomMixture(),
+        StandardMIS(),
+        PartialDeterministicMixture(((1, 3), (2,))),
+    )
+    for T in (Float32, Float64), scheme in schemes
+        bank = ProposalBank(
+            [
+                FactorGaussian(T[-2, -1], T[0.75 0; 0.25 1]),
+                FactorGaussian(T[2, 1], T[1.5 0; -0.5 0.5]),
+                FactorGaussian(T[0, 3], T[1.25 0; 0.5 1]),
+            ],
+            T[1, 3, 2],
+        )
+        target = StaticMISKernelVectorTarget{T}()
+        nsamples = 37
+
+        for threaded in (false, true)
+            sampler = prepare_sampler(
+                Random.Xoshiro(0x5411),
+                target,
+                ImportanceSampling(bank; nsamples, mis_scheme=scheme);
+                threaded,
+            )
+            packed = sampler.method_state.bank
+            oracle = static_mis_kernel_oracle(
+                copy(sampler.rng),
+                packed,
+                scheme,
+                target,
+                nsamples,
+            )
+            result = importance_sample!(sampler)
+
+            @test packed isa ISK._PackedFactorGaussianBank
+            @test collect(eachcol(result.samples)) == oracle.samples
+            @test result.logweights ≈ oracle.logweights rtol = 32eps(T)
+            @test result.provenance.proposal_id == oracle.proposal_ids
+            @test lognormalizer(result) ≈ oracle.lognormalizer rtol = 64eps(T)
+        end
+    end
+end
+
 @testset "packed native Gaussian inference" begin
     for T in (Float32, Float64)
         scalar_bank = ProposalBank(
@@ -607,7 +813,7 @@ end
 
         vector_bank = ProposalBank(
             [
-                SphericalGaussian(T[-1, 0], T(0.75)),
+                DiagonalGaussian(T[-1, 0], T[0.75, 0.75]),
                 DiagonalGaussian(T[1, 0], T[1.25, 0.5]),
             ],
             T[1, 3],
@@ -777,6 +983,8 @@ end
             denominator,
             generating_slot,
             zero(T),
+            zeros(T, 0, 0),
+            1,
         )
     end
 
