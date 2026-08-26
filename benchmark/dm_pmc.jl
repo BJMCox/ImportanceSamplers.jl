@@ -137,6 +137,7 @@ function dm_pmc_run_preparation_trial(benchmark)
         samples=DM_PMC_BENCHMARK_PREPARATION_SAMPLES,
         seconds=DM_PMC_BENCHMARK_TRIAL_SECONDS,
         evals=1,
+        warmup=false,
     )
 end
 
@@ -241,15 +242,17 @@ end
 function dm_pmc_paired_run(cell, device_kind, seed)
     sampler = dm_pmc_prepare_cell(cell, device_kind, seed)
     result_holder = Ref{Any}()
+    benchmarktools_evaluations = Ref(0)
     benchmark = @benchmarkable $result_holder[] = dm_pmc_synchronized_run!(
         $sampler,
         $device_kind,
-    )
+    ) setup=($benchmarktools_evaluations[] += 1)
     trial = run(
         benchmark;
         samples=1,
         seconds=DM_PMC_BENCHMARK_TRIAL_SECONDS,
         evals=1,
+        warmup=false,
     )
     timing = minimum(trial)
     result = result_holder[]
@@ -259,6 +262,7 @@ function dm_pmc_paired_run(cell, device_kind, seed)
         (;
             seed,
             fixed_initial_population=true,
+            benchmarktools_evaluations=benchmarktools_evaluations[],
             warmed_seconds=seconds,
             samples_per_second=validation.total_samples / seconds,
             flattened_weight_concentration_ess_per_second=
@@ -458,7 +462,20 @@ DM_PMC_BENCHMARK_RESULT = dm_pmc_benchmark_main()
 @assert all(row -> row.total_samples == DM_PMC_BENCHMARK_ROUNDS * DM_PMC_BENCHMARK_ROUND_SIZE, DM_PMC_BENCHMARK_RESULT.rows)
 @assert all(row -> hasproperty(row, :paired_runs), DM_PMC_BENCHMARK_RESULT.rows)
 @assert all(row -> !hasproperty(row, :ess), DM_PMC_BENCHMARK_RESULT.rows)
+if DM_PMC_BENCHMARK_SMOKE
+    preparation_invocations = Ref(0)
+    preparation_probe = @benchmarkable $preparation_invocations[] += 1
+    dm_pmc_run_preparation_trial(preparation_probe)
+    @assert preparation_invocations[] == DM_PMC_BENCHMARK_PREPARATION_SAMPLES
+end
 @assert all(row -> all(run -> run.fixed_initial_population, row.paired_runs), DM_PMC_BENCHMARK_RESULT.rows)
+@assert all(
+    row -> all(
+        run -> get(run, :benchmarktools_evaluations, 0) == 1,
+        row.paired_runs,
+    ),
+    DM_PMC_BENCHMARK_RESULT.rows,
+)
 show(stdout, MIME("text/plain"), DM_PMC_BENCHMARK_RESULT)
 println()
 DM_PMC_BENCHMARK_RESULT
