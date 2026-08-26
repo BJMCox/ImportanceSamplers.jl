@@ -75,6 +75,9 @@ function ImportanceSampling(
     )
 end
 
+_algorithm_proposal(algorithm::ImportanceSampling) = algorithm.proposal
+_algorithm_sample_budget(algorithm::ImportanceSampling) = algorithm.nsamples
+
 """
     SamplerBusyError
 
@@ -239,7 +242,7 @@ thread; accelerator launch policy does not depend on host thread count.
 function prepare_sampler(
     rng::Random.AbstractRNG,
     logtarget,
-    algorithm::ImportanceSampling;
+    algorithm::AbstractImportanceSampler;
     threaded=true,
 )
     target = _ContextFreePreparedTarget(logtarget)
@@ -250,7 +253,7 @@ function prepare_sampler(
     rng::Random.AbstractRNG,
     logtarget,
     context,
-    algorithm::ImportanceSampling;
+    algorithm::AbstractImportanceSampler;
     threaded=true,
 )
     target = _ContextualPreparedTarget(logtarget, context)
@@ -259,14 +262,16 @@ end
 
 function _prepare_importance_sampler(rng, target, algorithm, threaded)
     threaded isa Bool || throw(ArgumentError("threaded must be Bool"))
-    prepared_target = _resolve_prepared_target(target, algorithm.proposal)
-    method_state = _prepare_method_state(algorithm)
+    proposal = _algorithm_proposal(algorithm)
+    sample_budget = _algorithm_sample_budget(algorithm)
+    prepared_target = _resolve_prepared_target(target, proposal)
+    method_state = _prepare_method_state(algorithm, prepared_target)
     device = MLDataDevices.CPUDevice()
     random_buffers = _allocate_random_buffers(
         device,
-        algorithm.proposal,
+        proposal,
         method_state,
-        algorithm.nsamples,
+        sample_budget,
     )
     return _PreparedImportanceSampler(
         rng,
@@ -284,6 +289,8 @@ end
 _prepare_method_state(
     ::ImportanceSampling{P,_SingleProposalScheme},
 ) where {P} = _SingleProposalMethodState()
+
+_prepare_method_state(algorithm, target) = _prepare_method_state(algorithm)
 
 function _copy_to_device(device, value)
     return device(deepcopy(value))
@@ -372,17 +379,19 @@ function _transfer_prepared_sampler(
         SamplerDeviceError(device, :opaque_host_closure),
     )
     algorithm = _copy_algorithm(device, sampler.algorithm)
-    method_state = _prepare_method_state(algorithm)
+    proposal = _algorithm_proposal(algorithm)
+    transferred_target = _transfer_prepared_target(device, sampler.target)
+    method_state = _prepare_method_state(algorithm, transferred_target)
     random_buffers = _allocate_random_buffers(
         device,
-        algorithm.proposal,
+        proposal,
         method_state,
-        algorithm.nsamples,
+        _algorithm_sample_budget(algorithm),
     )
     return _PreparedImportanceSampler(
         _clone_rng(device, sampler.rng),
         random_buffers,
-        _transfer_prepared_target(device, sampler.target),
+        transferred_target,
         algorithm,
         method_state,
         device,
@@ -410,7 +419,9 @@ function _transfer_prepared_sampler(
     _backend_functional(device) || throw(
         SamplerDeviceError(device, :backend_unavailable),
     )
-    proposal_limit = _accelerator_proposal_limit(sampler.algorithm.proposal)
+    proposal_limit = _accelerator_proposal_limit(
+        _algorithm_proposal(sampler.algorithm),
+    )
     isnothing(proposal_limit) || throw(SamplerDeviceError(device, proposal_limit))
     method_state_limit = _accelerator_method_state_limit(sampler.method_state)
     isnothing(method_state_limit) || throw(
@@ -430,11 +441,15 @@ function _transfer_prepared_sampler(
         )
         random_buffers = _allocate_random_buffers(
             device,
-            algorithm.proposal,
+            _algorithm_proposal(algorithm),
             method_state,
-            algorithm.nsamples,
+            _algorithm_sample_budget(algorithm),
         )
-        random_buffers isa Union{_RandomBuffers,_PackedStaticMISRandomBuffers} || throw(
+        random_buffers isa Union{
+            _RandomBuffers,
+            _PackedStaticMISRandomBuffers,
+            _DMPMCRandomBuffers,
+        } || throw(
             SamplerDeviceError(device, :accelerator_rng_unavailable),
         )
         _validate_backend_state(
@@ -499,22 +514,21 @@ end
     importance_sample(rng, logtarget, algorithm; threaded=true)
     importance_sample(rng, logtarget, p, algorithm; threaded=true)
 
-Run one complete plain-importance-sampling estimator.
+Run one complete importance-sampling estimator.
 
 This is the one-shot form of [`prepare_sampler`](@ref) followed by
 [`importance_sample!`](@ref). `logtarget` returns a log density, not a linear
 density. The contextual overload calls `logtarget(sample, p)`. The one-shot
 form executes on CPU; apply a device to a prepared sampler for CUDA execution.
 
-The result stores canonical raw log weights
-`logtarget(sample) - logdensityof(proposal, sample)`. Use
-[`normalized_weights`](@ref) for weights that sum to one and
-[`lognormalizer`](@ref) for the complete estimator's log normalizer.
+The result stores the algorithm's canonical raw log weights. Use
+[`normalized_weights`](@ref) for weights that sum to one and [`lognormalizer`](@ref)
+for the complete estimator's log normalizer.
 """
 function importance_sample(
     rng::Random.AbstractRNG,
     logtarget,
-    algorithm::ImportanceSampling;
+    algorithm::AbstractImportanceSampler;
     threaded=true,
 )
     sampler = prepare_sampler(
@@ -530,7 +544,7 @@ function importance_sample(
     rng::Random.AbstractRNG,
     logtarget,
     context,
-    algorithm::ImportanceSampling;
+    algorithm::AbstractImportanceSampler;
     threaded=true,
 )
     sampler = prepare_sampler(

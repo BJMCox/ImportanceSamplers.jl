@@ -3,11 +3,6 @@ abstract type _AbstractWeightedSamples{R} end
 mutable struct _ValidatedResultToken end
 const _VALIDATED_RESULT_TOKEN = _ValidatedResultToken()
 
-mutable struct _ResultTransferCounter
-    count::Int
-    bytes::Int
-end
-
 struct _LogSumExpAccumulator{T<:AbstractFloat}
     maximum::T
     scaled_sum::T
@@ -37,15 +32,6 @@ end
     accumulator.maximum == -Inf && return accumulator.maximum
     return accumulator.maximum + log(accumulator.scaled_sum)
 end
-
-function _record_scalar_transfer!(counter::_ResultTransferCounter, ::Type{T}) where {T}
-    counter.count += 1
-    counter.bytes += sizeof(T)
-    return nothing
-end
-
-_record_device_scalar_transfer!(counter, storage, type::Type) =
-    _is_host_storage(storage) ? nothing : _record_scalar_transfer!(counter, type)
 
 function _result_transfer_counter(diagnostics::NamedTuple)
     if !hasproperty(diagnostics, :transfers)
@@ -276,8 +262,16 @@ end
 
 _transfer_result_storage(device, storage::Tuple) =
     map(value -> _transfer_result_storage(device, value), storage)
-_transfer_result_storage(device, counter::_ResultTransferCounter) =
-    _ResultTransferCounter(counter.count, counter.bytes)
+function _transfer_result_storage(device, counter::_ResultTransferCounter)
+    copy = _ResultTransferCounter(counter.count, counter.bytes)
+    for reason in fieldnames(_ReportedTransferReasons)
+        source = getfield(counter.reasons, reason)
+        destination = getfield(copy.reasons, reason)
+        destination.count = source.count
+        destination.bytes = source.bytes
+    end
+    return copy
+end
 _transfer_result_storage(device, value) = value
 
 function _new_weighted_samples(samples, logweights, provenance, diagnostics)
@@ -388,6 +382,14 @@ function _validate_diagnostic_value(value::_ResultTransferCounter)
     value.count >= 0 && value.bytes >= 0 || throw(
         ArgumentError("diagnostic transfer count and bytes must be nonnegative"),
     )
+    for reason in fieldnames(_ReportedTransferReasons)
+        record = getfield(value.reasons, reason)
+        record.count >= 0 && record.bytes >= 0 || throw(
+            ArgumentError(
+                "diagnostic reason transfer count and bytes must be nonnegative",
+            ),
+        )
+    end
     return nothing
 end
 

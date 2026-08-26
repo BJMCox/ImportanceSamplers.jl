@@ -7,6 +7,7 @@ import MLDataDevices
 
 include(joinpath(@__DIR__, "..", "validation", "cuda_plain_is_capabilities.jl"))
 include(joinpath(@__DIR__, "..", "validation", "static_mis_capabilities.jl"))
+include(joinpath(@__DIR__, "..", "validation", "dm_pmc_capabilities.jl"))
 
 struct CapabilityGaussian end
 
@@ -259,7 +260,15 @@ function checked_static_mis_capability_table()
     scheme_names = join((scheme.name for scheme in STATIC_MIS_COMPLETE_SCHEMES), ", ")
     function accelerator(row)
         row.device !== :supported && return "rejected: `$(row.device)`"
-        isnothing(row.direct) && return "CUDA execution; not directly hardware-validated"
+        if isnothing(row.direct)
+            hasproperty(row, :evidence) ||
+                return "CUDA execution; not directly hardware-validated"
+            evidence = row.evidence
+            types = join(string.(evidence.types), " and ")
+            schemes = join(string.(evidence.schemes), ", ")
+            return "$(evidence.hardware) execution with $types for $schemes; " *
+                   "other schemes not directly hardware-validated"
+        end
         direct = row.direct
         types = join(string.(direct.types), " and ")
         return "$(direct.hardware) execution with $types across $(length(direct.schemes)) schemes"
@@ -286,6 +295,60 @@ end
 
 const STATIC_MIS_CAPABILITY_TABLE = checked_static_mis_capability_table()
 
+function dm_pmc_capability_target(sample::AbstractVector{T})::T where {T}
+    squared_radius = zero(T)
+    for coordinate in eachindex(sample)
+        squared_radius += abs2(sample[coordinate])
+    end
+    return -T(0.5) * squared_radius
+end
+
+function checked_dm_pmc_capability_table()
+    core_labels = (
+        :float32_diagonal,
+        :float64_diagonal,
+        :float32_factor,
+        :float64_factor,
+    )
+    rows = filter(row -> row.label in core_labels, DM_PMC_CUDA_CAPABILITY_ROWS)
+    length(rows) == length(core_labels) || error(
+        "DM-PMC capability metadata is missing a documented CPU/CUDA row",
+    )
+    table_rows = map(rows) do row
+        schedule = [20, 24]
+        bank = dm_pmc_validation_bank(row.type, Val(row.bank))
+        sampler = prepare_sampler(
+            Xoshiro(0x444f4353444d504d),
+            dm_pmc_capability_target,
+            DeterministicMixturePMC(
+                bank;
+                rounds=length(schedule),
+                round_size=schedule,
+            );
+            threaded=true,
+        )
+        result = importance_sample!(sampler)
+        length(result) == sum(schedule) || error(
+            "DM-PMC docs-build CPU check returned the wrong count",
+        )
+        result.diagnostics.round_sizes == schedule || error(
+            "DM-PMC docs-build CPU check returned the wrong schedule",
+        )
+        length(current_proposal(sampler).proposals) == length(bank.proposals) || error(
+            "DM-PMC docs-build CPU check returned the wrong proposal snapshot",
+        )
+        bank_name = row.bank === :diagonal ? "diagonal Gaussian" : "factor Gaussian"
+        "| `$(row.type)` | $bank_name | public execution during docs build | " *
+        "$(DM_PMC_CUDA_HARDWARE) reproducer |"
+    end
+    return Markdown.parse(
+        "| Scalar type | Proposal bank | CPU evidence | CUDA evidence |\n" *
+        "|:--|:--|:--|:--|\n" * join(table_rows, '\n'),
+    )
+end
+
+const DM_PMC_CAPABILITY_TABLE = checked_dm_pmc_capability_table()
+
 makedocs(
     modules=[ImportanceSamplers],
     sitename="ImportanceSamplers.jl",
@@ -302,6 +365,7 @@ makedocs(
         "Methods" => [
             "Plain importance sampling" => "methods/importance_sampling.md",
             "Static multiple importance sampling" => "methods/static_mis.md",
+            "Deterministic-mixture population Monte Carlo" => "methods/dm_pmc.md",
         ],
         "Guides" => [
             "Native proposals" => "guide/native_proposals.md",
@@ -315,6 +379,7 @@ makedocs(
     linkcheck=true,
     linkcheck_ignore=[
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/validation/reproducers/(cuda_)?static_mis\.jl$",
+        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/dm_pmc|examples/(dm_pmc|numerical_integration)|validation/reproducers/(cuda_dm_pmc|dm_pmc_global))\.jl$",
     ],
     warnonly=false,
 )

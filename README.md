@@ -38,6 +38,8 @@ target returns a `Float32` or `Float64` log density; the sampler never applies
 - [Static multiple importance sampling](docs/src/methods/static_mis.md) explains
   proposal banks, the four complete MIS schemes, provenance, and support and
   device contracts.
+- [Deterministic-mixture population Monte Carlo](docs/src/methods/dm_pmc.md)
+  explains adaptive spatial mixtures, global resampling, and retained state.
 - [Native proposals](docs/src/guide/native_proposals.md) documents spherical,
   diagonal, and dense-factor Gaussians.
 - [Transforms](docs/src/guide/transforms.md) documents positive, interval,

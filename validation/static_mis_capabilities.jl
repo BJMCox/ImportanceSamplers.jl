@@ -90,10 +90,19 @@ const STATIC_MIS_CAPABILITY_ROWS = (
     ),
     (
         bank="factor Gaussian banks",
-        cpu="generic CPU execution",
+        cpu="packed CPU execution",
         factory=T -> ProposalBank(fill(FactorGaussian(zeros(T, 2), T[1 0; 0.2 1.1]), 4)),
-        device=:factor_proposal_cpu_only,
+        # Task 5 directly validated Float32/Float64 factor execution with
+        # StratifiedMixture on an A100. Keep this row out of the older
+        # all-scheme direct matrix until that matrix gains a factor oracle.
+        device=:supported,
         direct=nothing,
+        evidence=(
+            hardware="NVIDIA A100-PCIE-40GB",
+            types=(Float32, Float64),
+            schemes=(:stratified_mixture,),
+            reproducer=:cuda_dm_pmc,
+        ),
     ),
     (
         bank="transformed proposal banks",
