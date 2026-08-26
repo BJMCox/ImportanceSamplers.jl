@@ -689,7 +689,8 @@ end
             factor_bank,
             length(assignments),
         )
-        @test size(diagonal_scratch) == (0, 0)
+        @test diagonal_scratch isa ISK._NoMISSolveScratch
+        @test sizeof(diagonal_scratch) == 0
         @test size(factor_scratch) == (2, length(assignments))
     end
 end

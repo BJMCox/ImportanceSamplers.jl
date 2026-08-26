@@ -64,12 +64,14 @@ end
     return value, generating_logdensity, reason
 end
 
+struct _NoMISSolveScratch end
+
 function _allocate_mis_solve_scratch(
     prototype,
     bank::_PackedDiagonalGaussianBank,
     nsamples,
 )
-    return similar(prototype, eltype(bank.locations), 0, 0)
+    return _NoMISSolveScratch()
 end
 
 function _allocate_mis_solve_scratch(
