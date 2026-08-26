@@ -1,6 +1,7 @@
 using Test
 using ImportanceSamplers
 import DensityInterface
+import LinearAlgebra
 import Random
 
 const ISK = ImportanceSamplers
@@ -65,6 +66,22 @@ function caught_static_mis_kernel_failure(f)
         return error
     end
     return nothing
+end
+
+function packed_factor_density_allocated(
+    bank,
+    sample,
+    proposal_slot,
+    solve_scratch,
+    sample_index,
+)
+    return @allocated ISK._packed_gaussian_logdensity!(
+        bank,
+        sample,
+        proposal_slot,
+        solve_scratch,
+        sample_index,
+    )
 end
 
 function Random.rand(
@@ -144,6 +161,128 @@ end
         coherent.logmasses,
         partial.method_state.design.denominator.logcoefficients,
     )
+end
+
+@testset "packed factor Gaussian banks" begin
+    bank = ProposalBank(
+        Any[
+            SphericalGaussian(zeros(2), 2.0),
+            DiagonalGaussian(ones(2), [1.0, 3.0]),
+            FactorGaussian(fill(2.0, 2), [1.0 0.0; 0.25 2.0]),
+        ],
+        [1.0, 2.0, 3.0],
+    )
+    packed = ISK._pack_native_gaussian_bank(bank)
+
+    @test packed isa ISK._PackedFactorGaussianBank
+    @test packed.proposal_ids == [1, 2, 3]
+    @test packed.locations == [0.0 1.0 2.0; 0.0 1.0 2.0]
+    @test packed.factors[:, :, 1] == [2.0 0.0; 0.0 2.0]
+    @test packed.factors[:, :, 2] == [1.0 0.0; 0.0 3.0]
+    @test packed.factors[:, :, 3] == [1.0 0.0; 0.25 2.0]
+    @test exp.(packed.logmasses) ≈ [1 / 6, 2 / 6, 3 / 6]
+    @test packed.cdf == [1 / 6, 3 / 6, 1.0]
+
+    factor32 = FactorGaussian(
+        Float32[1, -1],
+        Float32[0.5 0; -0.25 1.5],
+    )
+    packed32 = ISK._pack_native_gaussian_bank(
+        ProposalBank(
+            Any[
+                factor32,
+                SphericalGaussian(Float32[0, 2], 2.0f0),
+            ],
+            Float32[3, 1],
+        ),
+    )
+    @test packed32 isa ISK._PackedFactorGaussianBank
+    @test eltype(packed32.locations) === Float32
+    @test eltype(packed32.factors) === Float32
+    @test packed32.proposal_ids == [2, 1]
+    @test packed32.factors[:, :, 1] == Float32[2 0; 0 2]
+    @test packed32.factors[:, :, 2] == Float32[0.5 0; -0.25 1.5]
+
+    zero_mass_factor = FactorGaussian(
+        fill(99.0, 3),
+        Matrix{Float64}(LinearAlgebra.I, 3, 3),
+    )
+    diagonal_only = ISK._pack_native_gaussian_bank(
+        ProposalBank(
+            Any[
+                SphericalGaussian(zeros(2), 2.0),
+                zero_mass_factor,
+                DiagonalGaussian(ones(2), [1.0, 3.0]),
+            ],
+            [1.0, 0.0, 2.0],
+        ),
+    )
+    @test diagonal_only isa ISK._PackedDiagonalGaussianBank
+    @test diagonal_only.proposal_ids == [1, 3]
+
+    @test_throws DimensionMismatch ISK._pack_native_gaussian_bank(
+        ProposalBank(
+            Any[
+                FactorGaussian(zeros(2), Matrix{Float64}(LinearAlgebra.I, 2, 2)),
+                SphericalGaussian(zeros(3), 1.0),
+            ],
+        ),
+    )
+    @test_throws ArgumentError ISK._pack_native_gaussian_bank(
+        ProposalBank(
+            Any[
+                SphericalGaussian(0.0, 1.0),
+                FactorGaussian(zeros(2), Matrix{Float64}(LinearAlgebra.I, 2, 2)),
+            ],
+        ),
+    )
+
+    nontriangular = FactorGaussian(
+        zeros(2),
+        Matrix{Float64}(LinearAlgebra.I, 2, 2),
+    )
+    nontriangular.scale.factor[1, 2] = 0.5
+    @test_throws ArgumentError ISK._pack_native_gaussian_bank(
+        ProposalBank(Any[nontriangular]),
+    )
+end
+
+@testset "packed factor Gaussian sampling and density primitives" begin
+    for T in (Float32, Float64)
+        factor = T[1 0; 0.25 2]
+        packed = ISK._pack_native_gaussian_bank(
+            ProposalBank(Any[FactorGaussian(fill(T(2), 2), factor)], T[1]),
+        )
+        normals = T[1, 2]
+        sample = T[
+            ISK._native_gaussian_coordinate(packed, normals, 1, 1, 1),
+            ISK._native_gaussian_coordinate(packed, normals, 1, 2, 1),
+        ]
+
+        @test sample == T[3, 6.25]
+
+        solve_scratch = fill(T(-99), 2, 2)
+        logdensity = ISK._packed_gaussian_logdensity!(
+            packed,
+            sample,
+            1,
+            solve_scratch,
+            2,
+        )
+        expected = -log(T(2) * T(pi)) - log(T(2)) - T(2.5)
+        @test logdensity ≈ expected rtol = 8eps(T)
+        @test solve_scratch[:, 1] == fill(T(-99), 2)
+        @test solve_scratch[:, 2] ≈ normals rtol = 4eps(T)
+
+        allocation = packed_factor_density_allocated(
+            packed,
+            sample,
+            1,
+            solve_scratch,
+            2,
+        )
+        @test allocation == 0
+    end
 end
 
 @testset "packed native Gaussian bank validation precedes RNG" begin

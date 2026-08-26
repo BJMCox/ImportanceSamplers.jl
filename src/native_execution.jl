@@ -127,9 +127,51 @@ end
     )
 end
 
+@inline function _native_gaussian_coordinate(
+    bank::_PackedFactorGaussianBank,
+    normals,
+    offset,
+    coordinate,
+    proposal_slot,
+)
+    value = @inbounds bank.locations[coordinate, proposal_slot]
+    for column in 1:coordinate
+        value += @inbounds(
+            bank.factors[coordinate, column, proposal_slot] *
+            normals[offset + column - 1]
+        )
+    end
+    return value
+end
+
 @inline _packed_sample_coordinate(sample::Real, coordinate) = sample
 @inline _packed_sample_coordinate(sample::AbstractVector, coordinate) =
     @inbounds sample[coordinate]
+
+@inline function _packed_gaussian_logdensity!(
+    bank::_PackedFactorGaussianBank,
+    sample,
+    proposal_slot,
+    solve_scratch,
+    sample_index,
+)
+    T = eltype(bank.lognormalizers)
+    squared_radius = zero(T)
+    for row in axes(bank.locations, 1)
+        standardized = _packed_sample_coordinate(sample, row) -
+                       @inbounds(bank.locations[row, proposal_slot])
+        for column in 1:(row - 1)
+            standardized -= @inbounds(
+                bank.factors[row, column, proposal_slot] *
+                solve_scratch[column, sample_index]
+            )
+        end
+        standardized /= @inbounds bank.factors[row, row, proposal_slot]
+        @inbounds solve_scratch[row, sample_index] = standardized
+        squared_radius += abs2(standardized)
+    end
+    return @inbounds(bank.lognormalizers[proposal_slot]) - T(0.5) * squared_radius
+end
 
 @inline function _packed_gaussian_logdensity(bank, sample, proposal_slot)
     T = eltype(bank.lognormalizers)

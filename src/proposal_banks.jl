@@ -22,9 +22,8 @@ otherwise construction rejects the bank instead of making that proposal inert.
 Zero-mass proposals remain in the configuration and retain their stable
 one-based IDs, but are neither assigned nor evaluated. Positive-mass proposals
 must share a sample dimension. Generic CPU execution additionally requires one
-concrete proposal element type. Native spherical and diagonal Gaussian banks
-with one scalar/vector layout and floating type may be packed during
-preparation.
+concrete proposal element type. Native Gaussian banks with one scalar/vector
+layout and floating type may be packed during preparation.
 
 `ProposalBank` deliberately implements neither `rand` nor
 `DensityInterface.logdensityof`: a bank is a proposal population, not a mixture
@@ -117,10 +116,21 @@ struct _PackedDiagonalGaussianBank{L,S,N,M,C,I,R}
     layout::R
 end
 
+struct _PackedFactorGaussianBank{L,F,N,M,C,I}
+    locations::L
+    factors::F
+    lognormalizers::N
+    logmasses::M
+    cdf::C
+    proposal_ids::I
+end
+
 Adapt.@adapt_structure _PackedDiagonalGaussianBank
+Adapt.@adapt_structure _PackedFactorGaussianBank
 
 _active_proposal_count(bank::_ActiveProposalBank) = length(bank.proposals)
 _active_proposal_count(bank::_PackedDiagonalGaussianBank) = size(bank.locations, 2)
+_active_proposal_count(bank::_PackedFactorGaussianBank) = size(bank.locations, 2)
 
 function _accelerator_proposal_limit(bank::ProposalBank)
     proposal_ids = findall(!iszero, bank.masses)
@@ -168,7 +178,39 @@ function _is_packable_native_gaussian(proposal)
     return proposal.scale isa Union{
         _SphericalGaussianScale,
         _DiagonalGaussianScale,
+        _FactorGaussianScale,
     }
+end
+
+function _copy_packed_gaussian_factor!(destination, proposal, slot)
+    scale = proposal.scale
+    dimension = size(destination, 1)
+    if scale isa _SphericalGaussianScale
+        for coordinate in 1:dimension
+            @inbounds destination[coordinate, coordinate, slot] = scale.scale
+        end
+    elseif scale isa _DiagonalGaussianScale
+        for coordinate in 1:dimension
+            @inbounds destination[coordinate, coordinate, slot] =
+                scale.scales[coordinate]
+        end
+    else
+        factor = scale.factor
+        size(factor) == (dimension, dimension) || throw(
+            DimensionMismatch("Gaussian factor must match the proposal dimension"),
+        )
+        for column in 1:dimension
+            for row in 1:(column - 1)
+                iszero(@inbounds(factor[row, column])) || throw(
+                    ArgumentError("Gaussian factor must be lower triangular"),
+                )
+            end
+            for row in column:dimension
+                @inbounds destination[row, column, slot] = factor[row, column]
+            end
+        end
+    end
+    return destination
 end
 
 function _pack_native_gaussian_bank(bank::ProposalBank)
@@ -208,7 +250,6 @@ function _pack_native_gaussian_bank(bank, proposal_ids, logmasses, cdf)
     end
 
     locations = Matrix{T}(undef, dimension, length(proposals))
-    scales = Matrix{T}(undef, dimension, length(proposals))
     lognormalizers = Vector{T}(undef, length(proposals))
     for (slot, proposal) in pairs(proposals)
         if scalar_layout
@@ -216,12 +257,31 @@ function _pack_native_gaussian_bank(bank, proposal_ids, logmasses, cdf)
         else
             copyto!(view(locations, :, slot), proposal.location)
         end
+        lognormalizers[slot] = proposal.lognormalizer
+    end
+
+    if any(proposal -> proposal.scale isa _FactorGaussianScale, proposals)
+        factors = zeros(T, dimension, dimension, length(proposals))
+        for (slot, proposal) in pairs(proposals)
+            _copy_packed_gaussian_factor!(factors, proposal, slot)
+        end
+        return _PackedFactorGaussianBank(
+            locations,
+            factors,
+            lognormalizers,
+            logmasses,
+            cdf,
+            proposal_ids,
+        )
+    end
+
+    scales = Matrix{T}(undef, dimension, length(proposals))
+    for (slot, proposal) in pairs(proposals)
         if proposal.scale isa _SphericalGaussianScale
             fill!(view(scales, :, slot), proposal.scale.scale)
         else
             copyto!(view(scales, :, slot), proposal.scale.scales)
         end
-        lognormalizers[slot] = proposal.lognormalizer
     end
 
     return _PackedDiagonalGaussianBank(
@@ -258,7 +318,7 @@ function _prepare_active_proposal_bank(
     ::Val{true},
 )
     packed = _pack_native_gaussian_bank(bank, proposal_ids, logmasses, cdf)
-    isnothing(packed) || return packed
+    packed isa _PackedDiagonalGaussianBank && return packed
     return _prepare_generic_active_proposal_bank(bank, proposal_ids, logmasses, cdf)
 end
 
