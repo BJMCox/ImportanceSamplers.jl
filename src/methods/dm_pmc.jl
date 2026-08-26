@@ -180,7 +180,12 @@ function _dm_pmc_proposal_snapshot(locations, proposal_ids, sampler)
         )
         proposals[proposal_id] = _dm_pmc_with_location(proposal, location)
     end
-    return ProposalBank(proposals, sampler.algorithm.bank.masses)
+    configured_masses = sampler.algorithm.bank.masses
+    snapshot = ProposalBank(proposals, configured_masses)
+    # The configured masses are already validated and normalized. Restore their
+    # exact values after constructor validation instead of normalizing twice.
+    copyto!(snapshot.masses, configured_masses)
+    return snapshot
 end
 
 _dm_pmc_snapshot_location(locations, slot, bank::_PackedDiagonalGaussianBank) =

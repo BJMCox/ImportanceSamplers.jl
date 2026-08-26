@@ -929,6 +929,23 @@ end
         threaded=false,
     )
     @test_throws MethodError current_proposal(plain)
+
+    nonidempotent_masses = ProposalBank(
+        [SphericalGaussian(Float64(index), 1.0) for index in 1:4],
+        [0.1, 0.2, 0.3, 0.4],
+    )
+    nonidempotent_masses.masses .= [0.1, 0.2, 0.3, 0.4]
+    mass_sampler = prepare_sampler(
+        Random.Xoshiro(0x43555252454e56),
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(nonidempotent_masses; rounds=1, round_size=10);
+        threaded=false,
+    )
+    @test current_proposal(mass_sampler).masses == nonidempotent_masses.masses
+    @test current_proposal(
+        MLDataDevices.cpu_device(),
+        mass_sampler,
+    ).masses == nonidempotent_masses.masses
 end
 
 @testset "DM-PMC vector diagonal and factor CPU execution" begin
