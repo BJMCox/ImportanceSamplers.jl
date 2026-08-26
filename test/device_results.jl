@@ -141,18 +141,21 @@ end
     end
     result_backend_reductions[] = 0
     failure_record = ImportanceSamplers._DeviceFailureRecord(
-        ResultBackendArray(zeros(UInt64, 2)),
+        ResultBackendArray(zeros(UInt64, 3)),
     )
     result_backend_materializations[] = 0
     failure_payload_bytes =
         length(failure_record.storage) * sizeof(eltype(failure_record.storage))
+    @test length(failure_record.storage) == 3
+    @test failure_payload_bytes == 3sizeof(UInt64)
     @test result_backend_materializations[] == 0
     failure_snapshot = ImportanceSamplers._device_failure_snapshot(failure_record)
     cpu_failure_snapshot = ImportanceSamplers._device_failure_snapshot(
-        ImportanceSamplers._DeviceFailureRecord(zeros(UInt64, 2)),
+        ImportanceSamplers._DeviceFailureRecord(zeros(UInt64, 3)),
     )
     @test result_backend_materializations[] == 1
     @test failure_snapshot.failure.count == 0
+    @test failure_snapshot.draw_failure.count == 0
     @test failure_snapshot.transfers == (count=1, bytes=failure_payload_bytes)
     @test cpu_failure_snapshot.transfers == (count=0, bytes=0)
     trusted = ImportanceSamplers._adopt_validated_weighted_samples(

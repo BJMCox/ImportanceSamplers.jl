@@ -117,8 +117,8 @@ the complete result or a sliced `WeightedSampleView` directly to CPU first.
 
 The table is generated during every strict documentation build. Its CPU rows
 execute public sampling calls, and its rejection rows check the typed device
-errors. The A100 cells come from one small metadata file that the real Task 12
-reproducer also consumes when constructing and recording its matrix.
+errors. The A100 cells come from metadata that the CUDA reproducer also
+consumes when constructing and recording its matrix.
 
 ```@eval
 Main.NATIVE_PLAIN_IS_CAPABILITY_TABLE
@@ -126,10 +126,14 @@ Main.NATIVE_PLAIN_IS_CAPABILITY_TABLE
 
 CUDA execution requires `threaded=true`, a supported native Gaussian and
 transform layout, and a target that compiles for the device. Only the table row
-labeled A100 execution has real-hardware evidence from Task 12; the other
+labeled A100 execution has real-hardware evidence; the other
 native row was not A100-validated. Generic proposals and `ProductProposal` are
 rejected. AMDGPU and Metal remain unclaimed; a KernelAbstractions backend
 alone is not a package support guarantee.
+
+Static MIS uses the same transfer and residency contract. Its generated bank
+matrix and scheme-specific limits are maintained on the
+[Static multiple importance sampling](@ref) page.
 
 ## Backend documentation and reproducer
 
@@ -146,3 +150,5 @@ alone is not a package support guarantee.
   matrix. Run it from the package root with
   `julia --project=validation validation/reproducers/cuda_plain_is.jl` on a
   CUDA host.
+- `validation/reproducers/cuda_static_mis.jl` is the corresponding packed-bank
+  static-MIS correctness and benchmark matrix.

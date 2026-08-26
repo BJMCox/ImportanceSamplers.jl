@@ -1,0 +1,350 @@
+function _allocate_random_buffers(
+    ::MLDataDevices.AbstractCPUDevice,
+    ::ProposalBank,
+    method_state::_PreparedStaticMIS{<:Union{
+        _PackedDiagonalGaussianBank,
+        _PackedFactorGaussianBank,
+    }},
+    nsamples,
+)
+    bank = method_state.bank
+    return _allocate_packed_static_mis_random_buffers(
+        bank.locations,
+        bank,
+        nsamples,
+    )
+end
+
+function _copy_accelerator_algorithm(
+    device,
+    algorithm::ImportanceSampling{<:ProposalBank},
+    ::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+)
+    return deepcopy(algorithm)
+end
+
+_accelerator_method_state_limit(
+    ::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+) = nothing
+
+function _prepare_transferred_method_state(
+    device,
+    algorithm,
+    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+)
+    bank = method_state.bank
+    transferred_bank = _PackedDiagonalGaussianBank(
+        _copy_to_device(device, bank.locations),
+        _copy_to_device(device, bank.scales),
+        _copy_to_device(device, bank.lognormalizers),
+        _copy_to_device(device, bank.logmasses),
+        _copy_to_device(device, bank.cdf),
+        _copy_to_device(device, bank.proposal_ids),
+        bank.layout,
+    )
+    design = method_state.design
+    transferred_design = _PreparedMISDesign(
+        design.assignment,
+        _transfer_static_mis_denominator(device, design.denominator),
+    )
+    return _PreparedStaticMIS(transferred_bank, transferred_design)
+end
+
+_transfer_static_mis_denominator(device, denominator) = denominator
+
+function _transfer_static_mis_denominator(
+    device,
+    denominator::_PartialMixtureDenominator,
+)
+    return _PartialMixtureDenominator(
+        _copy_to_device(device, denominator.group_of_slot),
+        _copy_to_device(device, denominator.offsets),
+        _copy_to_device(device, denominator.members),
+        _copy_to_device(device, denominator.logcoefficients),
+    )
+end
+
+_transferred_backend_state(
+    algorithm,
+    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    target,
+    random_buffers,
+) = (method_state, target, random_buffers)
+
+_prepared_backend_state(
+    sampler,
+    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+) = (
+    method_state,
+    sampler.target,
+    sampler.random_buffers,
+    sampler.rng,
+)
+
+function _preflight_accelerator_method(
+    device,
+    target,
+    algorithm,
+    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    random_buffers,
+)
+    return _preflight_packed_static_mis_kernel_target(
+        device,
+        target,
+        method_state,
+        random_buffers,
+    )
+end
+
+function _allocate_random_buffers(
+    device::MLDataDevices.AbstractAcceleratorDevice,
+    ::ProposalBank,
+    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    nsamples,
+)
+    bank = method_state.bank
+    prototype = device(Vector{eltype(bank.locations)}(undef, 0))
+    return _allocate_packed_static_mis_random_buffers(prototype, bank, nsamples)
+end
+
+function _allocate_packed_static_mis_random_buffers(
+    prototype,
+    bank::Union{_PackedDiagonalGaussianBank,_PackedFactorGaussianBank},
+    nsamples,
+)
+    uniform = similar(prototype, eltype(bank.cdf), nsamples)
+    normal = similar(
+        prototype,
+        eltype(bank.locations),
+        size(bank.locations, 1) * nsamples,
+    )
+    assignments = similar(prototype, Int, nsamples)
+    solve_scratch = _allocate_mis_solve_scratch(prototype, bank, nsamples)
+    failure_scratch = _allocate_native_failure_scratch(normal, nsamples)
+    return _PackedStaticMISRandomBuffers(
+        uniform,
+        normal,
+        assignments,
+        solve_scratch,
+        failure_scratch,
+    )
+end
+
+@kernel function _static_mis_assignment_kernel!(
+    assignments,
+    uniforms,
+    cdf,
+    assignment,
+)
+    sample_index = @index(Global, Linear)
+    @inbounds assignments[sample_index] = _static_mis_assignment(
+        assignment,
+        cdf,
+        @inbounds(uniforms[sample_index]),
+        sample_index,
+        length(assignments),
+    )
+end
+
+function _allocate_packed_static_mis_samples(
+    prototype,
+    bank::_PackedDiagonalGaussianBank{L,S,N,M,C,I,<:_ScalarGaussianLayout},
+    nsamples,
+) where {L,S,N,M,C,I}
+    return similar(prototype, eltype(bank.locations), nsamples)
+end
+
+function _allocate_packed_static_mis_samples(
+    prototype,
+    bank::_PackedFactorGaussianBank,
+    nsamples,
+)
+    return similar(
+        prototype,
+        eltype(bank.locations),
+        size(bank.locations, 1),
+        nsamples,
+    )
+end
+
+function _allocate_packed_static_mis_samples(
+    prototype,
+    bank::_PackedDiagonalGaussianBank{L,S,N,M,C,I,<:_VectorGaussianLayout},
+    nsamples,
+) where {L,S,N,M,C,I}
+    return similar(
+        prototype,
+        eltype(bank.locations),
+        size(bank.locations, 1),
+        nsamples,
+    )
+end
+
+function _preflight_packed_static_mis_kernel_target(
+    device,
+    target,
+    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    buffers::_PackedStaticMISRandomBuffers,
+)
+    bank = method_state.bank
+    samples = _allocate_packed_static_mis_samples(buffers.normal, bank, 1)
+    binding_sample = _native_binding_sample(samples)
+    bound_target = _bind_resolved_target(target, binding_sample)
+    log_type = _resolve_packed_static_mis_logweight_type(
+        bound_target,
+        bank,
+        typeof(binding_sample),
+    )
+    logweights = similar(buffers.normal, log_type, 1)
+    proposal_ids = similar(buffers.assignments, Int, 1)
+    target_argument = _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
+    backend = KernelAbstractions.get_backend(buffers.normal)
+
+    assignment_kernel = _static_mis_assignment_kernel!(backend)
+    for argument in (
+        buffers.assignments,
+        buffers.uniform,
+        bank.cdf,
+        method_state.design.assignment,
+    )
+        _preflight_kernel_argument(device, assignment_kernel, argument)
+    end
+
+    sampling_kernel = _mis_round_kernel!(backend)
+    for argument in (
+        samples,
+        logweights,
+        proposal_ids,
+        buffers.failure_scratch.record.storage,
+        buffers.normal,
+        target_argument,
+        bank,
+        buffers.assignments,
+        method_state.design.denominator,
+        buffers.solve_scratch,
+    )
+        _preflight_kernel_argument(device, sampling_kernel, argument)
+    end
+    return nothing
+end
+
+function _resolve_packed_static_mis_logweight_type(target, bank, sample_type)
+    target_type = _capture_sampler_failure(:target, 1) do
+        inferred = Base.promote_op(target, sample_type)
+        _canonical_inferred_log_type(inferred, "target")
+    end
+    return promote_type(
+        target_type,
+        eltype(bank.lognormalizers),
+        eltype(bank.logmasses),
+    )
+end
+
+function _launch_packed_static_mis!(
+    samples,
+    logweights,
+    proposal_ids,
+    buffers,
+    target,
+    method_state,
+    execution,
+)
+    backend = KernelAbstractions.get_backend(buffers.normal)
+    assignment_kernel = _static_mis_assignment_kernel!(backend)
+    assignment_kernel(
+        buffers.assignments,
+        buffers.uniform,
+        method_state.bank.cdf,
+        method_state.design.assignment;
+        ndrange=length(logweights),
+        workgroupsize=_native_workgroupsize(execution, length(logweights)),
+    )
+    KernelAbstractions.synchronize(backend)
+
+    _launch_mis_round!(
+        samples,
+        logweights,
+        proposal_ids,
+        buffers.failure_scratch.record.storage,
+        buffers.normal,
+        target,
+        method_state.bank,
+        buffers.assignments,
+        method_state.design.denominator,
+        buffers.solve_scratch,
+        execution,
+    )
+    return nothing
+end
+
+function _importance_sample_cpu!(
+    sampler,
+    method_state::_PreparedStaticMIS{<:Union{
+        _PackedDiagonalGaussianBank,
+        _PackedFactorGaussianBank,
+    }},
+    threaded,
+)
+    cpu_execution = threaded ? _ThreadedCPUExecution() : _SerialCPUExecution()
+    buffers = _capture_sampler_failure(:proposal_draw, 1) do
+        _fill_random_buffers!(sampler.rng, sampler.random_buffers)
+    end
+    nsamples = sampler.algorithm.nsamples
+    samples = _allocate_packed_static_mis_samples(
+        buffers.normal,
+        method_state.bank,
+        nsamples,
+    )
+    binding_sample = _native_binding_sample(samples)
+    target = _capture_sampler_failure(:target, 1) do
+        _bind_resolved_target(sampler.target, binding_sample)
+    end
+    log_type = _resolve_packed_static_mis_logweight_type(
+        target,
+        method_state.bank,
+        typeof(binding_sample),
+    )
+    logweights = similar(buffers.normal, log_type, nsamples)
+    proposal_ids = similar(buffers.assignments, Int, nsamples)
+    failure_scratch = buffers.failure_scratch
+    target_evaluator, target_failures = _native_target_evaluator(
+        KernelAbstractions.get_backend(buffers.normal),
+        target,
+        log_type,
+        failure_scratch.target_failures,
+    )
+    _launch_packed_static_mis!(
+        samples,
+        logweights,
+        proposal_ids,
+        buffers,
+        target_evaluator,
+        method_state,
+        cpu_execution,
+    )
+    snapshot = _device_failure_snapshot(failure_scratch.record)
+    _throw_native_failures(
+        snapshot.failure,
+        snapshot.draw_failure,
+        target_failures,
+        _NoSampleTransform(),
+    )
+    diagnostics = (
+        method=:importance_sampling,
+        mis_scheme=_mis_scheme_name(
+            method_state.design.assignment,
+            method_state.design.denominator,
+        ),
+        execution=_execution_name(cpu_execution),
+        threaded=sampler.threaded,
+        nsamples=nsamples,
+        failures=0,
+        transfers=snapshot.transfers,
+    )
+    return _adopt_validated_weighted_samples(
+        samples,
+        logweights;
+        provenance=(proposal_id=proposal_ids,),
+        diagnostics=diagnostics,
+    )
+end

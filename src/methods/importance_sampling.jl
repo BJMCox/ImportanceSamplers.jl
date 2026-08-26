@@ -1,3 +1,6 @@
+struct _SingleProposalScheme end
+struct _SingleProposalMethodState end
+
 """
     AbstractImportanceSampler
 
@@ -8,25 +11,68 @@ bound target belong to the object returned by [`prepare_sampler`](@ref).
 """
 abstract type AbstractImportanceSampler end
 
+mutable struct _ValidatedImportanceSamplingToken end
+const _VALIDATED_IMPORTANCE_SAMPLING_TOKEN = _ValidatedImportanceSamplingToken()
+
 """
     ImportanceSampling(proposal; nsamples)
+    ImportanceSampling(bank::ProposalBank; nsamples, mis_scheme=StratifiedMixture())
 
-Configure plain, single-proposal importance sampling.
+Configure plain or static multiple importance sampling.
 
 `proposal` must implement `rand(rng, proposal)` and
 `DensityInterface.logdensityof(proposal, sample)` for the same normalized
 measure. `nsamples` must be a positive `Int` and is the exact number of samples
 returned by every run. Generic proposals execute on CPU; the native Gaussian
 and transform subset also supports prepared CUDA execution.
+
+When the first argument is a [`ProposalBank`](@ref), `mis_scheme` selects one of
+the four complete assignment/denominator contracts described by
+[`AbstractMISScheme`](@ref); it defaults to [`StratifiedMixture`](@ref). The
+result stores canonical raw log weights and stable one-based generating
+proposal IDs in `result.provenance.proposal_id`. Bank capabilities are validated
+during preparation, before the supplied RNG is consumed.
 """
-struct ImportanceSampling{P} <: AbstractImportanceSampler
+struct ImportanceSampling{P,S} <: AbstractImportanceSampler
     proposal::P
     nsamples::Int
+    mis_scheme::S
+
+    function ImportanceSampling(
+        proposal::P,
+        nsamples::Int,
+        mis_scheme::S,
+        token::_ValidatedImportanceSamplingToken,
+    ) where {P,S}
+        token === _VALIDATED_IMPORTANCE_SAMPLING_TOKEN || throw(
+            ArgumentError("invalid internal algorithm-construction token"),
+        )
+        return new{P,S}(proposal, nsamples, mis_scheme)
+    end
 end
 
 function ImportanceSampling(proposal; nsamples)
     nsamples isa Int && nsamples > 0 || throw(ArgumentError("nsamples must be a positive Int"))
-    return ImportanceSampling(proposal, nsamples)
+    return ImportanceSampling(
+        proposal,
+        nsamples,
+        _SingleProposalScheme(),
+        _VALIDATED_IMPORTANCE_SAMPLING_TOKEN,
+    )
+end
+
+function ImportanceSampling(
+    bank::ProposalBank;
+    nsamples,
+    mis_scheme::AbstractMISScheme=StratifiedMixture(),
+)
+    nsamples isa Int && nsamples > 0 || throw(ArgumentError("nsamples must be a positive Int"))
+    return ImportanceSampling(
+        bank,
+        nsamples,
+        mis_scheme,
+        _VALIDATED_IMPORTANCE_SAMPLING_TOKEN,
+    )
 end
 
 """
@@ -87,6 +133,10 @@ function Base.showerror(io::IO, error::SamplerDeviceError)
         "generic proposals are CPU-only"
     elseif error.reason === :product_proposal_cpu_only
         "ProductProposal is CPU-only"
+    elseif error.reason === :factor_proposal_cpu_only
+        "factor Gaussian proposal banks are CPU-only"
+    elseif error.reason === :transformed_proposal_cpu_only
+        "transformed proposal banks are CPU-only"
     elseif error.reason === :kernel_argument_unsupported
         "the target or context does not have a supported accelerator kernel " *
         "argument representation"
@@ -143,11 +193,12 @@ struct _ContextualPreparedTarget{T,P}
     context::P
 end
 
-mutable struct _PreparedImportanceSampler{R,B,T,A,D}
+mutable struct _PreparedImportanceSampler{R,B,T,A,M,D}
     rng::R
     random_buffers::B
     target::T
     algorithm::A
+    method_state::M
     device::D
     threaded::Bool
     running::Bool
@@ -209,14 +260,20 @@ end
 function _prepare_importance_sampler(rng, target, algorithm, threaded)
     threaded isa Bool || throw(ArgumentError("threaded must be Bool"))
     prepared_target = _resolve_prepared_target(target, algorithm.proposal)
+    method_state = _prepare_method_state(algorithm)
     device = MLDataDevices.CPUDevice()
-    random_buffers =
-        _allocate_random_buffers(device, algorithm.proposal, algorithm.nsamples)
+    random_buffers = _allocate_random_buffers(
+        device,
+        algorithm.proposal,
+        method_state,
+        algorithm.nsamples,
+    )
     return _PreparedImportanceSampler(
         rng,
         random_buffers,
         prepared_target,
         algorithm,
+        method_state,
         device,
         threaded,
         false,
@@ -224,14 +281,32 @@ function _prepare_importance_sampler(rng, target, algorithm, threaded)
     )
 end
 
+_prepare_method_state(
+    ::ImportanceSampling{P,_SingleProposalScheme},
+) where {P} = _SingleProposalMethodState()
+
 function _copy_to_device(device, value)
     return device(deepcopy(value))
 end
 
 function _copy_algorithm(device, algorithm::ImportanceSampling)
     proposal = _copy_to_device(device, algorithm.proposal)
-    return ImportanceSampling(proposal, algorithm.nsamples)
+    mis_scheme = _copy_to_device(device, algorithm.mis_scheme)
+    return ImportanceSampling(
+        proposal,
+        algorithm.nsamples,
+        mis_scheme,
+        _VALIDATED_IMPORTANCE_SAMPLING_TOKEN,
+    )
 end
+
+_copy_accelerator_algorithm(device, algorithm, method_state) =
+    _copy_algorithm(device, algorithm)
+
+_prepare_transferred_method_state(device, algorithm, method_state) =
+    _prepare_method_state(algorithm)
+
+_accelerator_method_state_limit(method_state) = nothing
 
 function _clone_rng(device, rng::Random.AbstractRNG)
     cloned = try
@@ -256,6 +331,32 @@ function _validate_backend_state(device, state)
     return nothing
 end
 
+_prepared_backend_state(sampler, method_state) = (
+    sampler.algorithm,
+    method_state,
+    sampler.target,
+    sampler.random_buffers,
+    sampler.rng,
+)
+
+_transferred_backend_state(algorithm, method_state, target, random_buffers) =
+    (algorithm, method_state, target, random_buffers)
+
+function _preflight_accelerator_method(
+    device,
+    target,
+    algorithm,
+    ::_SingleProposalMethodState,
+    random_buffers,
+)
+    return _preflight_native_kernel_target(
+        device,
+        target,
+        algorithm.proposal,
+        random_buffers,
+    )
+end
+
 function _transfer_prepared_sampler(
     device::MLDataDevices.AbstractCPUDevice,
     sampler::_PreparedImportanceSampler,
@@ -271,13 +372,19 @@ function _transfer_prepared_sampler(
         SamplerDeviceError(device, :opaque_host_closure),
     )
     algorithm = _copy_algorithm(device, sampler.algorithm)
-    random_buffers =
-        _allocate_random_buffers(device, algorithm.proposal, algorithm.nsamples)
+    method_state = _prepare_method_state(algorithm)
+    random_buffers = _allocate_random_buffers(
+        device,
+        algorithm.proposal,
+        method_state,
+        algorithm.nsamples,
+    )
     return _PreparedImportanceSampler(
         _clone_rng(device, sampler.rng),
         random_buffers,
         _transfer_prepared_target(device, sampler.target),
         algorithm,
+        method_state,
         device,
         sampler.threaded,
         false,
@@ -305,40 +412,71 @@ function _transfer_prepared_sampler(
     )
     proposal_limit = _accelerator_proposal_limit(sampler.algorithm.proposal)
     isnothing(proposal_limit) || throw(SamplerDeviceError(device, proposal_limit))
+    method_state_limit = _accelerator_method_state_limit(sampler.method_state)
+    isnothing(method_state_limit) || throw(
+        SamplerDeviceError(device, method_state_limit),
+    )
     return _with_backend_device(device) do
-        algorithm = _copy_algorithm(device, sampler.algorithm)
+        algorithm = _copy_accelerator_algorithm(
+            device,
+            sampler.algorithm,
+            sampler.method_state,
+        )
         target = _transfer_prepared_target(device, sampler.target)
+        method_state = _prepare_transferred_method_state(
+            device,
+            algorithm,
+            sampler.method_state,
+        )
         random_buffers = _allocate_random_buffers(
             device,
             algorithm.proposal,
+            method_state,
             algorithm.nsamples,
         )
-        random_buffers isa _RandomBuffers || throw(
+        random_buffers isa Union{_RandomBuffers,_PackedStaticMISRandomBuffers} || throw(
             SamplerDeviceError(device, :accelerator_rng_unavailable),
         )
-        _validate_backend_state(device, (algorithm, target, random_buffers))
-        _preflight_native_kernel_target(
+        _validate_backend_state(
+            device,
+            _transferred_backend_state(
+                algorithm,
+                method_state,
+                target,
+                random_buffers,
+            ),
+        )
+        _preflight_accelerator_method(
             device,
             target,
-            algorithm.proposal,
+            algorithm,
+            method_state,
             random_buffers,
         )
-        _owned_backend_rng(device, zero(UInt64))
+        source_rng = _clone_rng(device, sampler.rng)
         seed = try
-            Random.rand(sampler.rng, UInt64)
+            Random.rand(source_rng, UInt64)
         catch
             throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
         end
-        return _PreparedImportanceSampler(
-            _owned_backend_rng(device, seed),
+        backend_rng = try
+            _owned_backend_rng(device, seed)
+        catch
+            throw(SamplerDeviceError(device, :accelerator_rng_unavailable))
+        end
+        destination = _PreparedImportanceSampler(
+            backend_rng,
             random_buffers,
             target,
             algorithm,
+            method_state,
             device,
             sampler.threaded,
             false,
             false,
         )
+        sampler.rng = source_rng
+        return destination
     end
 end
 
@@ -428,12 +566,7 @@ function importance_sample!(sampler::_PreparedImportanceSampler)
         return _with_backend_device(sampler.device) do
             _validate_backend_state(
                 sampler.device,
-                (
-                    sampler.algorithm,
-                    sampler.target,
-                    sampler.random_buffers,
-                    sampler.rng,
-                ),
+                _prepared_backend_state(sampler, sampler.method_state),
             )
             _reset_native_failure_scratch!(
                 _native_failure_scratch(sampler.random_buffers),
@@ -449,6 +582,10 @@ function importance_sample!(sampler::_PreparedImportanceSampler)
 end
 
 function _importance_sample_cpu!(sampler, threaded)
+    return _importance_sample_cpu!(sampler, sampler.method_state, threaded)
+end
+
+function _importance_sample_cpu!(sampler, ::_SingleProposalMethodState, threaded)
     execution = _sampling_execution(sampler.algorithm.proposal, threaded)
     samples, logweights, transfers = _importance_sample!(sampler, execution)
     diagnostics = (

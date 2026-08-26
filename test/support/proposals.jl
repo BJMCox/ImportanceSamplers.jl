@@ -2,6 +2,31 @@ import Random
 import Random: rand, randn
 import DensityInterface
 
+function check_static_mis_effective_coefficients(cdf, coefficient_sets...)
+    boundaries = BigFloat.(cdf)
+    interval_masses = diff(vcat(zero(BigFloat), boundaries))
+    @test sum(interval_masses) == one(BigFloat)
+    @test all(>(zero(BigFloat)), interval_masses)
+    for logcoefficients in coefficient_sets
+        masses = exp.(BigFloat.(logcoefficients))
+        @test all(isapprox.(
+            masses,
+            interval_masses;
+            rtol=BigFloat(8eps(Float32)),
+            atol=zero(BigFloat),
+        ))
+        # For a target supported only by the last disjoint proposal, its
+        # proposal density cancels from this exact linear-normalizer oracle.
+        @test isapprox(
+            interval_masses[end] / masses[end],
+            one(BigFloat);
+            atol=BigFloat(16eps(Float64)),
+            rtol=zero(BigFloat),
+        )
+    end
+    return nothing
+end
+
 struct TestScalarProposal{T<:AbstractFloat}
     location::T
     draw_count::Base.RefValue{Int}

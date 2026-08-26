@@ -6,12 +6,20 @@ using Random
 import MLDataDevices
 
 include(joinpath(@__DIR__, "..", "validation", "cuda_plain_is_capabilities.jl"))
+include(joinpath(@__DIR__, "..", "validation", "static_mis_capabilities.jl"))
 
 struct CapabilityGaussian end
 
 Random.rand(rng::Random.AbstractRNG, ::CapabilityGaussian) = randn(rng)
 DensityInterface.logdensityof(::CapabilityGaussian, x::Real) =
     -0.5 * abs2(x) - 0.5 * log(2pi)
+
+mutable struct CapabilityRNGSentinel <: Random.AbstractRNG; consumed::Bool; end
+mark_rng_consumed(rng::CapabilityRNGSentinel) =
+    (rng.consumed = true; error("capability preparation consumed its RNG"))
+Random.rand(rng::CapabilityRNGSentinel, args...) = mark_rng_consumed(rng)
+Random.rand!(rng::CapabilityRNGSentinel, args...) = mark_rng_consumed(rng)
+Random.randn!(rng::CapabilityRNGSentinel, args...) = mark_rng_consumed(rng)
 
 struct CapabilityAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
 MLDataDevices.functional(::CapabilityAccelerator) = true
@@ -216,6 +224,68 @@ end
 
 const NATIVE_PLAIN_IS_CAPABILITY_TABLE = checked_plain_is_capability_table()
 
+function checked_static_mis_capability_table()
+    for (bank_index, row) in enumerate(STATIC_MIS_CAPABILITY_ROWS)
+        bank = row.factory(Float64)
+        proposal = first(bank.proposals)
+        target = sample -> DensityInterface.logdensityof(proposal, sample)
+        for (scheme_index, scheme) in enumerate(STATIC_MIS_COMPLETE_SCHEMES)
+            result = importance_sample(
+                Xoshiro(10bank_index + scheme_index), target,
+                ImportanceSampling(bank; nsamples=7, mis_scheme=scheme.value);
+                threaded=false,
+            )
+            length(result) == 7 || error("static-MIS CPU capability check failed")
+        end
+        if row.device !== :supported
+            sampler = prepare_sampler(
+                Xoshiro(0x53544154), capability_product_target,
+                ImportanceSampling(bank; nsamples=4); threaded=true,
+            )
+            caught = try CapabilityAccelerator()(sampler); nothing catch error; error end
+            caught isa SamplerDeviceError && caught.reason === row.device ||
+                error("static-MIS accelerator rejection check failed")
+        end
+    end
+    for rejection in STATIC_MIS_PREPARATION_REJECTIONS
+        rng = CapabilityRNGSentinel(false)
+        caught = try prepare_sampler(
+            rng, capability_product_target,
+            ImportanceSampling(rejection.factory(); nsamples=4); threaded=false,
+        ); nothing catch error; error end
+        caught isa rejection.error || error("static-MIS preparation rejection check failed")
+        rng.consumed && error("static-MIS preparation rejection consumed its RNG")
+    end
+    scheme_names = join((scheme.name for scheme in STATIC_MIS_COMPLETE_SCHEMES), ", ")
+    function accelerator(row)
+        row.device !== :supported && return "rejected: `$(row.device)`"
+        isnothing(row.direct) && return "CUDA execution; not directly hardware-validated"
+        direct = row.direct
+        types = join(string.(direct.types), " and ")
+        return "$(direct.hardware) execution with $types across $(length(direct.schemes)) schemes"
+    end
+    rows = join(
+        ("| $(r.bank) | $(r.cpu) | $(accelerator(r)) |" for r in STATIC_MIS_CAPABILITY_ROWS),
+        '\n',
+    )
+    rejections = join(
+        (
+            "| $(r.input) | `$(nameof(r.error))` before RNG use |" for
+            r in STATIC_MIS_PREPARATION_REJECTIONS
+        ),
+        '\n',
+    )
+    return Markdown.parse(
+        "All rows support the four complete schemes: $scheme_names.\n\n" *
+        "| Proposal bank | CPU | CUDA status/evidence |\n" *
+        "|:--|:--|:--|\n" * rows * "\n\n" *
+        "| Invalid positive-mass bank | Preparation result |\n" *
+        "|:--|:--|\n" * rejections,
+    )
+end
+
+const STATIC_MIS_CAPABILITY_TABLE = checked_static_mis_capability_table()
+
 makedocs(
     modules=[ImportanceSamplers],
     sitename="ImportanceSamplers.jl",
@@ -231,6 +301,7 @@ makedocs(
         "Home" => "index.md",
         "Methods" => [
             "Plain importance sampling" => "methods/importance_sampling.md",
+            "Static multiple importance sampling" => "methods/static_mis.md",
         ],
         "Guides" => [
             "Native proposals" => "guide/native_proposals.md",
@@ -242,5 +313,8 @@ makedocs(
     doctest=true,
     checkdocs=:exports,
     linkcheck=true,
+    linkcheck_ignore=[
+        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/validation/reproducers/(cuda_)?static_mis\.jl$",
+    ],
     warnonly=false,
 )

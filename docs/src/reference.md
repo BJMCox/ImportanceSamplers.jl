@@ -10,6 +10,18 @@ importance_sample
 importance_sample!
 ```
 
+## Proposal populations and MIS schemes
+
+```@docs
+AbstractProposalPopulation
+ProposalBank
+AbstractMISScheme
+StratifiedMixture
+RandomMixture
+StandardMIS
+PartialDeterministicMixture
+```
+
 ## Native proposals and transforms
 
 ```@docs

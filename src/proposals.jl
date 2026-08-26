@@ -277,8 +277,15 @@ function _draw_gaussian(
     location::T,
     scale::_SphericalGaussianScale{T},
 ) where {T<:_NativeGaussianFloat}
-    return location + scale.scale * Random.randn(rng, T)
+    return _gaussian_affine_coordinate(
+        location,
+        scale.scale,
+        Random.randn(rng, T),
+    )
 end
+
+@inline _gaussian_affine_coordinate(location, scale, normal) =
+    location + scale * normal
 
 @inline function _gaussian_coordinate(
     location::T,
@@ -287,7 +294,11 @@ end
     offset,
     coordinate,
 ) where {T<:_NativeGaussianFloat}
-    return location + scale.scale * @inbounds(normals[offset])
+    return _gaussian_affine_coordinate(
+        location,
+        scale.scale,
+        @inbounds(normals[offset]),
+    )
 end
 
 @inline function _gaussian_coordinate(
@@ -297,8 +308,11 @@ end
     offset,
     coordinate,
 ) where {T<:_NativeGaussianFloat}
-    return @inbounds(location[coordinate]) +
-           scale.scale * @inbounds(normals[offset + coordinate - 1])
+    return _gaussian_affine_coordinate(
+        @inbounds(location[coordinate]),
+        scale.scale,
+        @inbounds(normals[offset + coordinate - 1]),
+    )
 end
 
 @inline function _gaussian_coordinate(
@@ -308,9 +322,11 @@ end
     offset,
     coordinate,
 ) where {T<:_NativeGaussianFloat}
-    return @inbounds(location[coordinate]) +
-           @inbounds(scale.scales[coordinate]) *
-           @inbounds(normals[offset + coordinate - 1])
+    return _gaussian_affine_coordinate(
+        @inbounds(location[coordinate]),
+        @inbounds(scale.scales[coordinate]),
+        @inbounds(normals[offset + coordinate - 1]),
+    )
 end
 
 @inline function _gaussian_coordinate(
