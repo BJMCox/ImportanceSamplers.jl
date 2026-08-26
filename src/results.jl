@@ -3,11 +3,6 @@ abstract type _AbstractWeightedSamples{R} end
 mutable struct _ValidatedResultToken end
 const _VALIDATED_RESULT_TOKEN = _ValidatedResultToken()
 
-mutable struct _ResultTransferCounter
-    count::Int
-    bytes::Int
-end
-
 struct _LogSumExpAccumulator{T<:AbstractFloat}
     maximum::T
     scaled_sum::T
@@ -37,15 +32,6 @@ end
     accumulator.maximum == -Inf && return accumulator.maximum
     return accumulator.maximum + log(accumulator.scaled_sum)
 end
-
-function _record_scalar_transfer!(counter::_ResultTransferCounter, ::Type{T}) where {T}
-    counter.count += 1
-    counter.bytes += sizeof(T)
-    return nothing
-end
-
-_record_device_scalar_transfer!(counter, storage, type::Type) =
-    _is_host_storage(storage) ? nothing : _record_scalar_transfer!(counter, type)
 
 function _result_transfer_counter(diagnostics::NamedTuple)
     if !hasproperty(diagnostics, :transfers)

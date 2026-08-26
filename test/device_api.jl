@@ -690,17 +690,16 @@ end
     ])
     limits = (
         generic => :generic_proposal_cpu_only,
-        factor => :factor_proposal_cpu_only,
         transformed => :transformed_proposal_cpu_only,
         product => :product_proposal_cpu_only,
     )
+    @test IS._accelerator_proposal_limit(factor) === nothing
     for (rejected_bank, reason) in limits
         @test IS._accelerator_proposal_limit(rejected_bank) === reason
     end
 
     for (seed, rejected_bank, reason) in (
         (0x2219, generic, :generic_proposal_cpu_only),
-        (0x221a, factor, :factor_proposal_cpu_only),
         (0x221b, transformed, :transformed_proposal_cpu_only),
         (0x221c, product, :product_proposal_cpu_only),
     )
@@ -718,6 +717,34 @@ end
         @test rand(getfield(rejected, :rng), UInt64) == rand(expected_rng, UInt64)
     end
 
+    factor_source = prepare_sampler(
+        Random.Xoshiro(0x221a),
+        static_mis_device_target,
+        (shift=[0.25],),
+        ImportanceSampling(factor; nsamples=17);
+        threaded=true,
+    )
+    factor_destination = @inferred device(factor_source)
+    factor_state = getfield(factor_destination, :method_state)
+    factor_packed = getfield(factor_state, :bank)
+    factor_buffers = getfield(factor_destination, :random_buffers)
+    @test factor_packed isa IS._PackedFactorGaussianBank
+    @test all(
+        array -> array isa KernelArgumentTestArray,
+        (
+            factor_packed.locations,
+            factor_packed.factors,
+            factor_packed.lognormalizers,
+            factor_packed.logmasses,
+            factor_packed.cdf,
+            factor_packed.proposal_ids,
+            factor_buffers.uniform,
+            factor_buffers.normal,
+            factor_buffers.assignments,
+            factor_buffers.solve_scratch,
+            factor_buffers.failure_scratch.record.storage,
+        ),
+    )
 
     for (seed, rejected_bank, error_type, message) in (
         (
@@ -754,6 +781,127 @@ end
         @test occursin(message, sprint(showerror, error))
         @test rand(rng, UInt64) == rand(expected_rng, UInt64)
     end
+end
+
+@testset "DM-PMC accelerator transfer and preflight" begin
+    device = KernelArgumentTestAccelerator()
+    diagonal_bank = ProposalBank(
+        [
+            SphericalGaussian([-1.0, 0.5], 0.75),
+            DiagonalGaussian([0.5, -0.25], [1.25, 0.5]),
+            SphericalGaussian([2.0, 1.0], 0.5),
+        ],
+        [1.0, 3.0, 0.0],
+    )
+    factor_bank = ProposalBank([
+        FactorGaussian([0.0, 0.0], [1.0 0.0; 0.25 0.75]),
+        FactorGaussian([1.0, 1.0], [0.8 0.0; -0.1 1.2]),
+    ])
+
+    function assert_dm_pmc_transfer(source, bank_type)
+        destination = device(source)
+        method_state = getfield(destination, :method_state)
+        bank = getfield(method_state, :bank)
+        plan = getfield(method_state, :plan)
+        workspace = getfield(method_state, :workspace)
+        buffers = getfield(destination, :random_buffers)
+
+        @test bank isa bank_type
+        bank_scale = bank isa IS._PackedDiagonalGaussianBank ? bank.scales : bank.factors
+        solve_scratch = workspace.solve_scratch
+        arrays = (
+            bank.locations,
+            bank_scale,
+            bank.lognormalizers,
+            bank.logmasses,
+            bank.cdf,
+            bank.proposal_ids,
+            plan.counts,
+            plan.assignments,
+            plan.logcoefficients,
+            workspace.round_samples,
+            workspace.round_logweights,
+            workspace.round_proposal_ids,
+            workspace.resampling_cdf,
+            workspace.ancestors,
+            workspace.candidate_locations,
+            buffers.normals,
+            buffers.resampling_uniforms,
+            buffers.failure_scratch.record.storage,
+        )
+        @test all(array -> array isa KernelArgumentTestArray, arrays)
+        if bank isa IS._PackedFactorGaussianBank
+            @test solve_scratch isa KernelArgumentTestArray
+        else
+            @test solve_scratch isa IS._NoMISSolveScratch
+        end
+        @test plan.schedule isa Tuple
+        @test plan.offsets isa Tuple
+        @test getfield(destination, :algorithm) !== getfield(source, :algorithm)
+        @test getfield(destination, :algorithm).bank.proposals isa Vector
+        @test getfield(destination, :algorithm).bank.masses isa Vector
+        return destination
+    end
+
+    for (seed, bank, bank_type) in (
+        (0x2222, diagonal_bank, IS._PackedDiagonalGaussianBank),
+        (0x2223, factor_bank, IS._PackedFactorGaussianBank),
+    )
+        algorithm = DeterministicMixturePMC(
+            bank;
+            rounds=2,
+            round_size=[5, 7],
+        )
+        source = prepare_sampler(
+            Random.Xoshiro(seed),
+            static_mis_device_target,
+            (shift=[0.25],),
+            algorithm;
+            threaded=true,
+        )
+        expected_source_rng = copy(getfield(source, :rng))
+        destination = assert_dm_pmc_transfer(source, bank_type)
+        @test getfield(destination, :device) === device
+        rand(expected_source_rng, UInt64)
+        @test rand(getfield(source, :rng), UInt64) == rand(expected_source_rng, UInt64)
+    end
+
+    rejected_source = prepare_sampler(
+        Random.Xoshiro(0x2224),
+        static_mis_device_target,
+        UnadaptedKernelContext([0.25]),
+        DeterministicMixturePMC(
+            diagonal_bank;
+            rounds=2,
+            round_size=6,
+        );
+        threaded=true,
+    )
+    expected_rejected_rng = copy(getfield(rejected_source, :rng))
+    rejected_error = caught_device_error(() -> device(rejected_source))
+    @test rejected_error isa SamplerDeviceError
+    @test rejected_error.reason === :kernel_argument_unsupported
+    @test rand(getfield(rejected_source, :rng), UInt64) ==
+          rand(expected_rejected_rng, UInt64)
+    @test length(importance_sample!(rejected_source)) == 12
+
+    serial_source = prepare_sampler(
+        Random.Xoshiro(0x2225),
+        static_mis_device_target,
+        (shift=[0.25],),
+        DeterministicMixturePMC(
+            diagonal_bank;
+            rounds=2,
+            round_size=6,
+        );
+        threaded=false,
+    )
+    expected_serial_rng = copy(getfield(serial_source, :rng))
+    serial_error = caught_device_error(() -> device(serial_source))
+    @test serial_error isa SamplerDeviceError
+    @test serial_error.reason === :serial_accelerator
+    @test rand(getfield(serial_source, :rng), UInt64) ==
+          rand(expected_serial_rng, UInt64)
 end
 
 @testset "backend hooks own device scope and validate residency" begin

@@ -445,7 +445,11 @@ function _transfer_prepared_sampler(
             method_state,
             _algorithm_sample_budget(algorithm),
         )
-        random_buffers isa Union{_RandomBuffers,_PackedStaticMISRandomBuffers} || throw(
+        random_buffers isa Union{
+            _RandomBuffers,
+            _PackedStaticMISRandomBuffers,
+            _DMPMCRandomBuffers,
+        } || throw(
             SamplerDeviceError(device, :accelerator_rng_unavailable),
         )
         _validate_backend_state(

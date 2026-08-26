@@ -1,6 +1,20 @@
 struct _SerialCPUExecution end
 struct _ThreadedCPUExecution end
 
+mutable struct _ResultTransferCounter
+    count::Int
+    bytes::Int
+end
+
+function _record_scalar_transfer!(counter::_ResultTransferCounter, ::Type{T}) where {T}
+    counter.count += 1
+    counter.bytes += sizeof(T)
+    return nothing
+end
+
+_record_device_scalar_transfer!(counter, storage, type::Type) =
+    _is_host_storage(storage) ? nothing : _record_scalar_transfer!(counter, type)
+
 struct _KernelExecution{E}
     cpu_execution::E
 end
@@ -29,6 +43,8 @@ struct _DMPMCRandomBuffers{N,U,F}
     resampling_uniforms::U
     failure_scratch::F
 end
+
+Adapt.@adapt_structure _DMPMCRandomBuffers
 
 struct _DeviceFailureRecord{A}
     storage::A

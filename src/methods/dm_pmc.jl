@@ -89,7 +89,12 @@ mutable struct _PreparedDMPMC{B,P,W}
     workspace::W
 end
 
-_accelerator_method_state_limit(::_PreparedDMPMC) = :unsupported_device
+_accelerator_method_state_limit(
+    ::_PreparedDMPMC{<:Union{
+        _PackedDiagonalGaussianBank,
+        _PackedFactorGaussianBank,
+    }},
+) = nothing
 
 function _prepare_dm_pmc_bank(bank::ProposalBank)
     destination_type = _dm_pmc_prepared_proposal_type(
@@ -320,6 +325,148 @@ function _allocate_random_buffers(
         resampling_uniforms,
         failure_scratch,
     )
+end
+
+function _allocate_random_buffers(
+    ::MLDataDevices.AbstractAcceleratorDevice,
+    ::ProposalBank,
+    method_state::_PreparedDMPMC,
+    sample_budget,
+)
+    bank = method_state.bank
+    maximum_round_size = maximum(method_state.plan.schedule)
+    normals = similar(
+        bank.locations,
+        eltype(bank.locations),
+        size(bank.locations, 1) * maximum_round_size,
+    )
+    resampling_uniforms = similar(
+        bank.cdf,
+        eltype(bank.cdf),
+        _active_proposal_count(bank),
+    )
+    failure_scratch = _allocate_native_failure_scratch(
+        normals,
+        maximum_round_size,
+    )
+    return _DMPMCRandomBuffers(
+        normals,
+        resampling_uniforms,
+        failure_scratch,
+    )
+end
+
+function _copy_accelerator_algorithm(
+    device,
+    algorithm::DeterministicMixturePMC,
+    ::_PreparedDMPMC,
+)
+    return deepcopy(algorithm)
+end
+
+function _prepare_transferred_method_state(
+    device,
+    algorithm::DeterministicMixturePMC,
+    method_state::_PreparedDMPMC,
+)
+    plan = method_state.plan
+    transferred_plan = _DMPMCAllocationPlan(
+        Tuple(plan.schedule),
+        _copy_to_device(device, plan.counts),
+        _copy_to_device(device, plan.assignments),
+        _copy_to_device(device, plan.logcoefficients),
+        Tuple(plan.offsets),
+    )
+    workspace = method_state.workspace
+    transferred_workspace = _DMPMCWorkspace(
+        _copy_to_device(device, workspace.round_samples),
+        _copy_to_device(device, workspace.round_logweights),
+        _copy_to_device(device, workspace.round_proposal_ids),
+        _copy_to_device(device, workspace.solve_scratch),
+        _copy_to_device(device, workspace.resampling_cdf),
+        _copy_to_device(device, workspace.ancestors),
+        _copy_to_device(device, workspace.candidate_locations),
+    )
+    return _PreparedDMPMC(
+        _copy_packed_gaussian_bank(device, method_state.bank),
+        transferred_plan,
+        transferred_workspace,
+    )
+end
+
+_transferred_backend_state(
+    algorithm,
+    method_state::_PreparedDMPMC,
+    target,
+    random_buffers,
+) = (method_state, target, random_buffers)
+
+_prepared_backend_state(sampler, method_state::_PreparedDMPMC) = (
+    method_state,
+    sampler.target,
+    sampler.random_buffers,
+    sampler.rng,
+)
+
+function _preflight_accelerator_method(
+    device,
+    target,
+    algorithm::DeterministicMixturePMC,
+    method_state::_PreparedDMPMC,
+    buffers::_DMPMCRandomBuffers,
+)
+    bank = method_state.bank
+    plan = method_state.plan
+    workspace = method_state.workspace
+    binding_sample = _dm_pmc_binding_sample(bank)
+    bound_target = _bind_resolved_target(target, binding_sample)
+    log_type = _resolve_packed_static_mis_logweight_type(
+        bound_target,
+        bank,
+        typeof(binding_sample),
+    )
+    target_argument = _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
+    backend = KernelAbstractions.get_backend(buffers.normals)
+
+    round_kernel = _mis_round_kernel!(backend)
+    denominator = _DMPMCRoundDenominator(plan.logcoefficients, 1)
+    for argument in (
+        workspace.round_samples,
+        workspace.round_logweights,
+        workspace.round_proposal_ids,
+        buffers.failure_scratch.record.storage,
+        buffers.normals,
+        target_argument,
+        bank,
+        plan.assignments,
+        denominator,
+        workspace.solve_scratch,
+    )
+        _preflight_kernel_argument(device, round_kernel, argument)
+    end
+
+    finalize_kernel = _dm_pmc_finalize_cdf_kernel!(backend)
+    for argument in (workspace.resampling_cdf, maximum(plan.schedule))
+        _preflight_kernel_argument(device, finalize_kernel, argument)
+    end
+    select_kernel = _dm_pmc_select_ancestors_kernel!(backend)
+    for argument in (
+        workspace.ancestors,
+        buffers.resampling_uniforms,
+        workspace.resampling_cdf,
+        maximum(plan.schedule),
+    )
+        _preflight_kernel_argument(device, select_kernel, argument)
+    end
+    gather_kernel = _dm_pmc_gather_ancestors_kernel!(backend)
+    for argument in (
+        workspace.candidate_locations,
+        workspace.round_samples,
+        workspace.ancestors,
+    )
+        _preflight_kernel_argument(device, gather_kernel, argument)
+    end
+    return nothing
 end
 
 function _copy_dm_pmc_active_proposal(device, proposal::_GaussianProposal)

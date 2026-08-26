@@ -128,6 +128,29 @@ end
 Adapt.@adapt_structure _PackedDiagonalGaussianBank
 Adapt.@adapt_structure _PackedFactorGaussianBank
 
+function _copy_packed_gaussian_bank(device, bank::_PackedDiagonalGaussianBank)
+    return _PackedDiagonalGaussianBank(
+        _copy_to_device(device, bank.locations),
+        _copy_to_device(device, bank.scales),
+        _copy_to_device(device, bank.lognormalizers),
+        _copy_to_device(device, bank.logmasses),
+        _copy_to_device(device, bank.cdf),
+        _copy_to_device(device, bank.proposal_ids),
+        bank.layout,
+    )
+end
+
+function _copy_packed_gaussian_bank(device, bank::_PackedFactorGaussianBank)
+    return _PackedFactorGaussianBank(
+        _copy_to_device(device, bank.locations),
+        _copy_to_device(device, bank.factors),
+        _copy_to_device(device, bank.lognormalizers),
+        _copy_to_device(device, bank.logmasses),
+        _copy_to_device(device, bank.cdf),
+        _copy_to_device(device, bank.proposal_ids),
+    )
+end
+
 _active_proposal_count(bank::_ActiveProposalBank) = length(bank.proposals)
 _active_proposal_count(bank::_PackedDiagonalGaussianBank) = size(bank.locations, 2)
 _active_proposal_count(bank::_PackedFactorGaussianBank) = size(bank.locations, 2)
@@ -139,7 +162,6 @@ function _accelerator_proposal_limit(bank::ProposalBank)
         proposal isa ProductProposal && return :product_proposal_cpu_only
         proposal isa TransformedProposal && return :transformed_proposal_cpu_only
         proposal isa _GaussianProposal || return :generic_proposal_cpu_only
-        proposal.scale isa _FactorGaussianScale && return :factor_proposal_cpu_only
         _is_packable_native_gaussian(proposal) || return :generic_proposal_cpu_only
     end
 

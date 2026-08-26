@@ -18,30 +18,30 @@ end
 function _copy_accelerator_algorithm(
     device,
     algorithm::ImportanceSampling{<:ProposalBank},
-    ::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    ::_PreparedStaticMIS{<:Union{
+        _PackedDiagonalGaussianBank,
+        _PackedFactorGaussianBank,
+    }},
 )
     return deepcopy(algorithm)
 end
 
 _accelerator_method_state_limit(
-    ::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    ::_PreparedStaticMIS{<:Union{
+        _PackedDiagonalGaussianBank,
+        _PackedFactorGaussianBank,
+    }},
 ) = nothing
 
 function _prepare_transferred_method_state(
     device,
     algorithm,
-    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    method_state::_PreparedStaticMIS{<:Union{
+        _PackedDiagonalGaussianBank,
+        _PackedFactorGaussianBank,
+    }},
 )
-    bank = method_state.bank
-    transferred_bank = _PackedDiagonalGaussianBank(
-        _copy_to_device(device, bank.locations),
-        _copy_to_device(device, bank.scales),
-        _copy_to_device(device, bank.lognormalizers),
-        _copy_to_device(device, bank.logmasses),
-        _copy_to_device(device, bank.cdf),
-        _copy_to_device(device, bank.proposal_ids),
-        bank.layout,
-    )
+    transferred_bank = _copy_packed_gaussian_bank(device, method_state.bank)
     design = method_state.design
     transferred_design = _PreparedMISDesign(
         design.assignment,
@@ -66,14 +66,20 @@ end
 
 _transferred_backend_state(
     algorithm,
-    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    method_state::_PreparedStaticMIS{<:Union{
+        _PackedDiagonalGaussianBank,
+        _PackedFactorGaussianBank,
+    }},
     target,
     random_buffers,
 ) = (method_state, target, random_buffers)
 
 _prepared_backend_state(
     sampler,
-    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    method_state::_PreparedStaticMIS{<:Union{
+        _PackedDiagonalGaussianBank,
+        _PackedFactorGaussianBank,
+    }},
 ) = (
     method_state,
     sampler.target,
@@ -85,7 +91,10 @@ function _preflight_accelerator_method(
     device,
     target,
     algorithm,
-    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    method_state::_PreparedStaticMIS{<:Union{
+        _PackedDiagonalGaussianBank,
+        _PackedFactorGaussianBank,
+    }},
     random_buffers,
 )
     return _preflight_packed_static_mis_kernel_target(
@@ -99,7 +108,10 @@ end
 function _allocate_random_buffers(
     device::MLDataDevices.AbstractAcceleratorDevice,
     ::ProposalBank,
-    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    method_state::_PreparedStaticMIS{<:Union{
+        _PackedDiagonalGaussianBank,
+        _PackedFactorGaussianBank,
+    }},
     nsamples,
 )
     bank = method_state.bank
@@ -183,7 +195,10 @@ end
 function _preflight_packed_static_mis_kernel_target(
     device,
     target,
-    method_state::_PreparedStaticMIS{<:_PackedDiagonalGaussianBank},
+    method_state::_PreparedStaticMIS{<:Union{
+        _PackedDiagonalGaussianBank,
+        _PackedFactorGaussianBank,
+    }},
     buffers::_PackedStaticMISRandomBuffers,
 )
     bank = method_state.bank

@@ -26,11 +26,13 @@ struct _DMPMCWorkspace{S,W,I,Q,C,A,L}
     ancestors::A
     candidate_locations::L
 end
+Adapt.@adapt_structure _DMPMCWorkspace
 
 struct _DMPMCRoundDenominator{L}
     logcoefficients::L
     round::Int
 end
+Adapt.@adapt_structure _DMPMCRoundDenominator
 
 @inline _mis_term_bounds(bank, ::_DMPMCRoundDenominator, generating_slot) =
     (1, _active_proposal_count(bank))
@@ -167,37 +169,55 @@ function _launch_dm_pmc_resampling!(
     return nothing
 end
 
-function _dm_pmc_resampling_cdf!(cdf, logweights)
+function _dm_pmc_resampling_cdf!(
+    cdf,
+    logweights,
+    transfers::_ResultTransferCounter=_ResultTransferCounter(0, 0),
+)
     maximum_logweight = maximum(logweights)
+    _record_device_scalar_transfer!(transfers, logweights, eltype(logweights))
     maximum_logweight == -Inf && throw(AllZeroWeightsError())
     cdf .= exp.(logweights .- maximum_logweight)
     total = sum(cdf)
+    _record_device_scalar_transfer!(transfers, cdf, eltype(cdf))
     isfinite(total) && total > zero(total) || throw(AllZeroWeightsError())
     cdf ./= total
     cumsum!(cdf, cdf)
     return cdf
 end
 
-function _dm_pmc_round_summary(logweights)
+function _dm_pmc_round_summary(
+    logweights,
+    transfers::_ResultTransferCounter=_ResultTransferCounter(0, 0),
+)
     maximum_logweight = maximum(logweights)
+    _record_device_scalar_transfer!(transfers, logweights, eltype(logweights))
     scaled_sum = mapreduce(
         value -> exp(value - maximum_logweight),
         +,
         logweights;
         init=zero(eltype(logweights)),
     )
+    _record_device_scalar_transfer!(transfers, logweights, eltype(logweights))
     scaled_square_sum = mapreduce(
         value -> abs2(exp(value - maximum_logweight)),
         +,
         logweights;
         init=zero(eltype(logweights)),
     )
+    _record_device_scalar_transfer!(transfers, logweights, eltype(logweights))
     T = eltype(logweights)
     return (
         ess=abs2(scaled_sum) / scaled_square_sum,
         lognormalizer=maximum_logweight + log(scaled_sum) -
                       log(T(length(logweights))),
     )
+end
+
+function _record_dm_pmc_transfers!(counter::_ResultTransferCounter, transfers)
+    counter.count += transfers.count
+    counter.bytes += transfers.bytes
+    return nothing
 end
 
 function _capture_dm_pmc_round(f, round, phase, round_size, committed_rounds)
@@ -241,6 +261,7 @@ function _importance_sample_cpu!(
     proposal_ids = similar(workspace.round_proposal_ids, Int, total_samples)
     round_ess = Vector{eltype(logweights)}(undef, length(plan.schedule))
     round_lognormalizers = similar(round_ess)
+    transfers = _ResultTransferCounter(0, 0)
     target = _capture_dm_pmc_round(1, :sample_and_weight, plan.schedule[1], 0) do
         _bind_resolved_target(sampler.target, _dm_pmc_binding_sample(bank))
     end
@@ -287,6 +308,7 @@ function _importance_sample_cpu!(
                 execution,
             )
             snapshot = _device_failure_snapshot(buffers.failure_scratch.record)
+            _record_dm_pmc_transfers!(transfers, snapshot.transfers)
             _throw_native_failures(
                 snapshot.failure,
                 snapshot.draw_failure,
@@ -295,7 +317,7 @@ function _importance_sample_cpu!(
             )
         end
         summary = _capture_dm_pmc_round(round, :resampling, round_size, round - 1) do
-            _dm_pmc_resampling_cdf!(cdf, round_logweights)
+            _dm_pmc_resampling_cdf!(cdf, round_logweights, transfers)
             Random.rand!(sampler.rng, buffers.resampling_uniforms)
             _launch_dm_pmc_resampling!(
                 cdf,
@@ -305,7 +327,7 @@ function _importance_sample_cpu!(
                 workspace.candidate_locations,
                 execution,
             )
-            _dm_pmc_round_summary(round_logweights)
+            _dm_pmc_round_summary(round_logweights, transfers)
         end
         output_indices = plan.offsets[round]:(plan.offsets[round + 1] - 1)
         _capture_dm_pmc_round(round, :commit_output, round_size, round - 1) do
@@ -317,6 +339,9 @@ function _importance_sample_cpu!(
         end
         _capture_dm_pmc_round(round, :commit_population, round_size, round - 1) do
             copyto!(bank.locations, workspace.candidate_locations)
+            KernelAbstractions.synchronize(
+                KernelAbstractions.get_backend(bank.locations),
+            )
         end
         _capture_dm_pmc_round(round, :diagnostics, round_size, round) do
             round_ess[round] = summary.ess
@@ -329,11 +354,11 @@ function _importance_sample_cpu!(
         execution=_execution_name(execution),
         threaded=sampler.threaded,
         rounds=sampler.algorithm.rounds,
-        round_sizes=copy(plan.schedule),
+        round_sizes=collect(plan.schedule),
         round_ess=round_ess,
         round_lognormalizers=round_lognormalizers,
         failures=0,
-        transfers=(count=0, bytes=0),
+        transfers=transfers,
     )
     return _adopt_validated_weighted_samples(
         samples,
