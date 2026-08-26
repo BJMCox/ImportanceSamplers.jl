@@ -28,11 +28,15 @@ count is exactly its sum.
 Prepared execution owns and advances its RNG and adaptive population. Repeated
 calls start new estimator runs from the last learned population and return
 independent, noncumulative results. [`current_proposal`](@ref) returns an
-independent snapshot from a CPU-prepared sampler. It rejects accelerator-
-prepared samplers before reading device storage, so there is no hidden transfer.
-Use `current_proposal(MLDataDevices.cpu_device()(sampler))` while the prepared
-sampler is still CPU-origin, before transferring that sampler to an accelerator;
-prepared samplers intentionally cannot migrate back from an accelerator.
+independent snapshot from a CPU-prepared sampler. The one-argument form rejects
+accelerator-prepared samplers before reading device storage, so there is no
+hidden transfer. Request the host transfer explicitly with
+`current_proposal(MLDataDevices.cpu_device(), sampler)`. This copies only the
+current packed locations and stable proposal IDs under the sampler's selected
+physical-device scope, then reconstructs an independent CPU `ProposalBank` with
+the configured fixed masses, scales or factors, and inert zero-mass proposals.
+It does not migrate the prepared sampler, RNG, target, workspaces, or results.
+Scalar-converting CPU destinations and non-CPU destinations are rejected.
 
 ## Round allocation and weighting
 
@@ -106,6 +110,17 @@ threaded workers consume prefilled random buffers. Accelerator use is explicit:
 prepare on CPU, then apply a concrete MLDataDevices device to the complete
 prepared sampler before its first execution. Samples, weights, proposal state,
 resampling state, and workspaces remain on that device.
+
+Inspecting the retained accelerator population is a separate, explicit
+operation:
+
+```julia
+host_bank = current_proposal(MLDataDevices.cpu_device(), sampler)
+```
+
+The accessor restores the caller's physical-device selection after copying the
+two packed arrays. The returned bank owns its locations, masses, scales, and
+factors; mutating it cannot change the prepared sampler.
 
 The table below is generated during every strict documentation build from the
 executable rows in `validation/dm_pmc_capabilities.jl`. Each CPU cell performs

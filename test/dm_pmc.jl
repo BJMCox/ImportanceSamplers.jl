@@ -878,7 +878,25 @@ end
     )
 
     initial = @inferred current_proposal(sampler)
+    explicit_initial = @inferred current_proposal(
+        MLDataDevices.cpu_device(),
+        sampler,
+    )
     @test initial isa ProposalBank
+    @test explicit_initial isa ProposalBank
+    @test explicit_initial !== initial
+    @test explicit_initial.proposals !== initial.proposals
+    @test explicit_initial.masses !== initial.masses
+    @test explicit_initial.proposals[1].location == initial.proposals[1].location
+
+    converting_destination_error = try
+        current_proposal(MLDataDevices.cpu_device(Float32), sampler)
+        nothing
+    catch error
+        error
+    end
+    @test converting_destination_error isa ArgumentError
+    @test occursin("preserving CPU destination", converting_destination_error.msg)
     @test initial.masses == bank.masses
     @test length(initial.proposals) == 3
     @test initial.proposals[2].location == inert.location

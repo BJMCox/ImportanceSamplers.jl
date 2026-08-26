@@ -77,6 +77,7 @@ _algorithm_sample_budget(algorithm::DeterministicMixturePMC) =
 
 """
     current_proposal(sampler)
+    current_proposal(destination, sampler)
 
 Return an independent snapshot of the proposal population currently owned by a
 CPU-prepared [`DeterministicMixturePMC`](@ref) sampler. Active proposals use the
@@ -84,12 +85,15 @@ latest adapted locations; their configured scales or factors and masses remain
 fixed. Inert zero-mass proposals retain their configured positions and stable
 IDs.
 
-The returned [`ProposalBank`](@ref) does not alias the sampler. Accelerator-
-prepared samplers are rejected rather than copied implicitly. Take the snapshot
-on CPU, for example with `current_proposal(MLDataDevices.cpu_device()(sampler))`,
-before transferring the prepared sampler to an accelerator; prepared samplers
-cannot migrate back from an accelerator. Other prepared algorithms do not
-currently implement this accessor.
+The returned [`ProposalBank`](@ref) does not alias the sampler. The one-argument
+form is CPU-only and never hides a device transfer. For an accelerator-prepared
+sampler, pass an explicit preserving CPU destination:
+`current_proposal(MLDataDevices.cpu_device(), sampler)`. That form copies only
+the current packed locations and stable proposal IDs under the sampler's
+physical-device scope; it does not migrate the prepared sampler, RNG,
+workspaces, target, or result storage. Scalar-converting and non-CPU
+destinations are rejected. Other prepared algorithms do not currently
+implement this accessor.
 """
 function current_proposal(
     sampler::_PreparedImportanceSampler{R,B,T,A,M,D},
@@ -103,18 +107,77 @@ function current_proposal(
 }
     sampler.device isa MLDataDevices.AbstractAcceleratorDevice && throw(
         ArgumentError(
-            "current_proposal does not copy accelerator state implicitly; " *
-            "call current_proposal(MLDataDevices.cpu_device()(sampler)) before " *
-            "transferring the prepared sampler to an accelerator",
+            "current_proposal(sampler) does not copy accelerator state " *
+            "implicitly; call current_proposal(cpu_device(), " *
+            "sampler) to request an explicit CPU snapshot",
         ),
     )
     packed = sampler.method_state.bank
-    locations = Array(packed.locations)
-    proposal_ids = Array(packed.proposal_ids)
+    return _dm_pmc_proposal_snapshot(
+        copy(packed.locations),
+        copy(packed.proposal_ids),
+        sampler,
+    )
+end
+
+function current_proposal(
+    destination::MLDataDevices.AbstractCPUDevice,
+    sampler::_PreparedImportanceSampler{R,B,T,A,M,D},
+) where {
+    R,
+    B,
+    T,
+    A<:DeterministicMixturePMC,
+    M,
+    D,
+}
+    if applicable(eltype, destination)
+        policy = eltype(destination)
+        policy in (Missing, Nothing) || throw(
+            ArgumentError(
+                "current_proposal requires a preserving CPU destination; " *
+                "use MLDataDevices.cpu_device() without a scalar conversion",
+            ),
+        )
+    end
+    packed = sampler.method_state.bank
+    locations, proposal_ids = _with_backend_device(sampler.device) do
+        (
+            destination(Array(packed.locations)),
+            destination(Array(packed.proposal_ids)),
+        )
+    end
+    return _dm_pmc_proposal_snapshot(locations, proposal_ids, sampler)
+end
+
+function current_proposal(
+    destination::MLDataDevices.AbstractDevice,
+    sampler::_PreparedImportanceSampler{R,B,T,A,M,D},
+) where {
+    R,
+    B,
+    T,
+    A<:DeterministicMixturePMC,
+    M,
+    D,
+}
+    throw(
+        ArgumentError(
+            "current_proposal requires a CPU destination; got " *
+            string(typeof(destination)),
+        ),
+    )
+end
+
+function _dm_pmc_proposal_snapshot(locations, proposal_ids, sampler)
     proposals = deepcopy(sampler.algorithm.bank.proposals)
     for (slot, proposal_id) in pairs(proposal_ids)
         proposal = proposals[proposal_id]
-        location = _dm_pmc_snapshot_location(locations, slot, packed)
+        location = _dm_pmc_snapshot_location(
+            locations,
+            slot,
+            sampler.method_state.bank,
+        )
         proposals[proposal_id] = _dm_pmc_with_location(proposal, location)
     end
     return ProposalBank(proposals, sampler.algorithm.bank.masses)

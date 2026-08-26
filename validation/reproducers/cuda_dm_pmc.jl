@@ -323,6 +323,18 @@ function public_execution_case(
     CUDA.synchronize()
     assert_dm_pmc_residence(prepared, first_result)
     retained_after_first = Array(prepared.method_state.bank.locations)
+    @test_throws ArgumentError current_proposal(prepared)
+    host_bank = current_proposal(MLDataDevices.cpu_device(), prepared)
+    @test host_bank.masses == bank.masses
+    @test length(host_bank.proposals) == length(bank.proposals)
+    for (slot, proposal_id) in pairs(active_ids)
+        @test host_bank.proposals[proposal_id].location ≈
+              retained_after_first[:, slot]
+    end
+    host_bank.proposals[first(active_ids)].location[1] = T(1.0e6)
+    host_bank.masses[first(active_ids)] = zero(T)
+    @test Array(prepared.method_state.bank.locations) == retained_after_first
+    @test prepared.algorithm.bank.masses == bank.masses
     first_snapshot = (
         samples=Array(first_result.samples),
         logweights=Array(first_result.logweights),
@@ -386,6 +398,7 @@ function public_execution_case(
         finite_raw_logweights=true,
         diagnostics=true,
         first_transfers,
+        explicit_current_proposal=true,
         second_transfers,
         retained_population=true,
         retained_population_repeated,

@@ -1,4 +1,5 @@
 using ImportanceSamplers
+import MLDataDevices
 using Random
 
 function gaussian_component_logdensity(
@@ -39,6 +40,8 @@ function main(; rounds=6, round_size=10_000)
     # One call returns every round; the sampler retains the final resampled population.
     result = importance_sample!(sampler)
     weights = normalized_weights(result)
+    # For an accelerator-prepared sampler, make the host transfer explicit:
+    # learned = current_proposal(MLDataDevices.cpu_device(), sampler)
     learned = current_proposal(sampler)
     summary = (
         sample_count=length(result),
