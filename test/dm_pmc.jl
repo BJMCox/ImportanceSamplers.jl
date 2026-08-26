@@ -266,22 +266,42 @@ end
         ],
         [1.0, 1.0],
     )
+    scalar_algorithm = DeterministicMixturePMC(
+        scalar_bank;
+        rounds=1,
+        round_size=2,
+    )
+    vector_algorithm = DeterministicMixturePMC(
+        vector_bank;
+        rounds=1,
+        round_size=2,
+    )
+    cpu32 = MLDataDevices.cpu_device(Float32)
+    copied_scalar_algorithm = @inferred DMPMCIS._copy_algorithm(
+        cpu32,
+        scalar_algorithm,
+    )
+    copied_vector_algorithm = @inferred DMPMCIS._copy_algorithm(
+        cpu32,
+        vector_algorithm,
+    )
     scalar_source = prepare_sampler(
         Random.Xoshiro(0x5607),
         DMPMCTarget{Float64}(),
-        DeterministicMixturePMC(scalar_bank; rounds=1, round_size=2);
+        scalar_algorithm;
         threaded=false,
     )
     vector_source = prepare_sampler(
         Random.Xoshiro(0x5608),
         DMPMCTarget{Float64}(),
-        DeterministicMixturePMC(vector_bank; rounds=1, round_size=2);
+        vector_algorithm;
         threaded=false,
     )
-    cpu32 = MLDataDevices.cpu_device(Float32)
-    scalar = cpu32(scalar_source)
-    vector = cpu32(vector_source)
+    scalar = @inferred cpu32(scalar_source)
+    vector = @inferred cpu32(vector_source)
 
+    @test eltype(copied_scalar_algorithm.bank.masses) === Float32
+    @test eltype(copied_vector_algorithm.bank.masses) === Float32
     @test all(
         proposal -> proposal.location isa Float32,
         scalar.algorithm.bank.proposals,
@@ -292,6 +312,7 @@ end
     )
     @test eltype(scalar.method_state.bank.locations) === Float32
     @test eltype(scalar.method_state.bank.scales) === Float32
+    @test scalar.method_state.bank.layout isa DMPMCIS._ScalarGaussianLayout
     @test all(
         proposal -> eltype(proposal.location) === Float32,
         vector.algorithm.bank.proposals,
@@ -302,6 +323,7 @@ end
     )
     @test eltype(vector.method_state.bank.locations) === Float32
     @test eltype(vector.method_state.bank.scales) === Float32
+    @test vector.method_state.bank.layout isa DMPMCIS._VectorGaussianLayout
     @test scalar_source.algorithm.bank.proposals[1].location isa Float64
     @test vector_source.algorithm.bank.proposals[1].scale.scale isa Float64
 end
@@ -432,8 +454,8 @@ end
         factor_algorithm;
         threaded=false,
     )
-    diagonal = cpu32(diagonal_source)
-    factor = cpu32(factor_source)
+    diagonal = @inferred cpu32(diagonal_source)
+    factor = @inferred cpu32(factor_source)
 
     @test eltype(copied_diagonal_algorithm.bank.masses) === Float32
     @test eltype(copied_factor_algorithm.bank.masses) === Float32
@@ -451,6 +473,7 @@ end
         diagonal.algorithm.bank.proposals,
     )
     @test eltype(diagonal.method_state.bank.locations) === Float32
+    @test diagonal.method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
     @test eltype(diagonal.method_state.bank.scales) === Float32
     @test eltype(diagonal.method_state.bank.lognormalizers) === Float32
     @test eltype(diagonal.method_state.bank.logmasses) === Float32
@@ -472,6 +495,7 @@ end
         factor.algorithm.bank.proposals,
     )
     @test eltype(factor.method_state.bank.locations) === Float32
+    @test factor.method_state.bank isa DMPMCIS._PackedFactorGaussianBank
     @test eltype(factor.method_state.bank.factors) === Float32
     @test eltype(factor.method_state.bank.lognormalizers) === Float32
     @test eltype(factor.method_state.bank.logmasses) === Float32
@@ -481,6 +505,23 @@ end
 
     @test eltype(diagonal_source.method_state.bank.locations) === Float64
     @test eltype(factor_source.method_state.bank.locations) === Float64
+end
+
+@testset "DM-PMC type seams are ambiguity-free" begin
+    ambiguities = Test.detect_ambiguities(DMPMCIS; recursive=false)
+    dm_pmc_ambiguities = filter(ambiguities) do ambiguity
+        any(
+            method -> occursin("_dm_pmc", string(method.name)),
+            ambiguity,
+        )
+    end
+    unbound_methods = Test.detect_unbound_args(DMPMCIS)
+    dm_pmc_unbound_methods = filter(unbound_methods) do method
+        occursin("_dm_pmc", string(method.name))
+    end
+
+    @test isempty(dm_pmc_ambiguities)
+    @test isempty(dm_pmc_unbound_methods)
 end
 
 @testset "DM-PMC rejects unsupported banks before RNG use" begin

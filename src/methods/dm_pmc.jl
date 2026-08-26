@@ -91,6 +91,14 @@ end
 _accelerator_method_state_limit(::_PreparedDMPMC) = :unsupported_device
 
 function _prepare_dm_pmc_bank(bank::ProposalBank)
+    destination_type = _dm_pmc_prepared_proposal_type(
+        eltype(bank.masses),
+        eltype(bank.proposals),
+    )
+    return _prepare_dm_pmc_bank(bank, destination_type)
+end
+
+function _prepare_dm_pmc_bank(bank::ProposalBank, ::Nothing)
     proposal_ids, logmasses, cdf = _prepare_active_proposal_metadata(bank)
     packed = _pack_native_gaussian_bank(
         bank,
@@ -104,6 +112,52 @@ function _prepare_dm_pmc_bank(bank::ProposalBank)
         ),
     )
     return packed
+end
+
+function _prepare_dm_pmc_bank(
+    bank::ProposalBank{P,M},
+    ::Type{D},
+) where {
+    T<:_NativeGaussianFloat,
+    P,
+    M<:AbstractVector{T},
+    D<:_GaussianProposal,
+}
+    proposal_ids, logmasses, cdf = _prepare_active_proposal_metadata(bank)
+    proposals = view(bank.proposals, proposal_ids)
+    all(proposal -> proposal isa D, proposals) || throw(
+        ArgumentError("active DM-PMC proposals do not match their destination type"),
+    )
+
+    first_proposal = first(proposals)::D
+    dimension = _gaussian_dimension(first_proposal.location)
+    locations = Matrix{T}(undef, dimension, length(proposals))
+    lognormalizers = Vector{T}(undef, length(proposals))
+    for (slot, untyped_proposal) in pairs(proposals)
+        proposal = untyped_proposal::D
+        _gaussian_dimension(proposal.location) == dimension || throw(
+            DimensionMismatch(
+                "positive-mass native Gaussian proposals must have one common dimension",
+            ),
+        )
+        if proposal.location isa _NativeGaussianFloat
+            locations[1, slot] = proposal.location
+        else
+            copyto!(view(locations, :, slot), proposal.location)
+        end
+        lognormalizers[slot] = proposal.lognormalizer
+    end
+
+    return _pack_native_gaussian_storage(
+        locations,
+        lognormalizers,
+        logmasses,
+        cdf,
+        proposal_ids,
+        proposals,
+        _dm_pmc_gaussian_layout(D),
+        _native_gaussian_pack_kind(D),
+    )
 end
 
 function _dm_pmc_exact_mass_proportions(active_masses)
@@ -298,45 +352,99 @@ function _copy_dm_pmc_homogeneous_bank(
     return ProposalBank(proposals, masses)
 end
 
-function _copy_dm_pmc_bank(
-    device::MLDataDevices.CPUDevice{T},
-    bank::ProposalBank{P,M},
-) where {
-    T<:_NativeGaussianFloat,
-    F,
-    L,
-    S<:_DiagonalGaussianScale,
-    N,
-    P<:AbstractVector{_GaussianProposal{F,L,S,N}},
-    M,
-}
-    D = _GaussianProposal{
+function _dm_pmc_destination_proposal_type(
+    ::Type{T},
+    ::Type{<:_GaussianProposal{F,L,<:_SphericalGaussianScale,N}},
+) where {T<:_NativeGaussianFloat,F,L<:_NativeGaussianFloat,N}
+    return _GaussianProposal{
+        GaussianFamily,
+        T,
+        _SphericalGaussianScale{T},
+        T,
+    }
+end
+
+function _dm_pmc_destination_proposal_type(
+    ::Type{T},
+    ::Type{<:_GaussianProposal{F,L,<:_SphericalGaussianScale,N}},
+) where {T<:_NativeGaussianFloat,F,L<:AbstractVector,N}
+    return _GaussianProposal{
+        GaussianFamily,
+        Vector{T},
+        _SphericalGaussianScale{T},
+        T,
+    }
+end
+
+function _dm_pmc_destination_proposal_type(
+    ::Type{T},
+    ::Type{<:_GaussianProposal{F,L,<:_DiagonalGaussianScale,N}},
+) where {T<:_NativeGaussianFloat,F,L,N}
+    return _GaussianProposal{
         GaussianFamily,
         Vector{T},
         _DiagonalGaussianScale{Vector{T}},
         T,
     }
-    return _copy_dm_pmc_homogeneous_bank(device, bank, D)
 end
+
+function _dm_pmc_destination_proposal_type(
+    ::Type{T},
+    ::Type{<:_GaussianProposal{F,L,<:_FactorGaussianScale,N}},
+) where {T<:_NativeGaussianFloat,F,L,N}
+    return _GaussianProposal{
+        GaussianFamily,
+        Vector{T},
+        _FactorGaussianScale{Matrix{T}},
+        T,
+    }
+end
+
+@generated function _dm_pmc_destination_proposal_type(
+    ::Type{T},
+    ::Type{G},
+) where {T,G}
+    proposal_types = Base.uniontypes(G)
+    length(proposal_types) == 2 || return :(nothing)
+    A, B = proposal_types
+    return quote
+        destination_a = _dm_pmc_destination_proposal_type(T, $A)
+        destination_b = _dm_pmc_destination_proposal_type(T, $B)
+        destination_a === destination_b ? destination_a : nothing
+    end
+end
+
+@generated function _dm_pmc_prepared_proposal_type(
+    ::Type{T},
+    ::Type{G},
+) where {T,G}
+    if length(Base.uniontypes(G)) > 1
+        return :(_dm_pmc_destination_proposal_type(T, G))
+    end
+    return quote
+        destination_type = _dm_pmc_destination_proposal_type(T, G)
+        destination_type === G ? destination_type : nothing
+    end
+end
+
+_dm_pmc_gaussian_layout(
+    ::Type{<:_GaussianProposal{F,L}},
+) where {F,L<:_NativeGaussianFloat} = _ScalarGaussianLayout()
+
+_dm_pmc_gaussian_layout(
+    ::Type{<:_GaussianProposal{F,L}},
+) where {F,L<:AbstractVector} = _VectorGaussianLayout()
 
 function _copy_dm_pmc_bank(
     device::MLDataDevices.CPUDevice{T},
     bank::ProposalBank{P,M},
 ) where {
     T<:_NativeGaussianFloat,
-    F,
-    L,
-    S<:_FactorGaussianScale,
-    N,
-    P<:AbstractVector{_GaussianProposal{F,L,S,N}},
+    G<:_GaussianProposal,
+    P<:AbstractVector{G},
     M,
 }
-    D = _GaussianProposal{
-        GaussianFamily,
-        Vector{T},
-        _FactorGaussianScale{Matrix{T}},
-        T,
-    }
+    D = _dm_pmc_destination_proposal_type(T, G)
     return _copy_dm_pmc_homogeneous_bank(device, bank, D)
 end
 
