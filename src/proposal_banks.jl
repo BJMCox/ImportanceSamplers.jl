@@ -182,6 +182,19 @@ function _is_packable_native_gaussian(proposal)
     }
 end
 
+_native_gaussian_pack_kind(::Type) = Val(:dynamic)
+_native_gaussian_pack_kind(
+    ::Type{<:_GaussianProposal{F,L,S,T}},
+) where {F,L,S<:_FactorGaussianScale,T} = Val(:factor)
+_native_gaussian_pack_kind(
+    ::Type{<:_GaussianProposal{F,L,S,T}},
+) where {
+    F,
+    L,
+    S<:Union{_SphericalGaussianScale,_DiagonalGaussianScale},
+    T,
+} = Val(:diagonal)
+
 function _copy_packed_gaussian_factor!(destination, proposal, slot)
     scale = proposal.scale
     dimension = size(destination, 1)
@@ -213,12 +226,109 @@ function _copy_packed_gaussian_factor!(destination, proposal, slot)
     return destination
 end
 
+function _pack_native_gaussian_storage(
+    locations,
+    lognormalizers,
+    logmasses,
+    cdf,
+    proposal_ids,
+    proposals,
+    layout,
+    ::Val{:factor},
+)
+    T = eltype(locations)
+    dimension = size(locations, 1)
+    factors = zeros(T, dimension, dimension, length(proposals))
+    for (slot, proposal) in pairs(proposals)
+        _copy_packed_gaussian_factor!(factors, proposal, slot)
+    end
+    return _PackedFactorGaussianBank(
+        locations,
+        factors,
+        lognormalizers,
+        logmasses,
+        cdf,
+        proposal_ids,
+    )
+end
+
+function _pack_native_gaussian_storage(
+    locations,
+    lognormalizers,
+    logmasses,
+    cdf,
+    proposal_ids,
+    proposals,
+    layout,
+    ::Val{:diagonal},
+)
+    T = eltype(locations)
+    dimension = size(locations, 1)
+    scales = Matrix{T}(undef, dimension, length(proposals))
+    for (slot, proposal) in pairs(proposals)
+        if proposal.scale isa _SphericalGaussianScale
+            fill!(view(scales, :, slot), proposal.scale.scale)
+        else
+            copyto!(view(scales, :, slot), proposal.scale.scales)
+        end
+    end
+    return _PackedDiagonalGaussianBank(
+        locations,
+        scales,
+        lognormalizers,
+        logmasses,
+        cdf,
+        proposal_ids,
+        layout,
+    )
+end
+
+function _pack_native_gaussian_storage(
+    locations,
+    lognormalizers,
+    logmasses,
+    cdf,
+    proposal_ids,
+    proposals,
+    layout,
+    ::Val{:dynamic},
+)
+    kind = any(proposal -> proposal.scale isa _FactorGaussianScale, proposals) ?
+           Val(:factor) : Val(:diagonal)
+    return _pack_native_gaussian_storage(
+        locations,
+        lognormalizers,
+        logmasses,
+        cdf,
+        proposal_ids,
+        proposals,
+        layout,
+        kind,
+    )
+end
+
 function _pack_native_gaussian_bank(bank::ProposalBank)
     proposal_ids, logmasses, cdf = _prepare_active_proposal_metadata(bank)
     return _pack_native_gaussian_bank(bank, proposal_ids, logmasses, cdf)
 end
 
 function _pack_native_gaussian_bank(bank, proposal_ids, logmasses, cdf)
+    return _pack_native_gaussian_bank(
+        bank,
+        proposal_ids,
+        logmasses,
+        cdf,
+        _native_gaussian_pack_kind(eltype(bank.proposals)),
+    )
+end
+
+function _pack_native_gaussian_bank(
+    bank,
+    proposal_ids,
+    logmasses,
+    cdf,
+    pack_kind,
+)
     proposals = view(bank.proposals, proposal_ids)
     all(_is_packable_native_gaussian, proposals) || return nothing
     eltype(logmasses) <: _NativeGaussianFloat || return nothing
@@ -260,38 +370,15 @@ function _pack_native_gaussian_bank(bank, proposal_ids, logmasses, cdf)
         lognormalizers[slot] = proposal.lognormalizer
     end
 
-    if any(proposal -> proposal.scale isa _FactorGaussianScale, proposals)
-        factors = zeros(T, dimension, dimension, length(proposals))
-        for (slot, proposal) in pairs(proposals)
-            _copy_packed_gaussian_factor!(factors, proposal, slot)
-        end
-        return _PackedFactorGaussianBank(
-            locations,
-            factors,
-            lognormalizers,
-            logmasses,
-            cdf,
-            proposal_ids,
-        )
-    end
-
-    scales = Matrix{T}(undef, dimension, length(proposals))
-    for (slot, proposal) in pairs(proposals)
-        if proposal.scale isa _SphericalGaussianScale
-            fill!(view(scales, :, slot), proposal.scale.scale)
-        else
-            copyto!(view(scales, :, slot), proposal.scale.scales)
-        end
-    end
-
-    return _PackedDiagonalGaussianBank(
+    return _pack_native_gaussian_storage(
         locations,
-        scales,
         lognormalizers,
         logmasses,
         cdf,
         proposal_ids,
+        proposals,
         layout,
+        pack_kind,
     )
 end
 
@@ -317,9 +404,67 @@ function _prepare_active_proposal_bank(
     cdf,
     ::Val{true},
 )
-    packed = _pack_native_gaussian_bank(bank, proposal_ids, logmasses, cdf)
-    packed isa _PackedDiagonalGaussianBank && return packed
+    return _prepare_active_proposal_bank(
+        bank,
+        proposal_ids,
+        logmasses,
+        cdf,
+        _native_gaussian_pack_kind(eltype(bank.proposals)),
+    )
+end
+
+function _prepare_active_proposal_bank(
+    bank,
+    proposal_ids,
+    logmasses,
+    cdf,
+    ::Val{:factor},
+)
     return _prepare_generic_active_proposal_bank(bank, proposal_ids, logmasses, cdf)
+end
+
+function _prepare_active_proposal_bank(
+    bank,
+    proposal_ids,
+    logmasses,
+    cdf,
+    ::Val{:diagonal},
+)
+    packed = _pack_native_gaussian_bank(
+        bank,
+        proposal_ids,
+        logmasses,
+        cdf,
+        Val(:diagonal),
+    )
+    isnothing(packed) || return packed
+    return _prepare_generic_active_proposal_bank(bank, proposal_ids, logmasses, cdf)
+end
+
+function _prepare_active_proposal_bank(
+    bank,
+    proposal_ids,
+    logmasses,
+    cdf,
+    ::Val{:dynamic},
+)
+    proposals = view(bank.proposals, proposal_ids)
+    any(
+        proposal -> proposal isa _GaussianProposal &&
+                    proposal.scale isa _FactorGaussianScale,
+        proposals,
+    ) && throw(
+        ArgumentError(
+            "generic CPU proposal banks require one concrete proposal element type",
+        ),
+    )
+    return _prepare_active_proposal_bank(
+        bank,
+        proposal_ids,
+        logmasses,
+        cdf,
+        Val(:diagonal),
+    )
 end
 
 function _prepare_active_proposal_bank(

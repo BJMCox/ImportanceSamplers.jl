@@ -84,6 +84,10 @@ function packed_factor_density_allocated(
     )
 end
 
+function factor_bank_preparation_allocated(bank)
+    return @allocated ISK._prepare_active_proposal_bank(bank)
+end
+
 function Random.rand(
     rng::Random.AbstractRNG,
     proposal::StaticMISKernelExternalGaussian{T},
@@ -182,6 +186,15 @@ end
     @test packed.factors[:, :, 3] == [1.0 0.0; 0.25 2.0]
     @test exp.(packed.logmasses) ≈ [1 / 6, 2 / 6, 3 / 6]
     @test packed.cdf == [1 / 6, 3 / 6, 1.0]
+
+    homogeneous_bank = ProposalBank(
+        [
+            FactorGaussian(zeros(2), [1.0 0.0; 0.25 1.0]),
+            FactorGaussian(ones(2), [1.0 0.0; 0.25 1.0]),
+        ],
+    )
+    homogeneous = @inferred ISK._pack_native_gaussian_bank(homogeneous_bank)
+    @test homogeneous isa ISK._PackedFactorGaussianBank
 
     factor32 = FactorGaussian(
         Float32[1, -1],
@@ -336,16 +349,17 @@ end
     @test sampler.method_state.bank isa ISK._ActiveProposalBank
     @test sampler.random_buffers isa ISK._StaticMISRandomBuffers
 
-    factor_sampler = prepare_sampler(
+    factor_bank = ProposalBank(
+        [
+            FactorGaussian([0.0, 0.0], [1.0 0.0; 0.25 1.0]),
+            FactorGaussian([1.0, 1.0], [1.0 0.0; 0.25 1.0]),
+        ],
+    )
+    factor_sampler = @inferred prepare_sampler(
         Random.Xoshiro(0x5405),
         StaticMISKernelVectorTarget{Float64}(),
         ImportanceSampling(
-            ProposalBank(
-                [
-                    FactorGaussian([0.0, 0.0], [1.0 0.0; 0.25 1.0]),
-                    FactorGaussian([1.0, 1.0], [1.0 0.0; 0.25 1.0]),
-                ],
-            );
+            factor_bank;
             nsamples=4,
         );
         threaded=false,
@@ -393,6 +407,20 @@ end
         @test generic_sampler.method_state.bank isa ISK._ActiveProposalBank
         @test length(importance_sample!(generic_sampler)) == 4
     end
+
+    dimension = 32
+    proposal_count = 16
+    large_factor = Matrix{Float64}(LinearAlgebra.I, dimension, dimension)
+    large_factor_bank = ProposalBank(
+        [
+            FactorGaussian(fill(Float64(index), dimension), large_factor) for
+            index in 1:proposal_count
+        ],
+    )
+    ISK._prepare_active_proposal_bank(large_factor_bank)
+    preparation_allocation =
+        factor_bank_preparation_allocated(large_factor_bank)
+    @test preparation_allocation <= 16_000
 end
 
 function static_mis_kernel_assignment(uniform, sample_index, nsamples, scheme, cdf)
