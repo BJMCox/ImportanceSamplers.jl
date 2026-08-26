@@ -106,7 +106,7 @@ function _prepare_dm_pmc_bank(bank::ProposalBank)
     return packed
 end
 
-function _dm_pmc_round_counts(active_masses, round_size, round)
+function _dm_pmc_exact_mass_proportions(active_masses)
     active_count = length(active_masses)
     exact_masses = Vector{Rational{BigInt}}(undef, active_count)
     for slot in eachindex(active_masses)
@@ -117,10 +117,22 @@ function _dm_pmc_round_counts(active_masses, round_size, round)
         )
     end
     total_mass = sum(exact_masses)
-    counts = Vector{Int}(undef, active_count)
-    remainders = similar(exact_masses)
     for slot in eachindex(exact_masses)
-        quota = exact_masses[slot] * round_size / total_mass
+        exact_masses[slot] /= total_mass
+    end
+    return exact_masses
+end
+
+function _dm_pmc_round_counts(
+    exact_mass_proportions::Vector{Rational{BigInt}},
+    round_size,
+    round,
+)
+    active_count = length(exact_mass_proportions)
+    counts = Vector{Int}(undef, active_count)
+    remainders = similar(exact_mass_proportions)
+    for slot in eachindex(exact_mass_proportions)
+        quota = exact_mass_proportions[slot] * round_size
         counts[slot] = floor(Int, quota)
         remainders[slot] = quota - counts[slot]
     end
@@ -143,6 +155,11 @@ function _dm_pmc_round_counts(active_masses, round_size, round)
     return counts
 end
 
+function _dm_pmc_round_counts(active_masses, round_size, round)
+    exact_mass_proportions = _dm_pmc_exact_mass_proportions(active_masses)
+    return _dm_pmc_round_counts(exact_mass_proportions, round_size, round)
+end
+
 function _dm_pmc_allocation_plan(bank, active_masses, schedule)
     active_count = length(bank.proposal_ids)
     rounds = length(schedule)
@@ -151,10 +168,15 @@ function _dm_pmc_allocation_plan(bank, active_masses, schedule)
     logcoefficients = Matrix{eltype(active_masses)}(undef, active_count, rounds)
     offsets = Vector{Int}(undef, rounds + 1)
     offsets[1] = 1
+    exact_mass_proportions = _dm_pmc_exact_mass_proportions(active_masses)
 
     for round in eachindex(schedule)
         round_size = schedule[round]
-        counts[:, round] .= _dm_pmc_round_counts(active_masses, round_size, round)
+        counts[:, round] .= _dm_pmc_round_counts(
+            exact_mass_proportions,
+            round_size,
+            round,
+        )
 
         all(>(0), view(counts, :, round)) || throw(
             ArgumentError(
@@ -213,7 +235,43 @@ function _copy_dm_pmc_active_proposal(device, proposal::_GaussianProposal)
     )
 end
 
-function _copy_dm_pmc_bank(device, bank::ProposalBank)
+_copy_dm_pmc_location(::Type{T}, location::_NativeGaussianFloat) where {T} =
+    convert(T, location)
+
+_copy_dm_pmc_location(::Type{T}, location::AbstractVector) where {T} =
+    T.(location)
+
+function _copy_dm_pmc_active_proposal(
+    ::MLDataDevices.CPUDevice{T},
+    proposal::_GaussianProposal{F,L,<:_SphericalGaussianScale},
+) where {T<:_NativeGaussianFloat,F,L}
+    return SphericalGaussian(
+        _copy_dm_pmc_location(T, proposal.location),
+        convert(T, proposal.scale.scale),
+    )
+end
+
+function _copy_dm_pmc_active_proposal(
+    ::MLDataDevices.CPUDevice{T},
+    proposal::_GaussianProposal{F,L,<:_DiagonalGaussianScale},
+) where {T<:_NativeGaussianFloat,F,L}
+    return DiagonalGaussian(
+        _copy_dm_pmc_location(T, proposal.location),
+        T.(proposal.scale.scales),
+    )
+end
+
+function _copy_dm_pmc_active_proposal(
+    ::MLDataDevices.CPUDevice{T},
+    proposal::_GaussianProposal{F,L,<:_FactorGaussianScale},
+) where {T<:_NativeGaussianFloat,F,L}
+    return FactorGaussian(
+        _copy_dm_pmc_location(T, proposal.location),
+        T.(proposal.scale.factor),
+    )
+end
+
+function _copy_dm_pmc_bank(device, bank::ProposalBank{P,M}) where {P,M}
     proposals = map(eachindex(bank.proposals, bank.masses)) do proposal_id
         proposal = bank.proposals[proposal_id]
         iszero(bank.masses[proposal_id]) && return deepcopy(proposal)
@@ -221,6 +279,65 @@ function _copy_dm_pmc_bank(device, bank::ProposalBank)
     end
     masses = _copy_to_device(device, bank.masses)
     return ProposalBank(proposals, masses)
+end
+
+function _copy_dm_pmc_homogeneous_bank(
+    device,
+    bank::ProposalBank{P},
+    ::Type{D},
+) where {P,D}
+    S = eltype(P)
+    proposals = Vector{Union{S,D}}(undef, length(bank.proposals))
+    for proposal_id in eachindex(bank.proposals, bank.masses)
+        proposal = bank.proposals[proposal_id]
+        proposals[proposal_id] = iszero(bank.masses[proposal_id]) ?
+                                 deepcopy(proposal) :
+                                 _copy_dm_pmc_active_proposal(device, proposal)
+    end
+    masses = _copy_to_device(device, bank.masses)
+    return ProposalBank(proposals, masses)
+end
+
+function _copy_dm_pmc_bank(
+    device::MLDataDevices.CPUDevice{T},
+    bank::ProposalBank{P,M},
+) where {
+    T<:_NativeGaussianFloat,
+    F,
+    L,
+    S<:_DiagonalGaussianScale,
+    N,
+    P<:AbstractVector{_GaussianProposal{F,L,S,N}},
+    M,
+}
+    D = _GaussianProposal{
+        GaussianFamily,
+        Vector{T},
+        _DiagonalGaussianScale{Vector{T}},
+        T,
+    }
+    return _copy_dm_pmc_homogeneous_bank(device, bank, D)
+end
+
+function _copy_dm_pmc_bank(
+    device::MLDataDevices.CPUDevice{T},
+    bank::ProposalBank{P,M},
+) where {
+    T<:_NativeGaussianFloat,
+    F,
+    L,
+    S<:_FactorGaussianScale,
+    N,
+    P<:AbstractVector{_GaussianProposal{F,L,S,N}},
+    M,
+}
+    D = _GaussianProposal{
+        GaussianFamily,
+        Vector{T},
+        _FactorGaussianScale{Matrix{T}},
+        T,
+    }
+    return _copy_dm_pmc_homogeneous_bank(device, bank, D)
 end
 
 function _copy_algorithm(device, algorithm::DeterministicMixturePMC)

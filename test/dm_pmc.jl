@@ -150,6 +150,20 @@ end
     @test @allocated(DMPMCIS._dm_pmc_round_counts(masses, round_size, 1)) < 1_000_000
 end
 
+@testset "DM-PMC allocation converts exact masses once per plan" begin
+    bank = ProposalBank(
+        [SphericalGaussian(-1.0, 1.0), SphericalGaussian(1.0, 1.0)],
+        Float32[1, 3],
+    )
+    packed = DMPMCIS._prepare_dm_pmc_bank(bank)
+    masses = DMPMCCountingMasses(bank.masses[packed.proposal_ids])
+    schedule = [13, 14, 13, 14]
+    plan = DMPMCIS._dm_pmc_allocation_plan(packed, masses, schedule)
+
+    @test masses.reads[] == length(masses)
+    @test vec(sum(plan.counts; dims=1)) == schedule
+end
+
 @testset "DM-PMC allocation rejects uncovered active proposals before RNG use" begin
     bank = ProposalBank(
         [SphericalGaussian(Float64(id), 1.0) for id in 1:3],
@@ -240,6 +254,138 @@ end
     @test inert_generic.draw_count[] == 0
 end
 
+@testset "DM-PMC Float32 CPU transfer converts spherical proposals" begin
+    scalar_bank = ProposalBank(
+        [SphericalGaussian(-1.0, 2.0), SphericalGaussian(1.0, 0.5)],
+        [1.0, 1.0],
+    )
+    vector_bank = ProposalBank(
+        [
+            SphericalGaussian([-1.0, 0.0], 2.0),
+            SphericalGaussian([1.0, 0.0], 0.5),
+        ],
+        [1.0, 1.0],
+    )
+    scalar_source = prepare_sampler(
+        Random.Xoshiro(0x5607),
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(scalar_bank; rounds=1, round_size=2);
+        threaded=false,
+    )
+    vector_source = prepare_sampler(
+        Random.Xoshiro(0x5608),
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(vector_bank; rounds=1, round_size=2);
+        threaded=false,
+    )
+    cpu32 = MLDataDevices.cpu_device(Float32)
+    scalar = cpu32(scalar_source)
+    vector = cpu32(vector_source)
+
+    @test all(
+        proposal -> proposal.location isa Float32,
+        scalar.algorithm.bank.proposals,
+    )
+    @test all(
+        proposal -> proposal.scale.scale isa Float32,
+        scalar.algorithm.bank.proposals,
+    )
+    @test eltype(scalar.method_state.bank.locations) === Float32
+    @test eltype(scalar.method_state.bank.scales) === Float32
+    @test all(
+        proposal -> eltype(proposal.location) === Float32,
+        vector.algorithm.bank.proposals,
+    )
+    @test all(
+        proposal -> proposal.scale.scale isa Float32,
+        vector.algorithm.bank.proposals,
+    )
+    @test eltype(vector.method_state.bank.locations) === Float32
+    @test eltype(vector.method_state.bank.scales) === Float32
+    @test scalar_source.algorithm.bank.proposals[1].location isa Float64
+    @test vector_source.algorithm.bank.proposals[1].scale.scale isa Float64
+end
+
+@testset "DM-PMC Float32 CPU transfer recomputes Gaussian caches" begin
+    source_scale = 4.414264425841938e-5
+    diagonal_bank = ProposalBank(
+        [DiagonalGaussian([0.0], [source_scale])],
+        [1.0],
+    )
+    factor_bank = ProposalBank(
+        [FactorGaussian([0.0], reshape([source_scale], 1, 1))],
+        [1.0],
+    )
+    cpu32 = MLDataDevices.cpu_device(Float32)
+    diagonal = cpu32(
+        prepare_sampler(
+            Random.Xoshiro(0x5609),
+            DMPMCTarget{Float64}(),
+            DeterministicMixturePMC(diagonal_bank; rounds=1, round_size=1);
+            threaded=false,
+        ),
+    )
+    factor = cpu32(
+        prepare_sampler(
+            Random.Xoshiro(0x560a),
+            DMPMCTarget{Float64}(),
+            DeterministicMixturePMC(factor_bank; rounds=1, round_size=1);
+            threaded=false,
+        ),
+    )
+
+    @test diagonal.algorithm.bank.proposals[1].lognormalizer === 9.109145f0
+    @test factor.algorithm.bank.proposals[1].lognormalizer === 9.109145f0
+    @test diagonal.method_state.bank.lognormalizers == Float32[9.109145]
+    @test factor.method_state.bank.lognormalizers == Float32[9.109145]
+end
+
+@testset "DM-PMC Float32 CPU transfer rejects invalid narrowing" begin
+    invalid_proposals = (
+        DiagonalGaussian([0.0], [1e-50]),
+        FactorGaussian([0.0], reshape([1e-50], 1, 1)),
+        DiagonalGaussian([1e100], [1.0]),
+    )
+    cpu32 = MLDataDevices.cpu_device(Float32)
+
+    for (index, proposal) in pairs(invalid_proposals)
+        source = prepare_sampler(
+            Random.Xoshiro(0x560a + index),
+            DMPMCTarget{Float64}(),
+            DeterministicMixturePMC(
+                ProposalBank([proposal]);
+                rounds=1,
+                round_size=1,
+            );
+            threaded=false,
+        )
+        @test_throws ArgumentError cpu32(source)
+    end
+
+    inert = DiagonalGaussian([1e100], [1.0])
+    inert_source = prepare_sampler(
+        Random.Xoshiro(0x560e),
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(
+            ProposalBank(
+                [DiagonalGaussian([0.0], [1.0]), inert],
+                [1.0, 0.0],
+            );
+            rounds=1,
+            round_size=1,
+        );
+        threaded=false,
+    )
+    copied_inert = cpu32(inert_source).algorithm.bank.proposals[2]
+    @test copied_inert !== inert
+    @test copied_inert.location == inert.location
+    @test copied_inert.location !== inert.location
+    @test copied_inert.scale.scales == inert.scale.scales
+    @test copied_inert.scale.scales !== inert.scale.scales
+    @test copied_inert.lognormalizer === inert.lognormalizer
+    @test eltype(copied_inert.location) === Float64
+end
+
 @testset "DM-PMC Float32 CPU transfer converts complete Gaussian state" begin
     diagonal_bank = ProposalBank(
         [
@@ -255,22 +401,42 @@ end
         ],
         [1.0, 3.0],
     )
+    diagonal_algorithm = DeterministicMixturePMC(
+        diagonal_bank;
+        rounds=2,
+        round_size=[4, 5],
+    )
+    factor_algorithm = DeterministicMixturePMC(
+        factor_bank;
+        rounds=2,
+        round_size=4,
+    )
+    cpu32 = MLDataDevices.cpu_device(Float32)
+    copied_diagonal_algorithm = @inferred DMPMCIS._copy_algorithm(
+        cpu32,
+        diagonal_algorithm,
+    )
+    copied_factor_algorithm = @inferred DMPMCIS._copy_algorithm(
+        cpu32,
+        factor_algorithm,
+    )
     diagonal_source = prepare_sampler(
         Random.Xoshiro(0x5607),
         DMPMCTarget{Float64}(),
-        DeterministicMixturePMC(diagonal_bank; rounds=2, round_size=[4, 5]);
+        diagonal_algorithm;
         threaded=false,
     )
     factor_source = prepare_sampler(
         Random.Xoshiro(0x5608),
         DMPMCTarget{Float64}(),
-        DeterministicMixturePMC(factor_bank; rounds=2, round_size=4);
+        factor_algorithm;
         threaded=false,
     )
-    cpu32 = MLDataDevices.cpu_device(Float32)
     diagonal = cpu32(diagonal_source)
     factor = cpu32(factor_source)
 
+    @test eltype(copied_diagonal_algorithm.bank.masses) === Float32
+    @test eltype(copied_factor_algorithm.bank.masses) === Float32
     @test eltype(diagonal.algorithm.bank.masses) === Float32
     @test all(
         proposal -> eltype(proposal.location) === Float32,
