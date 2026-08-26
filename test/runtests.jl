@@ -8,6 +8,7 @@ test_files = if isempty(ARGS)
         "algorithm",
         "static_mis",
         "static_mis_kernel",
+        "dm_pmc",
         "device_api",
         "plain_is",
         "threading",

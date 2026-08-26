@@ -75,6 +75,9 @@ function ImportanceSampling(
     )
 end
 
+_algorithm_proposal(algorithm::ImportanceSampling) = algorithm.proposal
+_algorithm_sample_budget(algorithm::ImportanceSampling) = algorithm.nsamples
+
 """
     SamplerBusyError
 
@@ -239,7 +242,7 @@ thread; accelerator launch policy does not depend on host thread count.
 function prepare_sampler(
     rng::Random.AbstractRNG,
     logtarget,
-    algorithm::ImportanceSampling;
+    algorithm::AbstractImportanceSampler;
     threaded=true,
 )
     target = _ContextFreePreparedTarget(logtarget)
@@ -250,7 +253,7 @@ function prepare_sampler(
     rng::Random.AbstractRNG,
     logtarget,
     context,
-    algorithm::ImportanceSampling;
+    algorithm::AbstractImportanceSampler;
     threaded=true,
 )
     target = _ContextualPreparedTarget(logtarget, context)
@@ -259,14 +262,16 @@ end
 
 function _prepare_importance_sampler(rng, target, algorithm, threaded)
     threaded isa Bool || throw(ArgumentError("threaded must be Bool"))
-    prepared_target = _resolve_prepared_target(target, algorithm.proposal)
+    proposal = _algorithm_proposal(algorithm)
+    sample_budget = _algorithm_sample_budget(algorithm)
+    prepared_target = _resolve_prepared_target(target, proposal)
     method_state = _prepare_method_state(algorithm)
     device = MLDataDevices.CPUDevice()
     random_buffers = _allocate_random_buffers(
         device,
-        algorithm.proposal,
+        proposal,
         method_state,
-        algorithm.nsamples,
+        sample_budget,
     )
     return _PreparedImportanceSampler(
         rng,
@@ -372,12 +377,13 @@ function _transfer_prepared_sampler(
         SamplerDeviceError(device, :opaque_host_closure),
     )
     algorithm = _copy_algorithm(device, sampler.algorithm)
+    proposal = _algorithm_proposal(algorithm)
     method_state = _prepare_method_state(algorithm)
     random_buffers = _allocate_random_buffers(
         device,
-        algorithm.proposal,
+        proposal,
         method_state,
-        algorithm.nsamples,
+        _algorithm_sample_budget(algorithm),
     )
     return _PreparedImportanceSampler(
         _clone_rng(device, sampler.rng),
@@ -410,7 +416,9 @@ function _transfer_prepared_sampler(
     _backend_functional(device) || throw(
         SamplerDeviceError(device, :backend_unavailable),
     )
-    proposal_limit = _accelerator_proposal_limit(sampler.algorithm.proposal)
+    proposal_limit = _accelerator_proposal_limit(
+        _algorithm_proposal(sampler.algorithm),
+    )
     isnothing(proposal_limit) || throw(SamplerDeviceError(device, proposal_limit))
     method_state_limit = _accelerator_method_state_limit(sampler.method_state)
     isnothing(method_state_limit) || throw(
@@ -430,9 +438,9 @@ function _transfer_prepared_sampler(
         )
         random_buffers = _allocate_random_buffers(
             device,
-            algorithm.proposal,
+            _algorithm_proposal(algorithm),
             method_state,
-            algorithm.nsamples,
+            _algorithm_sample_budget(algorithm),
         )
         random_buffers isa Union{_RandomBuffers,_PackedStaticMISRandomBuffers} || throw(
             SamplerDeviceError(device, :accelerator_rng_unavailable),

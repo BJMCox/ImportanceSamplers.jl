@@ -1,0 +1,274 @@
+using Test
+using ImportanceSamplers
+import MLDataDevices
+import Random
+
+include("support/dm_pmc.jl")
+
+const DMPMCIS = ImportanceSamplers
+
+@testset "DM-PMC constructor and schedule" begin
+    bank = ProposalBank([
+        SphericalGaussian(-1.0, 1.0),
+        SphericalGaussian(1.0, 1.0),
+    ])
+    input_schedule = [50, 100, 200]
+    fixed = @inferred DeterministicMixturePMC(bank; rounds=3, round_size=100)
+    varied = @inferred DeterministicMixturePMC(
+        bank;
+        rounds=3,
+        round_size=input_schedule,
+    )
+
+    @test fixed.bank === bank
+    @test fixed.rounds === 3
+    @test fixed.round_size === 100
+    @test varied.round_size == [50, 100, 200]
+    @test varied.round_size !== input_schedule
+    @test fixed isa AbstractImportanceSampler
+    @test fieldnames(typeof(fixed)) == (:bank, :rounds, :round_size)
+
+    input_schedule[1] = 1
+    @test varied.round_size == [50, 100, 200]
+    resolved = @inferred DMPMCIS._resolve_round_schedule(varied)
+    @test resolved == [50, 100, 200]
+    @test resolved !== varied.round_size
+    resolved[1] = 2
+    @test varied.round_size == [50, 100, 200]
+    @test @inferred(DMPMCIS._resolve_round_schedule(fixed)) == [100, 100, 100]
+
+    @test_throws ArgumentError DeterministicMixturePMC(bank; rounds=0, round_size=100)
+    @test_throws ArgumentError DeterministicMixturePMC(bank; rounds=-1, round_size=100)
+    @test_throws ArgumentError DeterministicMixturePMC(bank; rounds=true, round_size=100)
+    @test_throws ArgumentError DeterministicMixturePMC(bank; rounds=3.0, round_size=100)
+    @test_throws ArgumentError DeterministicMixturePMC(bank; rounds=3, round_size=0)
+    @test_throws ArgumentError DeterministicMixturePMC(bank; rounds=3, round_size=-1)
+    @test_throws ArgumentError DeterministicMixturePMC(
+        bank;
+        rounds=3,
+        round_size=[1, 0, 2],
+    )
+    @test_throws DimensionMismatch DeterministicMixturePMC(
+        bank;
+        rounds=3,
+        round_size=[1, 2],
+    )
+    @test_throws ArgumentError DeterministicMixturePMC(
+        bank;
+        rounds=3,
+        round_size=[1.0, 2.0, 3.0],
+    )
+    @test_throws ArgumentError DeterministicMixturePMC(
+        bank;
+        rounds=3,
+        round_size=() -> 8,
+    )
+end
+
+@testset "DM-PMC allocation oracle" begin
+    configured_bank = ProposalBank(
+        [SphericalGaussian(Float64(id), 1.0) for id in 1:4],
+        [1, 3, 2, 0],
+    )
+    algorithm = DeterministicMixturePMC(
+        configured_bank;
+        rounds=3,
+        round_size=[13, 14, 13],
+    )
+    sampler = @inferred prepare_sampler(
+        Random.Xoshiro(0x5600),
+        DMPMCTarget{Float64}(),
+        algorithm;
+        threaded=false,
+    )
+    state = sampler.method_state
+    plan = state.plan
+    counts_by_id = dm_pmc_counts_by_proposal_id(state.bank, plan, 4)
+    expected_counts = [
+        2 2 2
+        7 7 7
+        4 5 4
+        0 0 0
+    ]
+
+    @test state isa DMPMCIS._PreparedDMPMC
+    @test plan isa DMPMCIS._DMPMCAllocationPlan
+    @test plan.schedule == [13, 14, 13]
+    @test plan.schedule !== algorithm.round_size
+    @test state.bank.proposal_ids == [1, 3, 2]
+    @test counts_by_id == expected_counts
+    @test vec(sum(plan.counts; dims=1)) == plan.schedule
+    @test all(>(0), plan.counts)
+    @test plan.offsets == [1, 14, 28, 41]
+    @test size(plan.assignments) == (14, 3)
+    @test exp.(plan.logcoefficients) ≈
+          plan.counts ./ reshape(plan.schedule, 1, :)
+
+    for round in eachindex(plan.schedule)
+        used_assignments = view(plan.assignments, 1:plan.schedule[round], round)
+        @test all(slot -> 1 <= slot <= length(state.bank.proposal_ids), used_assignments)
+        for slot in eachindex(state.bank.proposal_ids)
+            @test count(==(slot), used_assignments) == plan.counts[slot, round]
+        end
+    end
+
+    @test DMPMCIS._algorithm_proposal(algorithm) === configured_bank
+    @test DMPMCIS._algorithm_sample_budget(algorithm) == 40
+end
+
+@testset "DM-PMC rotating largest-remainder ties" begin
+    bank = ProposalBank(
+        [SphericalGaussian(Float64(id), 1.0) for id in 1:3],
+        [1, 1, 1],
+    )
+    sampler = @inferred prepare_sampler(
+        Random.Xoshiro(0x5601),
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(bank; rounds=3, round_size=[4, 4, 4]);
+        threaded=false,
+    )
+    plan = sampler.method_state.plan
+
+    @test sampler.method_state.bank.proposal_ids == [1, 2, 3]
+    @test plan.counts == [
+        2 1 1
+        1 2 1
+        1 1 2
+    ]
+end
+
+@testset "DM-PMC allocation rejects uncovered active proposals before RNG use" begin
+    bank = ProposalBank(
+        [SphericalGaussian(Float64(id), 1.0) for id in 1:3],
+        [100, 1, 1],
+    )
+    rng = Random.Xoshiro(0x5602)
+    expected_rng = copy(rng)
+
+    @test_throws ArgumentError prepare_sampler(
+        rng,
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(bank; rounds=1, round_size=3);
+        threaded=false,
+    )
+    @test rand(rng, UInt64) == rand(expected_rng, UInt64)
+end
+
+@testset "DM-PMC native preparation and scalar inference" begin
+    spherical32 = ProposalBank(
+        [
+            SphericalGaussian(Float32[-1, 0], 1.0f0),
+            SphericalGaussian(Float32[1, 0], 1.0f0),
+        ],
+        Float32[1, 3],
+    )
+    diagonal64 = ProposalBank([
+        DiagonalGaussian([-1.0, 0.0], [1.0, 2.0]),
+        DiagonalGaussian([1.0, 0.0], [2.0, 1.0]),
+    ])
+    factor64 = ProposalBank([
+        FactorGaussian([-1.0, 0.0], [1.0 0.0; 0.25 2.0]),
+        FactorGaussian([1.0, 0.0], [2.0 0.0; -0.25 1.0]),
+    ])
+
+    sampler32 = @inferred prepare_sampler(
+        Random.Xoshiro(0x5603),
+        DMPMCTarget{Float32}(),
+        DeterministicMixturePMC(spherical32; rounds=2, round_size=8);
+        threaded=false,
+    )
+    diagonal_sampler = @inferred prepare_sampler(
+        Random.Xoshiro(0x5604),
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(diagonal64; rounds=2, round_size=[4, 5]);
+        threaded=false,
+    )
+    factor_sampler = @inferred prepare_sampler(
+        Random.Xoshiro(0x5605),
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(factor64; rounds=2, round_size=4);
+        threaded=false,
+    )
+
+    @test sampler32.method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
+    @test eltype(sampler32.method_state.bank.locations) === Float32
+    @test eltype(sampler32.method_state.plan.logcoefficients) === Float32
+    @test diagonal_sampler.method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
+    @test eltype(diagonal_sampler.method_state.plan.logcoefficients) === Float64
+    @test factor_sampler.method_state.bank isa DMPMCIS._PackedFactorGaussianBank
+    @test eltype(factor_sampler.method_state.plan.logcoefficients) === Float64
+    @test sampler32.random_buffers isa DMPMCIS._NoRandomBuffers
+    @test factor_sampler.random_buffers isa DMPMCIS._NoRandomBuffers
+
+    copied_factor_sampler = @inferred MLDataDevices.cpu_device()(factor_sampler)
+    @test copied_factor_sampler !== factor_sampler
+    @test copied_factor_sampler.algorithm !== factor_sampler.algorithm
+    @test copied_factor_sampler.algorithm.round_size == 4
+    @test copied_factor_sampler.method_state.plan.counts ==
+          factor_sampler.method_state.plan.counts
+
+    inert_generic = DMPMCGenericProposal()
+    configured_bank = ProposalBank(
+        Any[SphericalGaussian(0.0, 1.0), inert_generic],
+        [1, 0],
+    )
+    original_proposals = copy(configured_bank.proposals)
+    original_masses = copy(configured_bank.masses)
+    inert_sampler = prepare_sampler(
+        Random.Xoshiro(0x5606),
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(configured_bank; rounds=1, round_size=4);
+        threaded=false,
+    )
+    @test inert_sampler.method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
+    @test inert_sampler.method_state.bank.proposal_ids == [1]
+    @test configured_bank.proposals == original_proposals
+    @test configured_bank.masses == original_masses
+    @test inert_generic.draw_count[] == 0
+end
+
+@testset "DM-PMC rejects unsupported banks before RNG use" begin
+    transformed = ProposalBank([
+        TransformedProposal(SphericalGaussian(-1.0, 1.0), IdentityTransform()),
+        TransformedProposal(SphericalGaussian(1.0, 1.0), IdentityTransform()),
+    ])
+    product = ProposalBank([
+        ProductProposal((x=SphericalGaussian(-1.0, 1.0),)),
+        ProductProposal((x=SphericalGaussian(1.0, 1.0),)),
+    ])
+    generic = ProposalBank([DMPMCGenericProposal(), DMPMCGenericProposal()])
+    bigfloat_masses = ProposalBank(
+        [SphericalGaussian(-1.0, 1.0), SphericalGaussian(1.0, 1.0)],
+        BigFloat[1, 1],
+    )
+
+    for (index, bank) in pairs((transformed, product, generic, bigfloat_masses))
+        rng = Random.Xoshiro(0x5610 + index)
+        expected_rng = copy(rng)
+        @test_throws ArgumentError prepare_sampler(
+            rng,
+            _ -> 0.0,
+            DeterministicMixturePMC(bank; rounds=1, round_size=4);
+            threaded=false,
+        )
+        @test rand(rng, UInt64) == rand(expected_rng, UInt64)
+    end
+end
+
+@testset "ImportanceSampling preparation and execution remain unchanged" begin
+    proposal = SphericalGaussian(0.0, 1.0)
+    algorithm = ImportanceSampling(proposal; nsamples=8)
+    sampler = @inferred prepare_sampler(
+        Random.Xoshiro(0x5620),
+        DMPMCTarget{Float64}(),
+        algorithm;
+        threaded=false,
+    )
+    result = @inferred importance_sample!(sampler)
+
+    @test DMPMCIS._algorithm_proposal(algorithm) === proposal
+    @test DMPMCIS._algorithm_sample_budget(algorithm) === 8
+    @test sampler.method_state isa DMPMCIS._SingleProposalMethodState
+    @test length(result) == 8
+    @test result.diagnostics.method === :importance_sampling
+end

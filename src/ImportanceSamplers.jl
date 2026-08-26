@@ -18,6 +18,7 @@ export AbstractImportanceSampler,
     AbstractSampleTransform,
     AllZeroWeightsError,
     DiagonalGaussian,
+    DeterministicMixturePMC,
     FactorGaussian,
     ImportanceSampling,
     IdentityTransform,
@@ -56,6 +57,7 @@ include("targets.jl")
 include("storage.jl")
 include("execution.jl")
 include("methods/static_mis.jl")
+include("methods/dm_pmc.jl")
 include("native_execution.jl")
 include("mis_execution.jl")
 include("static_mis_execution.jl")
