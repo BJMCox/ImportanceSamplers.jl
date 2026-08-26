@@ -328,6 +328,78 @@ end
     @test vector_source.algorithm.bank.proposals[1].scale.scale isa Float64
 end
 
+@testset "DM-PMC Float32 CPU transfer preserves mixed native banks" begin
+    spherical = SphericalGaussian([-1.0, 0.0], 2.0)
+    diagonal = DiagonalGaussian([1.0, 0.0], [2.0, 1.0])
+    factor = FactorGaussian([1.0, 0.0], [2.0 0.0; 0.25 1.0])
+    erased_bank = ProposalBank(
+        DMPMCIS._GaussianProposal[spherical, diagonal],
+        [1.0, 1.0],
+    )
+    spherical_diagonal_bank = ProposalBank(
+        Union{typeof(spherical),typeof(diagonal)}[spherical, diagonal],
+        [1.0, 1.0],
+    )
+    diagonal_factor_bank = ProposalBank(
+        Union{typeof(diagonal),typeof(factor)}[diagonal, factor],
+        [1.0, 1.0],
+    )
+    inert_factor = FactorGaussian([2.0, 0.0], [1.0 0.0; 0.5 1.0])
+    inert_bank = ProposalBank(
+        Union{typeof(diagonal),typeof(inert_factor)}[diagonal, inert_factor],
+        [1.0, 0.0],
+    )
+    source_banks = (
+        erased_bank,
+        spherical_diagonal_bank,
+        diagonal_factor_bank,
+        inert_bank,
+    )
+    sources = map(enumerate(source_banks)) do (index, bank)
+        prepare_sampler(
+            Random.Xoshiro(0x5608 + index),
+            DMPMCTarget{Float64}(),
+            DeterministicMixturePMC(bank; rounds=1, round_size=2);
+            threaded=false,
+        )
+    end
+    cpu32 = MLDataDevices.cpu_device(Float32)
+    erased, spherical_diagonal, diagonal_factor, inert = map(cpu32, sources)
+
+    @test sources[1].method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
+    @test sources[2].method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
+    @test sources[3].method_state.bank isa DMPMCIS._PackedFactorGaussianBank
+    @test sources[4].method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
+    @test sources[4].method_state.bank.proposal_ids == [1]
+
+    for copied in (erased, spherical_diagonal, diagonal_factor, inert)
+        @test eltype(copied.algorithm.bank.masses) === Float32
+        @test eltype(copied.method_state.bank.lognormalizers) === Float32
+        @test eltype(copied.method_state.plan.logcoefficients) === Float32
+    end
+    @test erased.method_state.bank.proposal_ids == [1, 2]
+    @test spherical_diagonal.method_state.bank.proposal_ids == [1, 2]
+    @test diagonal_factor.method_state.bank.proposal_ids == [1, 2]
+    @test all(
+        proposal -> eltype(proposal.location) === Float32,
+        erased.algorithm.bank.proposals,
+    )
+    @test all(
+        proposal -> eltype(proposal.location) === Float32,
+        spherical_diagonal.algorithm.bank.proposals,
+    )
+    @test diagonal_factor.method_state.bank isa DMPMCIS._PackedFactorGaussianBank
+    @test eltype(diagonal_factor.method_state.bank.locations) === Float32
+    @test eltype(diagonal_factor.method_state.bank.factors) === Float32
+    @test inert.method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
+    @test inert.method_state.bank.proposal_ids == [1]
+    @test eltype(inert.algorithm.bank.proposals[1].location) === Float32
+    @test inert.algorithm.bank.proposals[2] !== inert_factor
+    @test inert.algorithm.bank.proposals[2].location !== inert_factor.location
+    @test inert.algorithm.bank.proposals[2].scale.factor !== inert_factor.scale.factor
+    @test eltype(inert.algorithm.bank.proposals[2].location) === Float64
+end
+
 @testset "DM-PMC Float32 CPU transfer recomputes Gaussian caches" begin
     source_scale = 4.414264425841938e-5
     diagonal_bank = ProposalBank(

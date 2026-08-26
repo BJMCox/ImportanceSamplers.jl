@@ -325,7 +325,7 @@ function _copy_dm_pmc_active_proposal(
     )
 end
 
-function _copy_dm_pmc_bank(device, bank::ProposalBank{P,M}) where {P,M}
+function _copy_dm_pmc_generic_bank(device, bank::ProposalBank)
     proposals = map(eachindex(bank.proposals, bank.masses)) do proposal_id
         proposal = bank.proposals[proposal_id]
         iszero(bank.masses[proposal_id]) && return deepcopy(proposal)
@@ -334,6 +334,9 @@ function _copy_dm_pmc_bank(device, bank::ProposalBank{P,M}) where {P,M}
     masses = _copy_to_device(device, bank.masses)
     return ProposalBank(proposals, masses)
 end
+
+_copy_dm_pmc_bank(device, bank::ProposalBank{P,M}) where {P,M} =
+    _copy_dm_pmc_generic_bank(device, bank)
 
 function _copy_dm_pmc_homogeneous_bank(
     device,
@@ -351,6 +354,12 @@ function _copy_dm_pmc_homogeneous_bank(
     masses = _copy_to_device(device, bank.masses)
     return ProposalBank(proposals, masses)
 end
+
+_copy_dm_pmc_resolved_bank(device, bank, ::Nothing) =
+    _copy_dm_pmc_generic_bank(device, bank)
+
+_copy_dm_pmc_resolved_bank(device, bank, ::Type{D}) where {D<:_GaussianProposal} =
+    _copy_dm_pmc_homogeneous_bank(device, bank, D)
 
 function _dm_pmc_destination_proposal_type(
     ::Type{T},
@@ -445,7 +454,7 @@ function _copy_dm_pmc_bank(
     M,
 }
     D = _dm_pmc_destination_proposal_type(T, G)
-    return _copy_dm_pmc_homogeneous_bank(device, bank, D)
+    return _copy_dm_pmc_resolved_bank(device, bank, D)
 end
 
 function _copy_algorithm(device, algorithm::DeterministicMixturePMC)
