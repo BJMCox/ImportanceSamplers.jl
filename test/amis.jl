@@ -113,9 +113,10 @@ function assert_factor_amis_storage(proposal, expected_factor, ::Type{L}) where 
     @test state.schedule == [4, 5, 6]
     @test state.offsets == [1, 5, 10, 16]
     @test state.logcounts ≈ log.(T[4, 5, 6])
-    @test size(history.means) == (d, 4)
-    @test size(history.factors) == (d, d, 4)
-    @test size(history.lognormalizers) == (4,)
+    @test size(history.means) == (d, 3)
+    @test size(history.factors) == (d, d, 3)
+    @test size(history.lognormalizers) == (3,)
+    @test state.committed_in_workspace === false
     @test history.means[:, 1] == proposal.location
     @test history.factors[:, :, 1] == expected_factor
     @test history.lognormalizers[1] == proposal.lognormalizer
@@ -189,8 +190,12 @@ end
         @test history.means isa Vector{T}
         @test history.scales isa Vector{T}
         @test history.lognormalizers isa Vector{T}
+        @test length(history.means) == 3
+        @test length(history.scales) == 3
+        @test length(history.lognormalizers) == 3
         @test (history.means[1], history.scales[1]) == (T(1), T(2))
         @test history.lognormalizers[1] == proposal.lognormalizer
+        @test state.committed_in_workspace === false
         @test size(workspace.samples) == (15,)
         @test size(workspace.centered_scaled) == (15,)
         @test size(workspace.covariance) == (1,)

@@ -850,12 +850,15 @@ function _store_amis_proposal!(
     return nothing
 end
 
-function _reset_amis_history!(
-    history::_AMISScalarHistory,
-    rounds,
-    committed_slot,
-)
-    slots = committed_slot == 1 ? (2:rounds) : (1:rounds)
+function _store_amis_workspace_candidate!(workspace, proposal::_GaussianProposal)
+    workspace.candidate_mean[1] = proposal.location
+    workspace.candidate_scale[1] = proposal.scale.scale
+    workspace.candidate_lognormalizer[1] = proposal.lognormalizer
+    return nothing
+end
+
+function _reset_amis_history!(history::_AMISScalarHistory, rounds)
+    slots = 2:rounds
     isempty(slots) && return nothing
     fill!(view(history.means, slots), zero(eltype(history.means)))
     fill!(view(history.scales, slots), zero(eltype(history.scales)))
@@ -866,12 +869,8 @@ function _reset_amis_history!(
     return nothing
 end
 
-function _reset_amis_history!(
-    history::_AMISFactorHistory,
-    rounds,
-    committed_slot,
-)
-    slots = committed_slot == 1 ? (2:rounds) : (1:rounds)
+function _reset_amis_history!(history::_AMISFactorHistory, rounds)
+    slots = 2:rounds
     isempty(slots) && return nothing
     fill!(view(history.means, :, slots), zero(eltype(history.means)))
     fill!(
@@ -885,49 +884,17 @@ function _reset_amis_history!(
     return nothing
 end
 
-function _copy_amis_history_slot!(history::_AMISScalarHistory, destination, source)
-    copyto!(
-        view(history.means, destination:destination),
-        view(history.means, source:source),
-    )
-    copyto!(
-        view(history.scales, destination:destination),
-        view(history.scales, source:source),
-    )
-    copyto!(
-        view(history.lognormalizers, destination:destination),
-        view(history.lognormalizers, source:source),
-    )
-    return nothing
-end
-
-function _copy_amis_history_slot!(history::_AMISFactorHistory, destination, source)
-    copyto!(view(history.means, :, destination), view(history.means, :, source))
-    copyto!(
-        view(history.factors, :, :, destination),
-        view(history.factors, :, :, source),
-    )
-    copyto!(
-        view(history.lognormalizers, destination:destination),
-        view(history.lognormalizers, source:source),
-    )
-    return nothing
-end
-
-function _prepare_amis_run_history!(history, rounds, committed_slot)
-    _reset_amis_history!(history, rounds, committed_slot)
-    committed_slot == 1 || _copy_amis_history_slot!(history, 1, committed_slot)
-    return nothing
-end
-
-function _with_committed_amis_slot(method_state::_PreparedAMIS, committed_slot)
-    return _PreparedAMIS(
+function _with_amis_workspace_authority(
+    method_state::_PreparedAMIS{S,O,L,H,W},
+    authority::Bool,
+) where {S,O,L,H,W}
+    return _PreparedAMIS{S,O,L,H,W}(
         method_state.schedule,
         method_state.offsets,
         method_state.logcounts,
         method_state.history,
         method_state.workspace,
-        committed_slot,
+        authority,
     )
 end
 
@@ -1049,21 +1016,36 @@ function _build_amis_result(target, samples, logweights, round_ids, diagnostics)
     )
 end
 
-function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
+function _importance_sample_cpu!(sampler, committed_state::_PreparedAMIS, threaded)
     execution = threaded ? _ThreadedCPUExecution() : _SerialCPUExecution()
-    history = method_state.history
-    workspace = method_state.workspace
+    history = committed_state.history
+    workspace = committed_state.workspace
     buffers = sampler.random_buffers
-    schedule = method_state.schedule
+    schedule = committed_state.schedule
     rounds = length(schedule)
-    total_samples = last(method_state.offsets) - 1
+    total_samples = last(committed_state.offsets) - 1
     round_ids = similar(workspace.logweights, Int, total_samples)
     round_ess = Vector{eltype(workspace.logweights)}(undef, rounds)
     round_lognormalizers = similar(round_ess)
     transfers = _ResultTransferCounter(0, 0)
     accelerator = sampler.device isa MLDataDevices.AbstractAcceleratorDevice
     workspace_candidate = accelerator || history isa _AMISFactorHistory
-    _prepare_amis_run_history!(history, rounds, method_state.committed_slot)
+    _reset_amis_history!(history, rounds)
+    method_state = if committed_state.committed_in_workspace
+        _capture_amis_round(
+            committed_state, transfers, 1, :result_construction, 0,
+        ) do
+            _store_amis_candidate!(history, 1, workspace)
+            KernelAbstractions.synchronize(
+                KernelAbstractions.get_backend(history.means),
+            )
+        end
+        run_state = _with_amis_workspace_authority(committed_state, false)
+        sampler.method_state = run_state
+        run_state
+    else
+        committed_state
+    end
 
     target = _capture_amis_round(method_state, transfers, 1, :target, 0) do
         binding_sample = history isa _AMISScalarHistory ?
@@ -1218,20 +1200,6 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
         failures=0,
         transfers=transfers,
     )
-    committed_slot = method_state.committed_slot == 1 ? rounds + 1 : 1
-    _capture_amis_round(
-        method_state, transfers, rounds, :result_construction, rounds,
-    ) do
-        if workspace_candidate
-            _store_amis_candidate!(history, committed_slot, workspace)
-        else
-            _store_amis_proposal!(history, committed_slot, final_proposal)
-        end
-        KernelAbstractions.synchronize(
-            KernelAbstractions.get_backend(history.means),
-        )
-        nothing
-    end
     result = _capture_amis_round(
         method_state, transfers, rounds, :result_construction, rounds,
     ) do
@@ -1243,6 +1211,15 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
             diagnostics,
         )
     end
-    sampler.method_state = _with_committed_amis_slot(method_state, committed_slot)
+    _capture_amis_round(
+        method_state, transfers, rounds, :result_construction, rounds,
+    ) do
+        workspace_candidate ||
+            _store_amis_workspace_candidate!(workspace, final_proposal)
+        KernelAbstractions.synchronize(
+            KernelAbstractions.get_backend(workspace.candidate_mean),
+        )
+    end
+    sampler.method_state = _with_amis_workspace_authority(method_state, true)
     return result
 end

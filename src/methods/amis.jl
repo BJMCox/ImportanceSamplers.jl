@@ -138,7 +138,7 @@ struct _PreparedAMIS{S,O,L,H,W}
     logcounts::L
     history::H
     workspace::W
-    committed_slot::Int
+    committed_in_workspace::Bool
 end
 
 function _amis_storage_prototype(proposal::_GaussianProposal)
@@ -150,20 +150,19 @@ end
 function _allocate_amis_history(prototype, proposal::_GaussianProposal, rounds)
     location = proposal.location
     T = location isa _NativeGaussianFloat ? typeof(location) : eltype(location)
-    capacity = rounds + 1
-    lognormalizers = similar(prototype, T, capacity)
+    lognormalizers = similar(prototype, T, rounds)
     lognormalizers[1] = proposal.lognormalizer
     if location isa _NativeGaussianFloat
-        means = similar(prototype, T, capacity)
-        scales = similar(prototype, T, capacity)
+        means = similar(prototype, T, rounds)
+        scales = similar(prototype, T, rounds)
         means[1] = location
         scales[1] = proposal.scale.scale
         return _AMISScalarHistory(means, scales, lognormalizers)
     end
 
     dimension = length(location)
-    means = similar(prototype, T, dimension, capacity)
-    factors = similar(prototype, T, dimension, dimension, capacity)
+    means = similar(prototype, T, dimension, rounds)
+    factors = similar(prototype, T, dimension, dimension, rounds)
     copyto!(view(means, :, 1), location)
     _store_amis_factor!(view(factors, :, :, 1), proposal.scale)
     return _AMISFactorHistory(means, factors, lognormalizers)
@@ -272,7 +271,7 @@ function _prepare_amis_state(algorithm::AMIS, ::Type{L}) where {L}
         logcounts,
         history,
         workspace,
-        1,
+        false,
     )
 end
 
@@ -379,7 +378,7 @@ function _prepare_transferred_method_state(
         _copy_to_device(device, method_state.logcounts),
         _copy_amis_history(device, method_state.history),
         _copy_amis_workspace(device, method_state.workspace),
-        method_state.committed_slot,
+        method_state.committed_in_workspace,
     )
     _preflight_amis_factorization!(device, transferred)
     return transferred
@@ -451,10 +450,7 @@ function current_proposal(
         ),
     )
     method_state = sampler.method_state
-    return _amis_proposal_snapshot(
-        method_state.history,
-        method_state.committed_slot,
-    )
+    return _amis_proposal_snapshot(method_state)
 end
 
 function current_proposal(
@@ -472,11 +468,7 @@ function current_proposal(
     end
     method_state = sampler.method_state
     parameters = _with_backend_device(sampler.device) do
-        _copy_amis_snapshot_parameters(
-            destination,
-            method_state.history,
-            method_state.committed_slot,
-        )
+        _copy_amis_snapshot_parameters(destination, method_state)
     end
     return _amis_proposal_snapshot(parameters...)
 end
@@ -493,38 +485,35 @@ function current_proposal(
     )
 end
 
-function _copy_amis_snapshot_parameters(
-    destination,
-    history::_AMISScalarHistory,
-    slot,
-)
-    return (
-        destination(Array(view(history.means, slot:slot))),
-        destination(Array(view(history.scales, slot:slot))),
-    )
+function _amis_snapshot_parameters(
+    method_state::_PreparedAMIS{S,O,L,H,W},
+) where {S,O,L,H<:_AMISScalarHistory,W}
+    if method_state.committed_in_workspace
+        workspace = method_state.workspace
+        return workspace.candidate_mean, workspace.candidate_scale
+    end
+    history = method_state.history
+    return view(history.means, 1:1), view(history.scales, 1:1)
 end
 
-function _copy_amis_snapshot_parameters(
-    destination,
-    history::_AMISFactorHistory,
-    slot,
-)
-    return (
-        destination(Array(view(history.means, :, slot))),
-        destination(Array(view(history.factors, :, :, slot))),
-    )
+function _amis_snapshot_parameters(
+    method_state::_PreparedAMIS{S,O,L,H,W},
+) where {S,O,L,H<:_AMISFactorHistory,W}
+    if method_state.committed_in_workspace
+        workspace = method_state.workspace
+        return workspace.candidate_mean, workspace.candidate_scale
+    end
+    history = method_state.history
+    return view(history.means, :, 1), view(history.factors, :, :, 1)
 end
 
-function _amis_proposal_snapshot(history::_AMISScalarHistory, slot)
-    return SphericalGaussian(history.means[slot], history.scales[slot])
+function _copy_amis_snapshot_parameters(destination, method_state::_PreparedAMIS)
+    parameters = _amis_snapshot_parameters(method_state)
+    return map(parameter -> destination(Array(parameter)), parameters)
 end
 
-function _amis_proposal_snapshot(history::_AMISFactorHistory, slot)
-    return FactorGaussian(
-        view(history.means, :, slot),
-        view(history.factors, :, :, slot),
-    )
-end
+_amis_proposal_snapshot(method_state::_PreparedAMIS) =
+    _amis_proposal_snapshot(_amis_snapshot_parameters(method_state)...)
 
 _amis_proposal_snapshot(means::AbstractVector, scales::AbstractVector) =
     SphericalGaussian(means[1], scales[1])

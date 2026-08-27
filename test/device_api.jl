@@ -1474,7 +1474,7 @@ end
     @test !prepared.running
 end
 
-@testset "AMIS accelerator publication synchronization is transactional" begin
+@testset "AMIS accelerator authority synchronization is transactional" begin
     T = Float64
     algorithm = AMIS(
         SphericalGaussian(zero(T), one(T));
@@ -1501,10 +1501,10 @@ end
         old_state.logcounts,
         history,
         old_state.workspace,
-        old_state.committed_slot,
+        old_state.committed_in_workspace,
     )
     prepared = IS._PreparedImportanceSampler(
-        AMISExecutionPrefilledRNG([T[-1, 0, 1]], 1),
+        AMISExecutionPrefilledRNG(fill(T[-1, 0, 1], 2), 1),
         base.random_buffers,
         base.target,
         base.algorithm,
@@ -1514,6 +1514,8 @@ end
         false,
         false,
     )
+    @test importance_sample!(prepared) isa WeightedSamples
+    @test prepared.method_state.committed_in_workspace
     before = current_proposal(MLDataDevices.cpu_device(), prepared)
 
     failure = caught_device_error(() -> importance_sample!(prepared))
@@ -1525,10 +1527,10 @@ end
         @test failure.cause isa ErrorException
         @test failure.cause.msg ==
               "intentional AMIS publication synchronization failure"
-        @test failure.diagnostics.completed_rounds == 1
+        @test failure.diagnostics.completed_rounds == 0
     end
     @test current_proposal(MLDataDevices.cpu_device(), prepared) == before
-    @test prepared.method_state.committed_slot == 1
+    @test prepared.method_state.committed_in_workspace
     @test !prepared.running
     @test AMIS_EXECUTION_TEST_CURRENT[] === :caller
 end

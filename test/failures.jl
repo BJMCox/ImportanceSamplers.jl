@@ -166,7 +166,7 @@ end
 function amis_publication_failure_sampler(fail_at)
     T = Float64
     base = prepare_sampler(
-        AMISFailureRNG([T[-1, 0, 1, 0, -1, 1]]),
+        AMISFailureRNG(fill(T[-1, 0, 1, 0, -1, 1], 2)),
         AMISZeroTarget{T}(),
         AMIS(FactorGaussian(zeros(T, 2), T[1 0; 0 1]); rounds=1, round_size=3);
         threaded=false,
@@ -185,7 +185,7 @@ function amis_publication_failure_sampler(fail_at)
         old_state.logcounts,
         history,
         old_state.workspace,
-        old_state.committed_slot,
+        old_state.committed_in_workspace,
     )
     sampler = ImportanceSamplers._PreparedImportanceSampler(
         base.rng,
@@ -929,7 +929,7 @@ end
         moment_base.method_state.logcounts,
         moment_base.method_state.history,
         moment_workspace,
-        moment_base.method_state.committed_slot,
+        moment_base.method_state.committed_in_workspace,
     )
     moment_sampler = ImportanceSamplers._PreparedImportanceSampler(
         moment_base.rng,
@@ -991,11 +991,12 @@ end
     @test covariance_sampler.running === false
 end
 
-@testset "AMIS final proposal publication is atomic" begin
+@testset "AMIS run-start proposal authority copy is atomic" begin
     for fail_at in (2, 3)
         sampler, injected = amis_publication_failure_sampler(fail_at)
+        @test importance_sample!(sampler) isa WeightedSamples
+        @test sampler.method_state.committed_in_workspace
         before = amis_proposal_bits(current_proposal(sampler))
-        committed_slot = sampler.method_state.committed_slot
 
         failure = caught_exception(() -> importance_sample!(sampler))
 
@@ -1010,8 +1011,31 @@ end
         @test amis_proposal_bits(current_proposal(sampler)) == before
         @test injected.writes == fail_at
         @test !sampler.running
-        @test sampler.method_state.committed_slot == committed_slot
+        @test sampler.method_state.committed_in_workspace
     end
+end
+
+@testset "AMIS later run failure preserves the workspace proposal" begin
+    T = Float64
+    target = AMISFailingTarget{T}(0, typemax(Int))
+    sampler = prepare_sampler(
+        AMISFailureRNG(fill(T[-1, 0, 1], 2)),
+        target,
+        AMIS(SphericalGaussian(zero(T), one(T)); rounds=1, round_size=3);
+        threaded=false,
+    )
+    @test importance_sample!(sampler) isa WeightedSamples
+    @test sampler.method_state.committed_in_workspace
+    before = amis_proposal_bits(current_proposal(sampler))
+    target.fail_at = target.calls + 1
+
+    failure = caught_exception(() -> importance_sample!(sampler))
+
+    @test failure isa AMISRoundError
+    @test failure.phase === :target
+    @test amis_proposal_bits(current_proposal(sampler)) == before
+    @test !sampler.method_state.committed_in_workspace
+    @test !sampler.running
 end
 
 @testset "CPU factor AMIS stages, carries over, and rolls back" begin
@@ -1040,12 +1064,13 @@ end
         @test history.lognormalizers[2] ≈
               -log(T(2pi)) / T(2) - log(staged_factor) rtol = 8eps(T)
 
-        committed_slot = sampler.method_state.committed_slot
-        committed_mean = history.means[1, committed_slot]
-        committed_factor = history.factors[1, 1, committed_slot]
+        committed = current_proposal(sampler)
+        @test sampler.method_state.committed_in_workspace
         second = importance_sample!(sampler)
         @test second.samples[1, 1] ≈
-              committed_mean + committed_factor * batches[3][1] rtol = 8eps(T)
+              committed.location[1] +
+              committed.scale.factor[1, 1] * batches[3][1] rtol = 8eps(T)
+        @test sampler.method_state.committed_in_workspace
 
         rollback_sampler = prepare_sampler(
             AMISFailureRNG(deepcopy(batches[1:2])),
