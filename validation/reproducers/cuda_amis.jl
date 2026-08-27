@@ -24,7 +24,7 @@ function (::AMISZeroTarget{T})(sample)::T where {T}
     return zero(T)
 end
 
-function Random.randn!(rng::AMISPrefilledDeviceRNG, destination::AbstractArray)
+function Random.randn!(rng::AMISPrefilledDeviceRNG, destination::CUDA.AnyCuArray)
     copyto!(destination, view(rng.batches, :, rng.index))
     rng.index += 1
     return destination
