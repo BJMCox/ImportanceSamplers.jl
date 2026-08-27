@@ -489,22 +489,26 @@ function _fit_amis_proposal!(
     weights = workspace.normalized_weights
     centered_scaled = workspace.centered_scaled
     covariance = workspace.covariance
+    candidate_mean = workspace.candidate_mean
+    candidate_factor = workspace.candidate_scale
     _normalize_amis_weights!(weights, workspace.logweights, sample_count)
 
     T = eltype(samples)
     dimension = size(samples, 1)
-    mean = zeros(T, dimension)
+    fill!(candidate_mean, zero(T))
     @inbounds for sample_index in 1:sample_count
         weight = weights[sample_index]
         for coordinate in 1:dimension
-            mean[coordinate] += weight * samples[coordinate, sample_index]
+            candidate_mean[coordinate] +=
+                weight * samples[coordinate, sample_index]
         end
     end
     @inbounds for sample_index in 1:sample_count
         scale = sqrt(weights[sample_index])
         for coordinate in 1:dimension
             centered_scaled[coordinate, sample_index] =
-                (samples[coordinate, sample_index] - mean[coordinate]) * scale
+                (samples[coordinate, sample_index] - candidate_mean[coordinate]) *
+                scale
         end
     end
     centered = view(centered_scaled, :, 1:sample_count)
@@ -519,11 +523,18 @@ function _fit_amis_proposal!(
         covariance[coordinate, coordinate] += ridge
     end
 
-    candidate_factor = _amis_potrf!(MLDataDevices.CPUDevice(), covariance)
+    copyto!(candidate_factor, covariance)
+    _amis_potrf!(MLDataDevices.CPUDevice(), candidate_factor)
     @inbounds for column in 1:dimension, row in 1:(column - 1)
         candidate_factor[row, column] = zero(T)
     end
-    return FactorGaussian(mean, candidate_factor)
+    logabsdet = zero(T)
+    @inbounds for coordinate in 1:dimension
+        logabsdet += log(candidate_factor[coordinate, coordinate])
+    end
+    workspace.candidate_lognormalizer[1] =
+        _gaussian_lognormalizer(T, dimension, logabsdet)
+    return nothing
 end
 
 function _amis_potrf!(
@@ -815,6 +826,7 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
     round_lognormalizers = similar(round_ess)
     transfers = _ResultTransferCounter(0, 0)
     accelerator = sampler.device isa MLDataDevices.AbstractAcceleratorDevice
+    workspace_candidate = accelerator || history isa _AMISFactorHistory
     _reset_amis_history!(history)
 
     target = _capture_amis_round(1, :sample_and_weight, schedule[1], 0) do
@@ -957,7 +969,7 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
             round_lognormalizers[round] = summary.lognormalizer
         end
         if round < rounds
-            if accelerator
+            if workspace_candidate
                 _store_amis_candidate!(history, round + 1, workspace)
             else
                 _store_amis_proposal!(history, round + 1, final_proposal)
@@ -992,7 +1004,7 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
             diagnostics,
         )
     end
-    if accelerator
+    if workspace_candidate
         _store_amis_candidate!(history, 1, workspace)
     else
         _store_amis_proposal!(history, 1, final_proposal)

@@ -239,6 +239,15 @@ function literal_amis_moments(samples, logweights, previous_covariance)
     return mean, covariance, weights
 end
 
+function amis_factor_fit_allocated!(workspace, history, sample_count)
+    return @allocated AMISIS._fit_amis_proposal!(
+        workspace,
+        history,
+        1,
+        sample_count,
+    )
+end
+
 @testset "AMIS fitting reproduces literal two-pass weighted moments" begin
     for T in (Float32, Float64)
         scalar_proposal = SphericalGaussian(T(-0.5), T(1.75))
@@ -285,16 +294,25 @@ end
             previous_covariance,
         )
 
+        candidate_mean = vector_state.workspace.candidate_mean
+        candidate_factor = vector_state.workspace.candidate_scale
         vector_fitted = @inferred AMISIS._fit_amis_proposal!(
             vector_state.workspace,
             vector_state.history,
             1,
             4,
         )
-        fitted_factor = vector_fitted.scale.factor
 
-        @test vector_fitted.location ≈ vector_mean rtol = 16eps(T)
-        @test fitted_factor * fitted_factor' ≈ vector_covariance rtol = 32eps(T)
+        @test vector_fitted === nothing
+        @test candidate_mean ≈ vector_mean rtol = 16eps(T)
+        @test candidate_factor * candidate_factor' ≈
+              vector_covariance rtol = 32eps(T)
+        @test vector_state.workspace.covariance ≈ vector_covariance rtol = 32eps(T)
         @test vector_state.workspace.normalized_weights ≈ vector_weights rtol = 8eps(T)
+        @test amis_factor_fit_allocated!(
+            vector_state.workspace,
+            vector_state.history,
+            4,
+        ) == 0
     end
 end
