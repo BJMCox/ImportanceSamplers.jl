@@ -86,55 +86,6 @@ struct _AMISRoundOutput{T,N,W,R,L}
     round::Int
 end
 
-@inline _initialize_mis_output!(::_MISRoundOutput, sample_index) = nothing
-
-@inline function _initialize_mis_output!(output::_AMISRoundOutput, sample_index)
-    T = eltype(output.logweights)
-    @inbounds output.logtargets[sample_index] = T(-Inf)
-    @inbounds output.lognumerators[sample_index] = zero(T)
-    @inbounds output.logweights[sample_index] = T(-Inf)
-    return nothing
-end
-
-@inline function _store_mis_output!(
-    output::_MISRoundOutput,
-    sample_index,
-    target_log,
-    logdenominator,
-    bank,
-    generating_slot,
-)
-    logweight, reason = _subtract_logweight(target_log, logdenominator)
-    if iszero(reason)
-        @inbounds output.logweights[sample_index] = logweight
-        @inbounds output.proposal_ids[sample_index] =
-            bank.proposal_ids[generating_slot]
-    end
-    return reason
-end
-
-@inline function _store_mis_output!(
-    output::_AMISRoundOutput,
-    sample_index,
-    target_log,
-    lognumerator,
-    bank,
-    generating_slot,
-)
-    logweight, reason = _logweight_from_logmixture(
-        target_log,
-        lognumerator,
-        output.logtotal,
-    )
-    if iszero(reason)
-        @inbounds output.logtargets[sample_index] = target_log
-        @inbounds output.lognumerators[sample_index] = lognumerator
-        @inbounds output.logweights[sample_index] = logweight
-        @inbounds output.round_ids[sample_index] = output.round
-    end
-    return reason
-end
-
 @inline _mis_dimension(bank) = size(bank.locations, 1)
 
 function _allocate_mis_solve_scratch(
@@ -158,10 +109,10 @@ function _allocate_mis_solve_scratch(
     )
 end
 
-@inline function _mis_round_kernel!(
+@inline function _mis_round_values!(
+    ::Type{T},
     sample_index,
     samples,
-    output,
     failure_storage,
     normal_buffer,
     target,
@@ -169,8 +120,7 @@ end
     assignments,
     denominator_policy,
     solve_scratch,
-)
-    _initialize_mis_output!(output, sample_index)
+) where {T}
     generating_slot = @inbounds assignments[sample_index]
     dimension = _mis_dimension(bank)
     normal_offset = (sample_index - 1) * dimension + 1
@@ -189,6 +139,7 @@ end
             0,
             _NATIVE_GENERATED_NONFINITE,
         )
+        return false, T(-Inf), T(-Inf), generating_slot
     else
         sample = _native_sample_at(samples, sample_index)
         target_log, target_reason, target_failed = target(sample, sample_index)
@@ -199,6 +150,7 @@ end
                 0,
                 target_reason,
             )
+            return false, T(-Inf), T(-Inf), generating_slot
         else
             denominator, _, denominator_reason = _mis_logdenominator_core(
                 typeof(target_log),
@@ -216,27 +168,11 @@ end
                     0,
                     denominator_reason,
                 )
-            else
-                output_reason = _store_mis_output!(
-                    output,
-                    sample_index,
-                    target_log,
-                    denominator,
-                    bank,
-                    generating_slot,
-                )
-                if !iszero(output_reason)
-                    _record_native_failure!(
-                        failure_storage,
-                        sample_index,
-                        0,
-                        output_reason,
-                    )
-                end
+                return false, T(-Inf), T(-Inf), generating_slot
             end
+            return true, target_log, denominator, generating_slot
         end
     end
-    return nothing
 end
 
 @kernel function _mis_round_launch_kernel!(
@@ -252,11 +188,10 @@ end
     solve_scratch,
 )
     sample_index = @index(Global, Linear)
-    output = _MISRoundOutput(logweights, proposal_ids)
-    _mis_round_kernel!(
+    valid, target_log, logdenominator, generating_slot = _mis_round_values!(
+        eltype(logweights),
         sample_index,
         samples,
-        output,
         failure_storage,
         normal_buffer,
         target,
@@ -265,6 +200,15 @@ end
         denominator,
         solve_scratch,
     )
+    if valid
+        logweight, reason = _subtract_logweight(target_log, logdenominator)
+        if iszero(reason)
+            @inbounds logweights[sample_index] = logweight
+            @inbounds proposal_ids[sample_index] = bank.proposal_ids[generating_slot]
+        else
+            _record_native_failure!(failure_storage, sample_index, 0, reason)
+        end
+    end
 end
 
 @kernel function _amis_round_launch_kernel!(
@@ -284,18 +228,14 @@ end
     solve_scratch,
 )
     sample_index = @index(Global, Linear)
-    output = _AMISRoundOutput(
-        logtargets,
-        lognumerators,
-        logweights,
-        round_ids,
-        logtotal,
-        round,
-    )
-    _mis_round_kernel!(
+    T = eltype(logweights)
+    @inbounds logtargets[sample_index] = T(-Inf)
+    @inbounds lognumerators[sample_index] = zero(T)
+    @inbounds logweights[sample_index] = T(-Inf)
+    valid, target_log, lognumerator, _ = _mis_round_values!(
+        T,
         sample_index,
         samples,
-        output,
         failure_storage,
         normal_buffer,
         target,
@@ -304,6 +244,21 @@ end
         denominator,
         solve_scratch,
     )
+    if valid
+        logweight, reason = _logweight_from_logmixture(
+            target_log,
+            lognumerator,
+            logtotal,
+        )
+        if iszero(reason)
+            @inbounds logtargets[sample_index] = target_log
+            @inbounds lognumerators[sample_index] = lognumerator
+            @inbounds logweights[sample_index] = logweight
+            @inbounds round_ids[sample_index] = round
+        else
+            _record_native_failure!(failure_storage, sample_index, 0, reason)
+        end
+    end
 end
 
 function _launch_mis_round!(
