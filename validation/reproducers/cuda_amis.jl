@@ -20,7 +20,9 @@ mutable struct AMISPrefilledDeviceRNG{B} <: Random.AbstractRNG
     index::Int
 end
 
-(::AMISZeroTarget{T})(sample)::T where {T} = zero(T)
+function (::AMISZeroTarget{T})(sample)::T where {T}
+    return zero(T)
+end
 
 function Random.randn!(rng::AMISPrefilledDeviceRNG, destination::AbstractArray)
     copyto!(destination, view(rng.batches, :, rng.index))
