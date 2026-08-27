@@ -272,6 +272,40 @@ function amis_kernel_scalar_values(samples)
     return samples isa AbstractVector ? samples : vec(samples)
 end
 
+@testset "AMIS old-sample zero mixture contributions are valid" begin
+    for T in (Float32, Float64), factor in (Val(false), Val(true))
+        state = configure_amis_kernel_state(T, factor)
+        history = state.history
+        if factor isa Val{true}
+            history.means[1, 2] = floatmax(T)
+            history.factors[1, 1, 2] = one(T)
+        else
+            history.means[2] = floatmax(T)
+            history.scales[2] = one(T)
+        end
+        for execution in (
+            AMISKernelIS._SerialCPUExecution(),
+            AMISKernelIS._ThreadedCPUExecution(),
+        )
+            lognumerators = T[1, 2]
+            failures = zeros(UInt64, 3)
+            AMISKernelIS._launch_append_logmixture!(
+                lognumerators,
+                T[-1, 1],
+                history,
+                2,
+                state.logcounts,
+                failures,
+                state.workspace.centered_scaled,
+                execution,
+            )
+
+            @test lognumerators == T[1, 2]
+            @test iszero(failures)
+        end
+    end
+end
+
 @testset "prefilled AMIS retrospective log mixture" begin
     for T in (Float32, Float64)
         executions = (

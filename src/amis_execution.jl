@@ -132,7 +132,7 @@ end
         solve_scratch,
         sample_index,
     )
-    reason = _native_proposal_reason(logdensity)
+    reason = isnan(logdensity) ? _NATIVE_PROPOSAL_INVALID : UInt16(0)
     if iszero(reason)
         value = _append_logmixture(
             @inbounds(lognumerators[sample_index]),

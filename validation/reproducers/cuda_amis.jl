@@ -128,6 +128,46 @@ function assert_amis_sample_fit_failure_transfers(failure, ::Type{T}) where {T}
     return record
 end
 
+function zero_append_case(device, ::Type{T}, kind::Symbol) where {T}
+    source = prepare_sampler(
+        Random.Xoshiro(0x616d69737a65726f),
+        AMISZeroTarget{T}(),
+        AMIS(amis_proposal(T, Val(kind)); rounds=2, round_size=2),
+    )
+    history = source.method_state.history
+    if kind === :scalar
+        history.means[2] = floatmax(T)
+        history.scales[2] = one(T)
+    else
+        history.means[:, 2] .= floatmax(T)
+        fill!(view(history.factors, :, :, 2), zero(T))
+        for coordinate in axes(history.factors, 1)
+            history.factors[coordinate, coordinate, 2] = one(T)
+        end
+    end
+    history.lognormalizers[2] = source.algorithm.proposal.lognormalizer
+    prepared = device(source)
+    state = prepared.method_state
+    lognumerators = CUDA.fill(T(1), 2)
+    samples = kind === :scalar ? CUDA.fill(zero(T), 2) : CUDA.zeros(T, 3, 2)
+    failures = CUDA.zeros(UInt64, 3)
+    IS._launch_append_logmixture!(
+        lognumerators,
+        samples,
+        state.history,
+        2,
+        state.logcounts,
+        failures,
+        state.workspace.centered_scaled,
+        IS._ThreadedCPUExecution(),
+    )
+    CUDA.synchronize()
+
+    @test Array(lognumerators) == fill(T(1), 2)
+    @test all(iszero, Array(failures))
+    return (scalar_type=T, kind, resident=lognumerators isa CUDA.AnyCuArray)
+end
+
 function literal_weight_summary(logweights)
     T = eltype(logweights)
     maximum_logweight = maximum(logweights)
@@ -865,6 +905,10 @@ function main()
         float32=combined_sample_fit_failure_case(device, Float32),
         float64=combined_sample_fit_failure_case(device, Float64),
     )
+    zero_append = Tuple(
+        zero_append_case(device, T, kind) for
+        T in (Float32, Float64) for kind in (:scalar, :factor)
+    )
     @test CUDA.device() == caller_device
     return (
         environment=environment_record(),
@@ -879,6 +923,7 @@ function main()
         degenerate_scalar_covariance,
         factor_overflow,
         combined_sample_fit_failure,
+        zero_append,
     )
 end
 
