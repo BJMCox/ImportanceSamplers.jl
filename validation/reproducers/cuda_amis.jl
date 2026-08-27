@@ -1,5 +1,6 @@
 using CUDA
 using ImportanceSamplers
+using LinearAlgebra
 using MLDataDevices
 using Pkg
 using Random
@@ -259,6 +260,86 @@ function wrong_device_pre_rng_case(device, ::Type{T}) where {T}
     return (tested=true, reason=:device_residency_mismatch, pre_rng=true)
 end
 
+function degenerate_scalar_covariance_case(device)
+    T = Float32
+    proposal = SphericalGaussian(zero(T), nextfloat(zero(T)))
+    algorithm = AMIS(proposal; rounds=1, round_size=1)
+    make_source(seed; threaded=true) = prepare_sampler(
+        Random.Xoshiro(seed),
+        AMISQuadraticTarget{T}(),
+        algorithm;
+        threaded,
+    )
+
+    cpu = make_source(AMIS_CUDA_SEED + 0x200; threaded=false)
+    cpu_before = current_proposal(cpu)
+    cpu_failure = try
+        importance_sample!(cpu)
+        nothing
+    catch cause
+        cause
+    end
+    @test cpu_failure isa AMISRoundError
+    @test cpu_failure.round == 1
+    @test cpu_failure.phase === :fit_proposal
+    @test cpu_failure.cause isa LinearAlgebra.PosDefException
+    @test cpu_failure.cause.info == 1
+    @test current_proposal(cpu) == cpu_before
+
+    caller = CUDA.device()
+    prepared = device(make_source(AMIS_CUDA_SEED + 0x201))
+    before = current_proposal(MLDataDevices.cpu_device(), prepared)
+    first_failure = try
+        importance_sample!(prepared)
+        nothing
+    catch cause
+        cause
+    end
+    @test CUDA.device() == caller
+    @test first_failure isa AMISRoundError
+    @test first_failure.round == cpu_failure.round == 1
+    @test first_failure.phase === cpu_failure.phase === :fit_proposal
+    @test first_failure.cause isa LinearAlgebra.PosDefException
+    @test first_failure.cause.info == cpu_failure.cause.info == 1
+    @test current_proposal(MLDataDevices.cpu_device(), prepared) == before
+    @test !prepared.running
+    first_normals = Array(prepared.random_buffers.normal)
+    first_storage = Array(prepared.random_buffers.failure_scratch.record.storage)
+    first_snapshot = IS._decode_native_failure(
+        first_storage[1],
+        first_storage[2],
+    )
+    @test first_snapshot.count == 1
+    @test first_snapshot.reason_bits == IS._AMIS_COVARIANCE_INVALID
+    @test iszero(first_storage[3])
+
+    second_failure = try
+        importance_sample!(prepared)
+        nothing
+    catch cause
+        cause
+    end
+    @test CUDA.device() == caller
+    @test second_failure isa AMISRoundError
+    @test second_failure.phase === :fit_proposal
+    @test second_failure.cause isa LinearAlgebra.PosDefException
+    @test second_failure.cause.info == 1
+    @test current_proposal(MLDataDevices.cpu_device(), prepared) == before
+    @test Array(prepared.random_buffers.normal) != first_normals
+    @test !prepared.running
+    return (
+        scalar_type=T,
+        round_size=1,
+        scale=proposal.scale.scale,
+        cpu_cuda_parity=true,
+        rollback=true,
+        rng_advanced=true,
+        caller_device_restored=true,
+        failure_reason=:finite_positive_covariance,
+        failure_snapshot=true,
+    )
+end
+
 function environment_record()
     root = normpath(joinpath(@__DIR__, "..", ".."))
     gpu = CUDA.device()
@@ -304,6 +385,7 @@ function main()
     end
     transfer_shape = transfer_shape_case(device, Float64)
     wrong_device = wrong_device_pre_rng_case(device, Float64)
+    degenerate_scalar_covariance = degenerate_scalar_covariance_case(device)
     @test CUDA.device() == caller_device
     return (
         environment=environment_record(),
@@ -315,6 +397,7 @@ function main()
         ),
         transfer_shape,
         wrong_device,
+        degenerate_scalar_covariance,
     )
 end
 

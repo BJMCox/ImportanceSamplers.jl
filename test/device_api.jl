@@ -117,8 +117,9 @@ function KernelAbstractions.argconvert(
     kernel::KernelAbstractions.Kernel{KernelArgumentTestBackend},
     argument,
 )
-    push!(KERNEL_ARGUMENT_TEST_ARGUMENTS, (typeof(kernel), typeof(argument)))
-    return kernel_argument_test_adapt(argument)
+    converted = kernel_argument_test_adapt(argument)
+    push!(KERNEL_ARGUMENT_TEST_ARGUMENTS, (typeof(kernel), typeof(converted)))
+    return converted
 end
 
 struct KernelArgumentTestAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
@@ -153,6 +154,28 @@ MLDataDevices.functional(::LateFailAccelerator) = true
 Adapt.adapt_storage(::LateFailAccelerator, array::Array) =
     KernelArgumentTestArray(copy(array))
 
+struct AMISExecutionTestAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
+MLDataDevices.functional(::AMISExecutionTestAccelerator) = true
+const AMIS_EXECUTION_TEST_CURRENT = Ref(:caller)
+
+mutable struct AMISExecutionTestRNG <: Random.AbstractRNG
+    draws::Int
+end
+
+struct AMISZeroFloat32Target end
+(::AMISZeroFloat32Target)(sample)::Float32 = 0.0f0
+
+function Random.randn!(rng::AMISExecutionTestRNG, destination::AbstractArray)
+    fill!(destination, zero(eltype(destination)))
+    rng.draws += 1
+    return destination
+end
+
+function Adapt.adapt_storage(::AMISExecutionTestAccelerator, array::Array)
+    AMIS_EXECUTION_TEST_CURRENT[] === :selected || error("wrong active mock device")
+    return copy(array)
+end
+
 @eval ImportanceSamplers begin
     function _with_backend_device(f, ::Main.KernelArgumentTestAccelerator)
         previous = Main.KERNEL_ARGUMENT_TEST_CURRENT[]
@@ -168,6 +191,27 @@ Adapt.adapt_storage(::LateFailAccelerator, array::Array) =
         Random.Xoshiro(seed)
     _owned_backend_rng(::Main.LateFailAccelerator, seed::UInt64) =
         iszero(seed) ? Random.Xoshiro(seed) : error("late RNG construction failure")
+
+    function _with_backend_device(f, ::Main.AMISExecutionTestAccelerator)
+        previous = Main.AMIS_EXECUTION_TEST_CURRENT[]
+        Main.AMIS_EXECUTION_TEST_CURRENT[] = :selected
+        try
+            return f()
+        finally
+            Main.AMIS_EXECUTION_TEST_CURRENT[] = previous
+        end
+    end
+
+    _backend_state_resident(::Main.AMISExecutionTestAccelerator, state) = true
+    _owned_backend_rng(::Main.AMISExecutionTestAccelerator, seed::UInt64) =
+        Main.AMISExecutionTestRNG(0)
+    _preflight_accelerator_method(
+        ::Main.AMISExecutionTestAccelerator,
+        target,
+        algorithm::AMIS,
+        method_state::_PreparedAMIS,
+        random_buffers::_RandomBuffers,
+    ) = nothing
 
     function _amis_potrf!(
         ::Main.KernelArgumentTestAccelerator,
@@ -937,7 +981,7 @@ end
             (select_kernel, representative_arguments[5]),
             (gather_kernel, representative_arguments[1]),
         )
-            @test (typeof(kernel), typeof(argument)) in
+            @test (typeof(kernel), typeof(kernel_argument_test_adapt(argument))) in
                   KERNEL_ARGUMENT_TEST_ARGUMENTS
         end
         return destination
@@ -1102,7 +1146,123 @@ end
         @test KERNEL_ARGUMENT_TEST_CURRENT[] === :caller
         rand(expected_rng, UInt64)
         @test rand(getfield(source, :rng), UInt64) == rand(expected_rng, UInt64)
-        @test !isempty(KERNEL_ARGUMENT_TEST_ARGUMENTS)
+
+        representative_round = findmax(state.schedule)[2]
+        first_sample = state.offsets[representative_round]
+        last_sample = state.offsets[representative_round + 1] - 1
+        new_indices = first_sample:last_sample
+        samples = IS._sample_view(workspace.samples, new_indices)
+        binding_sample = IS._native_binding_sample(samples)
+        bound_target = IS._bind_resolved_target(destination.target, binding_sample)
+        log_type = eltype(workspace.logweights)
+        target_argument = IS._NativeDeviceTarget{
+            log_type,
+            typeof(bound_target),
+        }(bound_target)
+        backend = KernelAbstractions.get_backend(buffers.normal)
+        round_ids = similar(workspace.logweights, Int, length(new_indices))
+        logtotal = log(eltype(state.logcounts)(last_sample))
+        assignments = IS._FixedMISAssignments(
+            representative_round,
+            length(new_indices),
+        )
+        denominator = IS._AMISMixtureDenominator(
+            state.logcounts,
+            representative_round,
+        )
+        round_kernel = IS._amis_round_launch_kernel!(backend)
+        append_kernel = IS._append_logmixture_kernel!(backend)
+        weight_kernel = IS._form_amis_logweights_kernel!(backend)
+        expected_preflight = Tuple{DataType,DataType}[]
+        function expect_preflight!(kernel, arguments)
+            append!(
+                expected_preflight,
+                (
+                    (typeof(kernel), typeof(kernel_argument_test_adapt(argument))) for
+                    argument in arguments
+                ),
+            )
+        end
+        expect_preflight!(
+            round_kernel,
+            (
+                samples,
+                view(workspace.logtargets, new_indices),
+                view(workspace.lognumerators, new_indices),
+                view(workspace.logweights, new_indices),
+                round_ids,
+                logtotal,
+                representative_round,
+                buffers.failure_scratch.record.storage,
+                buffers.normal,
+                target_argument,
+                history,
+                assignments,
+                denominator,
+                workspace.centered_scaled,
+            ),
+        )
+        old_indices = 1:max(first_sample - 1, 1)
+        expect_preflight!(
+            append_kernel,
+            (
+                view(workspace.lognumerators, old_indices),
+                IS._sample_view(workspace.samples, old_indices),
+                history,
+                representative_round,
+                state.logcounts,
+                buffers.failure_scratch.record.storage,
+                workspace.centered_scaled,
+            ),
+        )
+        current_indices = 1:last_sample
+        expect_preflight!(
+            weight_kernel,
+            (
+                view(workspace.logweights, current_indices),
+                view(workspace.logtargets, current_indices),
+                view(workspace.lognumerators, current_indices),
+                logtotal,
+                buffers.failure_scratch.record.storage,
+            ),
+        )
+        if history isa IS._AMISScalarHistory
+            ridge_kernel = IS._add_amis_scalar_ridge_kernel!(backend)
+            finish_kernel = IS._finish_amis_scalar_candidate_kernel!(backend)
+            expect_preflight!(
+                ridge_kernel,
+                (workspace.covariance, history.scales, representative_round),
+            )
+            expect_preflight!(
+                finish_kernel,
+                (
+                    workspace.candidate_scale,
+                    workspace.candidate_lognormalizer,
+                    workspace.covariance,
+                    buffers.failure_scratch.record.storage,
+                    last_sample + 1,
+                ),
+            )
+        else
+            ridge_kernel = IS._add_amis_factor_ridge_kernel!(backend)
+            finish_kernel = IS._finish_amis_factor_candidate_kernel!(backend)
+            expect_preflight!(
+                ridge_kernel,
+                (
+                    workspace.covariance,
+                    history.factors,
+                    representative_round,
+                ),
+            )
+            expect_preflight!(
+                finish_kernel,
+                (
+                    workspace.candidate_scale,
+                    workspace.candidate_lognormalizer,
+                ),
+            )
+        end
+        @test KERNEL_ARGUMENT_TEST_ARGUMENTS == expected_preflight
 
         KERNEL_ARGUMENT_TEST_CPU_COPIES[] = 0
         KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] = 0
@@ -1152,6 +1312,69 @@ end
     @test unsupported_error isa SamplerDeviceError
     @test unsupported_error.reason === :accelerator_factorization_unavailable
     @test rand(unsupported.rng, UInt64) == rand(expected_unsupported_rng, UInt64)
+end
+
+@testset "AMIS accelerator scalar covariance failure is transactional" begin
+    T = Float32
+    scale = nextfloat(zero(T))
+    algorithm = AMIS(
+        SphericalGaussian(zero(T), scale);
+        rounds=1,
+        round_size=1,
+    )
+    target = AMISZeroFloat32Target()
+
+    cpu = prepare_sampler(
+        AMISExecutionTestRNG(0),
+        target,
+        algorithm;
+        threaded=false,
+    )
+    cpu_before = current_proposal(cpu)
+    cpu_failure = caught_device_error(() -> importance_sample!(cpu))
+    @test cpu_failure isa AMISRoundError
+    @test cpu_failure.phase === :fit_proposal
+    @test cpu_failure.cause isa LinearAlgebra.PosDefException
+    @test cpu_failure.cause.info == 1
+    @test cpu.rng.draws == 1
+    @test current_proposal(cpu) == cpu_before
+
+    source = prepare_sampler(
+        Random.Xoshiro(0x2229),
+        target,
+        algorithm;
+        threaded=true,
+    )
+    device = AMISExecutionTestAccelerator()
+    prepared = device(source)
+    before = current_proposal(MLDataDevices.cpu_device(), prepared)
+    failure = caught_device_error(() -> importance_sample!(prepared))
+    @test failure isa AMISRoundError
+    if failure isa AMISRoundError
+        @test failure.round == 1
+        @test failure.phase === :fit_proposal
+        @test failure.cause isa LinearAlgebra.PosDefException
+        if failure.cause isa LinearAlgebra.PosDefException
+            @test failure.cause.info == cpu_failure.cause.info == 1
+        end
+    end
+    @test prepared.rng.draws == 1
+    failure_storage = prepared.random_buffers.failure_scratch.record.storage
+    failure_snapshot = IS._decode_native_failure(
+        failure_storage[1],
+        failure_storage[2],
+    )
+    @test failure_snapshot.count == 1
+    @test failure_snapshot.reason_bits == IS._AMIS_COVARIANCE_INVALID
+    @test iszero(failure_storage[3])
+    after = try
+        current_proposal(MLDataDevices.cpu_device(), prepared)
+    catch cause
+        cause
+    end
+    @test after == before
+    @test AMIS_EXECUTION_TEST_CURRENT[] === :caller
+    @test !prepared.running
 end
 
 @testset "backend hooks own device scope and validate residency" begin

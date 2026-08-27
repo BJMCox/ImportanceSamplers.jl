@@ -8,6 +8,8 @@ struct _FixedMISAssignments
     length::Int
 end
 
+const _AMIS_COVARIANCE_INVALID = UInt16(0x2000)
+
 Adapt.@adapt_structure _AMISScalarHistory
 Adapt.@adapt_structure _AMISFactorHistory
 Adapt.@adapt_structure _AMISMixtureDenominator
@@ -370,6 +372,8 @@ function _preflight_amis_kernels(
             workspace.candidate_scale,
             workspace.candidate_lognormalizer,
             workspace.covariance,
+            buffers.failure_scratch.record.storage,
+            last_sample + 1,
         )
             _preflight_kernel_argument(device, finish_kernel, argument)
         end
@@ -556,11 +560,23 @@ end
     candidate_scale,
     candidate_lognormalizer,
     covariance,
+    failure_storage,
+    failure_index,
 )
     T = eltype(candidate_scale)
-    scale = sqrt(covariance[1])
-    candidate_scale[1] = scale
-    candidate_lognormalizer[1] = _gaussian_lognormalizer(T, 1, log(scale))
+    variance = covariance[1]
+    if isfinite(variance) && variance > zero(T)
+        scale = sqrt(variance)
+        candidate_scale[1] = scale
+        candidate_lognormalizer[1] = _gaussian_lognormalizer(T, 1, log(scale))
+    else
+        _record_native_failure!(
+            failure_storage,
+            failure_index,
+            0,
+            _AMIS_COVARIANCE_INVALID,
+        )
+    end
 end
 
 @kernel function _finish_amis_factor_candidate_kernel!(
@@ -590,6 +606,7 @@ function _fit_amis_proposal!(
     previous_slot,
     sample_count,
     transfers,
+    failure_storage,
 )
     samples = view(reshape(workspace.samples, 1, :), :, 1:sample_count)
     weights = view(workspace.normalized_weights, 1:sample_count)
@@ -622,7 +639,9 @@ function _fit_amis_proposal!(
     finish_kernel(
         workspace.candidate_scale,
         workspace.candidate_lognormalizer,
-        workspace.covariance;
+        workspace.covariance,
+        failure_storage,
+        sample_count + 1;
         ndrange=1,
     )
     KernelAbstractions.synchronize(backend)
@@ -763,6 +782,17 @@ function _capture_amis_round(f, round, phase, round_size, completed_rounds)
     end
 end
 
+function _amis_failure_snapshot!(transfers, failure_record)
+    snapshot = _device_failure_snapshot(failure_record)
+    _record_reported_transfer!(
+        transfers,
+        snapshot.transfers.count,
+        snapshot.transfers.bytes,
+        Val(:failure_snapshot),
+    )
+    return snapshot
+end
+
 function _build_amis_result(target, samples, logweights, round_ids, diagnostics)
     return _adopt_validated_weighted_samples(
         copy(samples),
@@ -807,6 +837,7 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
     final_proposal = nothing
     for round in eachindex(schedule)
         round_size = schedule[round]
+        deferred_scalar_snapshot = accelerator && history isa _AMISScalarHistory
         _capture_amis_round(round, :normal_buffer, round_size, round - 1) do
             Random.randn!(sampler.rng, buffers.normal)
         end
@@ -827,27 +858,21 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
                 workspace.centered_scaled,
                 execution,
             )
-            snapshot = _device_failure_snapshot(buffers.failure_scratch.record)
-            _record_reported_transfer!(
-                transfers,
-                snapshot.transfers.count,
-                snapshot.transfers.bytes,
-                Val(:failure_snapshot),
-            )
-            _throw_native_failures(
-                snapshot.failure,
-                snapshot.draw_failure,
-                target_failures,
-                _NoSampleTransform(),
-            )
+            if !deferred_scalar_snapshot
+                snapshot = _amis_failure_snapshot!(
+                    transfers,
+                    buffers.failure_scratch.record,
+                )
+                _throw_native_failures(
+                    snapshot.failure,
+                    snapshot.draw_failure,
+                    target_failures,
+                    _NoSampleTransform(),
+                )
+            end
         end
-        final_proposal = _capture_amis_round(
-            round,
-            :fit_proposal,
-            round_size,
-            round - 1,
-        ) do
-            if accelerator
+        fit_failure = if deferred_scalar_snapshot
+            try
                 _fit_amis_proposal!(
                     sampler.device,
                     workspace,
@@ -855,14 +880,67 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
                     round,
                     method_state.offsets[round + 1] - 1,
                     transfers,
+                    buffers.failure_scratch.record.storage,
                 )
-            else
-                _fit_amis_proposal!(
-                    workspace,
-                    history,
-                    round,
-                    method_state.offsets[round + 1] - 1,
-                )
+                nothing
+            catch cause
+                cause
+            end
+        else
+            final_proposal = _capture_amis_round(
+                round,
+                :fit_proposal,
+                round_size,
+                round - 1,
+            ) do
+                if accelerator
+                    _fit_amis_proposal!(
+                        sampler.device,
+                        workspace,
+                        history,
+                        round,
+                        method_state.offsets[round + 1] - 1,
+                        transfers,
+                    )
+                else
+                    _fit_amis_proposal!(
+                        workspace,
+                        history,
+                        round,
+                        method_state.offsets[round + 1] - 1,
+                    )
+                end
+            end
+            nothing
+        end
+        if deferred_scalar_snapshot
+            snapshot = _amis_failure_snapshot!(
+                transfers,
+                buffers.failure_scratch.record,
+            )
+            _capture_amis_round(
+                round,
+                :sample_and_weight,
+                round_size,
+                round - 1,
+            ) do
+                snapshot.failure.reason_bits == _AMIS_COVARIANCE_INVALID ||
+                    _throw_native_failures(
+                        snapshot.failure,
+                        snapshot.draw_failure,
+                        target_failures,
+                        _NoSampleTransform(),
+                    )
+            end
+            _capture_amis_round(
+                round,
+                :fit_proposal,
+                round_size,
+                round - 1,
+            ) do
+                isnothing(fit_failure) || throw(fit_failure)
+                snapshot.failure.reason_bits == _AMIS_COVARIANCE_INVALID &&
+                    throw(LinearAlgebra.PosDefException(1))
             end
         end
         if round < rounds
