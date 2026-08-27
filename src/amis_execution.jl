@@ -528,12 +528,31 @@ function _fit_amis_proposal!(
     @inbounds for column in 1:dimension, row in 1:(column - 1)
         candidate_factor[row, column] = zero(T)
     end
-    logabsdet = zero(T)
+
     @inbounds for coordinate in 1:dimension
-        logabsdet += log(candidate_factor[coordinate, coordinate])
+        isfinite(candidate_mean[coordinate]) || throw(
+            ArgumentError("location must contain only finite values"),
+        )
     end
-    workspace.candidate_lognormalizer[1] =
+    logabsdet = zero(T)
+    @inbounds for column in 1:dimension, row in column:dimension
+        factor_entry = candidate_factor[row, column]
+        isfinite(factor_entry) || throw(
+            ArgumentError("factor must contain only finite values"),
+        )
+        if row == column
+            factor_entry > zero(T) || throw(
+                ArgumentError("factor diagonal must be positive"),
+            )
+            logabsdet += log(factor_entry)
+        end
+    end
+    candidate_lognormalizer =
         _gaussian_lognormalizer(T, dimension, logabsdet)
+    isfinite(candidate_lognormalizer) || throw(
+        ArgumentError("lognormalizer must be finite"),
+    )
+    workspace.candidate_lognormalizer[1] = candidate_lognormalizer
     return nothing
 end
 

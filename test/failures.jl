@@ -38,9 +38,15 @@ function (target::AMISFailingTarget{T})(sample)::T where {T}
 end
 
 struct AMISResultFailureTarget{T} end
+struct AMISZeroTarget{T} end
+
+function (::AMISZeroTarget{T})(sample)::T where {T}
+    return zero(T)
+end
 
 function (::AMISResultFailureTarget{T})(sample)::T where {T}
-    return -abs2(T(sample)) / T(2)
+    radius = sample isa Number ? abs2(T(sample)) : sum(abs2, sample)
+    return -radius / T(2)
 end
 
 @eval ImportanceSamplers function _build_amis_result(
@@ -687,6 +693,27 @@ end
         2,
     )
 
+    for F in (Float32, Float64)
+        huge_factor = F(2) * sqrt(floatmax(F))
+        overflow_sampler = prepare_sampler(
+            AMISFailureRNG([F[-1, 0, 1]]),
+            AMISZeroTarget{F}(),
+            AMIS(
+                FactorGaussian(F[0], reshape(F[huge_factor], 1, 1));
+                rounds=1,
+                round_size=3,
+            );
+            threaded=false,
+        )
+        assert_amis_transaction_failure(
+            overflow_sampler,
+            :fit_proposal,
+            ArgumentError,
+            1,
+            2,
+        )
+    end
+
     result_sampler = prepare_sampler(
         AMISFailureRNG(deepcopy(batches)),
         AMISResultFailureTarget{T}(),
@@ -701,4 +728,53 @@ end
         3,
     )
     @test result_failure.diagnostics.completed_rounds == 2
+end
+
+@testset "CPU factor AMIS stages, carries over, and rolls back" begin
+    for T in (Float32, Float64)
+        batches = [
+            T[-1, 1],
+            T[-0.5, 0.5],
+            T[0.25, -0.75],
+            T[0.5, -0.25],
+        ]
+        proposal = FactorGaussian(T[0.5], reshape(T[1.25], 1, 1))
+        algorithm = AMIS(proposal; rounds=2, round_size=[2, 2])
+        sampler = prepare_sampler(
+            AMISFailureRNG(deepcopy(batches)),
+            AMISZeroTarget{T}(),
+            algorithm;
+            threaded=false,
+        )
+
+        first = importance_sample!(sampler)
+        history = sampler.method_state.history
+        staged_mean = history.means[1, 2]
+        staged_factor = history.factors[1, 1, 2]
+        @test first.samples[1, 3] ≈
+              staged_mean + staged_factor * batches[2][1] rtol = 8eps(T)
+        @test history.lognormalizers[2] ≈
+              -log(T(2pi)) / T(2) - log(staged_factor) rtol = 8eps(T)
+
+        committed_mean = history.means[1, 1]
+        committed_factor = history.factors[1, 1, 1]
+        second = importance_sample!(sampler)
+        @test second.samples[1, 1] ≈
+              committed_mean + committed_factor * batches[3][1] rtol = 8eps(T)
+
+        rollback_sampler = prepare_sampler(
+            AMISFailureRNG(deepcopy(batches[1:2])),
+            AMISResultFailureTarget{T}(),
+            algorithm;
+            threaded=false,
+        )
+        rollback_failure = assert_amis_transaction_failure(
+            rollback_sampler,
+            :result_construction,
+            ErrorException,
+            2,
+            3,
+        )
+        @test rollback_failure.diagnostics.completed_rounds == 2
+    end
 end
