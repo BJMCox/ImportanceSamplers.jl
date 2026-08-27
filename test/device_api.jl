@@ -1018,6 +1018,88 @@ end
           rand(expected_serial_rng, UInt64)
 end
 
+@testset "AMIS accelerator transfer and factorization preflight" begin
+    device = KernelArgumentTestAccelerator()
+    source = prepare_sampler(
+        Random.Xoshiro(0x2226),
+        static_mis_device_target,
+        (shift=[0.25],),
+        AMIS(
+            FactorGaussian([0.0, 0.0], [1.0 0.0; 0.25 0.75]);
+            rounds=3,
+            round_size=[4, 5, 6],
+        );
+        threaded=true,
+    )
+    expected_rng = copy(getfield(source, :rng))
+
+    transferred = IS._with_backend_device(device) do
+        algorithm = IS._copy_accelerator_algorithm(
+            device,
+            source.algorithm,
+            source.method_state,
+        )
+        state = IS._prepare_transferred_method_state(
+            device,
+            algorithm,
+            source.method_state,
+        )
+        buffers = IS._allocate_random_buffers(
+            device,
+            IS._algorithm_proposal(algorithm),
+            state,
+            IS._algorithm_sample_budget(algorithm),
+        )
+        (algorithm=algorithm, state=state, buffers=buffers)
+    end
+
+    history = transferred.state.history
+    workspace = transferred.state.workspace
+    @test all(
+        array -> array isa KernelArgumentTestArray,
+        (
+            transferred.state.logcounts,
+            history.means,
+            history.factors,
+            history.lognormalizers,
+            workspace.samples,
+            workspace.logtargets,
+            workspace.lognumerators,
+            workspace.logweights,
+            workspace.round_ids,
+            workspace.normalized_weights,
+            workspace.centered_scaled,
+            workspace.covariance,
+            transferred.buffers.uniform,
+            transferred.buffers.normal,
+            transferred.buffers.failure_scratch.record.storage,
+        ),
+    )
+    transferred_backend = IS._transferred_backend_state(
+        transferred.algorithm,
+        transferred.state,
+        source.target,
+        transferred.buffers,
+    )
+    prepared_backend = IS._prepared_backend_state(source, source.method_state)
+    @test transferred_backend == (
+        transferred.state,
+        source.target,
+        transferred.buffers,
+    )
+    @test prepared_backend == (
+        source.method_state,
+        source.target,
+        source.random_buffers,
+        source.rng,
+    )
+
+    error = caught_device_error(() -> device(source))
+    @test error isa SamplerDeviceError
+    @test error.reason === :accelerator_factorization_unavailable
+    @test rand(getfield(source, :rng), UInt64) == rand(expected_rng, UInt64)
+end
+
 @testset "backend hooks own device scope and validate residency" begin
     algorithm = ImportanceSampling(SphericalGaussian(0.0, 1.0); nsamples=16)
     make_hook_sampler(seed) = prepare_sampler(

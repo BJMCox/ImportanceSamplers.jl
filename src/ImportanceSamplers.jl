@@ -16,6 +16,7 @@ export AbstractImportanceSampler,
     AbstractProposalPopulation,
     AbstractRadialProposalFamily,
     AbstractSampleTransform,
+    AMIS,
     AllZeroWeightsError,
     DiagonalGaussian,
     DeterministicMixturePMC,
@@ -60,6 +61,7 @@ include("storage.jl")
 include("execution.jl")
 include("methods/static_mis.jl")
 include("methods/dm_pmc.jl")
+include("methods/amis.jl")
 include("native_execution.jl")
 include("mis_execution.jl")
 include("static_mis_execution.jl")
