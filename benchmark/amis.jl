@@ -177,6 +177,14 @@ function one_evaluation(sampler, device_kind)
     )
 end
 
+function device_execution_allocated_bytes(sampler, device_kind)
+    device_kind === :cpu && return missing
+    CUDA.synchronize()
+    bytes = CUDA.@allocated synchronized_run!(sampler, :cuda)
+    CUDA.synchronize()
+    return bytes
+end
+
 function host_logweights(result, device_kind)
     device_kind === :cpu && return copy(result.logweights), (count=0, bytes=0)
     values = Array(result.logweights)
@@ -280,23 +288,51 @@ function summarize_records(records)
     return NamedTuple{fields}(summaries)
 end
 
+function summarize_device_execution_allocations(records, device_kind)
+    values = map(record -> record.device_execution_allocated_bytes, records)
+    if device_kind === :cpu
+        all(ismissing, values) || error(
+            "CPU AMIS records must not report CUDA execution allocations",
+        )
+        return missing
+    end
+    all(value -> value isa Integer && value >= 0, values) || error(
+        "CUDA AMIS records require nonnegative execution-allocation bytes",
+    )
+    return scalar_summary(values)
+end
+
 function benchmark_amis_row(device_kind, cell)
-    warmup = amis_prepare(
+    compile_warmup = amis_prepare(
         device_kind, cell.scalar_type, cell.geometry, cell.dimension,
         cell.schedule, AMIS_BENCHMARK_SEED,
     )
-    synchronized_run!(warmup, device_kind)
+    synchronized_run!(compile_warmup, device_kind)
     seeds = ntuple(
         replicate -> AMIS_BENCHMARK_SEED + UInt(replicate),
         AMIS_BENCHMARK_REPLICATES,
     )
-    records = map(seeds) do seed
+    timed_records = map(seeds) do seed
         sampler = amis_prepare(
             device_kind, cell.scalar_type, cell.geometry, cell.dimension,
             cell.schedule, seed,
         )
         benchmark_record(sampler, device_kind, cell.schedule, seed)
     end
+    device_allocations = map(seeds) do seed
+        sampler = device_kind === :cuda ? amis_prepare(
+            device_kind, cell.scalar_type, cell.geometry, cell.dimension,
+            cell.schedule, seed,
+        ) : nothing
+        device_execution_allocated_bytes(sampler, device_kind)
+    end
+    records = map(timed_records, device_allocations) do record, bytes
+        merge(record, (; device_execution_allocated_bytes=bytes))
+    end
+    device_allocation_summary = summarize_device_execution_allocations(
+        records,
+        device_kind,
+    )
     executions = unique(record.execution for record in records)
     length(executions) == 1 || error("AMIS benchmark execution modes differ")
     return (;
@@ -309,10 +345,14 @@ function benchmark_amis_row(device_kind, cell)
         rounds=length(cell.schedule),
         schedule=Tuple(cell.schedule),
         total_samples=sum(cell.schedule),
+        compile_warmup_samplers=1,
         prepared_samplers=AMIS_BENCHMARK_REPLICATES,
+        device_allocation_samplers=device_kind === :cuda ?
+                                   AMIS_BENCHMARK_REPLICATES : 0,
         replicate_seeds=seeds,
         records,
         summary=summarize_records(records),
+        device_execution_allocated_bytes=device_allocation_summary,
     )
 end
 
@@ -533,9 +573,14 @@ function compare_guard_runs(
                            base_guard.samples_per_second.median
         repeatable_regression = slow_replicates >= 4 &&
                                 throughput_ratio < 1 - threshold
-        new_host_allocation =
-            candidate_guard.host_allocations.maximum >
-            base_guard.host_allocations.maximum ||
+        paired_host_allocation_count_growth = any(
+            candidate_record.host_allocations > base_record.host_allocations for
+            (base_record, candidate_record) in zip(
+                base_guard.records,
+                candidate_guard.records,
+            )
+        )
+        higher_host_byte_high_water_footprint =
             candidate_guard.host_allocated_bytes.maximum >
             base_guard.host_allocated_bytes.maximum
         ismissing(base_guard.device_allocated_bytes) ==
@@ -547,8 +592,11 @@ function compare_guard_runs(
         repeatable_regression && error(
             "$(candidate_guard.method) $(candidate_guard.device) throughput regressed repeatably by more than $(100threshold)%",
         )
-        new_host_allocation && error(
-            "$(candidate_guard.method) $(candidate_guard.device) introduced a host execution allocation",
+        paired_host_allocation_count_growth && error(
+            "$(candidate_guard.method) $(candidate_guard.device) increased a paired host execution allocation count",
+        )
+        higher_host_byte_high_water_footprint && error(
+            "$(candidate_guard.method) $(candidate_guard.device) raised the worst-of-five host byte footprint",
         )
         new_device_allocation && error(
             "$(candidate_guard.method) $(candidate_guard.device) introduced a CUDA device allocation",
@@ -559,7 +607,8 @@ function compare_guard_runs(
             throughput_ratio,
             slow_replicates,
             repeatable_regression,
-            new_host_allocation,
+            paired_host_allocation_count_growth,
+            higher_host_byte_high_water_footprint,
             new_device_allocation,
         )
     end

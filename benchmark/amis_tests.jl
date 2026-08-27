@@ -30,21 +30,38 @@ end
         (record for row in benchmark_run.rows for record in row.records),
     )
     @test all(
+        record -> ismissing(record.device_execution_allocated_bytes),
+        (record for row in benchmark_run.rows for record in row.records),
+    )
+    @test all(
+        row -> ismissing(row.device_execution_allocated_bytes) &&
+               row.device_allocation_samplers == 0,
+        benchmark_run.rows,
+    )
+    @test all(
         guard -> ismissing(guard.device_allocated_bytes),
         benchmark_run.guards,
     )
 end
 
-function guard_fixture(commit; hostname="benchmark-host", host_allocations=7,
-                       host_allocated_bytes=96, device_allocated_bytes=missing,
-                       device=:cpu)
+function guard_fixture(
+    commit;
+    hostname="benchmark-host",
+    host_allocations=ntuple(_ -> 7, 5),
+    host_allocated_bytes=ntuple(_ -> 96, 5),
+    device_allocated_bytes=missing,
+    device=:cpu,
+)
+    length(host_allocations) == length(host_allocated_bytes) == 5 || error(
+        "guard fixtures require five host-allocation records",
+    )
     records = ntuple(5) do replicate
         (;
             seed=0x10 + UInt(replicate),
             seconds=1.0,
             samples_per_second=100.0,
-            host_allocations,
-            host_allocated_bytes,
+            host_allocations=host_allocations[replicate],
+            host_allocated_bytes=host_allocated_bytes[replicate],
             benchmarktools_evaluations=1,
         )
     end
@@ -58,16 +75,8 @@ function guard_fixture(commit; hostname="benchmark-host", host_allocations=7,
         replicate_seeds=Tuple(record.seed for record in records),
         records,
         samples_per_second=(minimum=100.0, median=100.0, maximum=100.0),
-        host_allocations=(
-            minimum=host_allocations,
-            median=host_allocations,
-            maximum=host_allocations,
-        ),
-        host_allocated_bytes=(
-            minimum=host_allocated_bytes,
-            median=host_allocated_bytes,
-            maximum=host_allocated_bytes,
-        ),
+        host_allocations=scalar_summary(host_allocations),
+        host_allocated_bytes=scalar_summary(host_allocated_bytes),
     )
     environment = (;
         commit,
@@ -116,7 +125,8 @@ compare_fixture(base, candidate) = compare_guard_runs(
     candidate = guard_fixture(candidate_commit)
     comparison = compare_fixture(base, candidate)
     @test only(comparison).throughput_ratio == 1.0
-    @test !only(comparison).new_host_allocation
+    @test !only(comparison).paired_host_allocation_count_growth
+    @test !only(comparison).higher_host_byte_high_water_footprint
 
     wrong_host = merge(
         candidate,
@@ -126,10 +136,46 @@ compare_fixture(base, candidate) = compare_guard_runs(
 
     host_growth = guard_fixture(
         candidate_commit;
-        host_allocations=8,
-        host_allocated_bytes=112,
+        host_allocations=ntuple(_ -> 8, 5),
+        host_allocated_bytes=ntuple(_ -> 112, 5),
     )
     @test_throws ErrorException compare_fixture(base, host_growth)
+
+    paired_count_growth = guard_fixture(
+        candidate_commit;
+        host_allocations=(9, 8, 8, 8, 8),
+    )
+    varied_count_base = guard_fixture(
+        base_commit;
+        host_allocations=(10, 7, 7, 7, 7),
+    )
+    @test_throws ErrorException compare_fixture(
+        varied_count_base,
+        paired_count_growth,
+    )
+
+    byte_noise_base = guard_fixture(
+        base_commit;
+        host_allocations=(10, 7, 7, 7, 7),
+        host_allocated_bytes=(112, 96, 96, 96, 96),
+    )
+    byte_noise_candidate = guard_fixture(
+        candidate_commit;
+        host_allocations=(10, 7, 7, 7, 7),
+        host_allocated_bytes=(96, 112, 112, 96, 96),
+    )
+    byte_noise_comparison = only(compare_fixture(
+        byte_noise_base,
+        byte_noise_candidate,
+    ))
+    @test !byte_noise_comparison.paired_host_allocation_count_growth
+    @test !byte_noise_comparison.higher_host_byte_high_water_footprint
+
+    byte_high_water_growth = guard_fixture(
+        candidate_commit;
+        host_allocated_bytes=(96, 113, 96, 96, 96),
+    )
+    @test_throws ErrorException compare_fixture(base, byte_high_water_growth)
 
     cuda_base = guard_fixture(base_commit; device=:cuda, device_allocated_bytes=32)
     cuda_growth = guard_fixture(
@@ -138,4 +184,24 @@ compare_fixture(base, candidate) = compare_guard_runs(
         device_allocated_bytes=64,
     )
     @test_throws ErrorException compare_fixture(cuda_base, cuda_growth)
+end
+
+@testset "AMIS device execution allocation contract" begin
+    cpu_records = ((; device_execution_allocated_bytes=missing),)
+    @test summarize_device_execution_allocations(cpu_records, :cpu) === missing
+    @test_throws ErrorException summarize_device_execution_allocations(
+        ((; device_execution_allocated_bytes=32),),
+        :cpu,
+    )
+
+    cuda_records = (
+        (; device_execution_allocated_bytes=32),
+        (; device_execution_allocated_bytes=48),
+    )
+    @test summarize_device_execution_allocations(cuda_records, :cuda) ==
+          (minimum=32, median=32, maximum=48)
+    @test_throws ErrorException summarize_device_execution_allocations(
+        ((; device_execution_allocated_bytes=missing),),
+        :cuda,
+    )
 end
