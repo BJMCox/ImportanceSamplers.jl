@@ -533,14 +533,11 @@ function compare_guard_runs(
                            base_guard.samples_per_second.median
         repeatable_regression = slow_replicates >= 4 &&
                                 throughput_ratio < 1 - threshold
-        new_host_allocation = any(
-            candidate_record.host_allocations > base_record.host_allocations ||
-            candidate_record.host_allocated_bytes > base_record.host_allocated_bytes for
-            (base_record, candidate_record) in zip(
-                base_guard.records,
-                candidate_guard.records,
-            )
-        )
+        new_host_allocation =
+            candidate_guard.host_allocations.maximum >
+            base_guard.host_allocations.maximum ||
+            candidate_guard.host_allocated_bytes.maximum >
+            base_guard.host_allocated_bytes.maximum
         ismissing(base_guard.device_allocated_bytes) ==
             ismissing(candidate_guard.device_allocated_bytes) ||
             error("CUDA allocation records differ in availability")

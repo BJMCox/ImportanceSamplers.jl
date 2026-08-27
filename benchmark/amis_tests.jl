@@ -58,8 +58,16 @@ function guard_fixture(commit; hostname="benchmark-host", host_allocations=7,
         replicate_seeds=Tuple(record.seed for record in records),
         records,
         samples_per_second=(minimum=100.0, median=100.0, maximum=100.0),
-        host_allocations=(minimum=7, median=7, maximum=7),
-        host_allocated_bytes=(minimum=96, median=96, maximum=96),
+        host_allocations=(
+            minimum=host_allocations,
+            median=host_allocations,
+            maximum=host_allocations,
+        ),
+        host_allocated_bytes=(
+            minimum=host_allocated_bytes,
+            median=host_allocated_bytes,
+            maximum=host_allocated_bytes,
+        ),
     )
     environment = (;
         commit,
