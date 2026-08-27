@@ -10,6 +10,16 @@ end
 
 const _AMIS_COVARIANCE_INVALID = UInt16(0x2000)
 
+struct _AMISStageError{E} <: Exception
+    phase::Symbol
+    cause::E
+end
+
+@noinline function _throw_amis_stage(phase, cause)
+    cause isa _AMISStageError && throw(cause)
+    throw(_AMISStageError(phase, cause))
+end
+
 Adapt.@adapt_structure _AMISScalarHistory
 Adapt.@adapt_structure _AMISFactorHistory
 Adapt.@adapt_structure _AMISMixtureDenominator
@@ -237,7 +247,10 @@ function _launch_prefilled_amis_round!(
     first_sample = offsets[round]
     last_sample = offsets[round + 1] - 1
     old_sample_count = first_sample - 1
+    phase = :sampling
+    try
     if !iszero(old_sample_count)
+        phase = :denominator
         old_indices = 1:old_sample_count
         _launch_append_logmixture!(
             view(lognumerators, old_indices),
@@ -251,6 +264,7 @@ function _launch_prefilled_amis_round!(
         )
     end
 
+    phase = :sampling
     new_indices = first_sample:last_sample
     logtotal = log(eltype(logcounts)(last_sample))
     output = _AMISRoundOutput(
@@ -274,6 +288,7 @@ function _launch_prefilled_amis_round!(
         execution,
     )
 
+    phase = :weight
     current_indices = 1:last_sample
     _launch_form_amis_logweights!(
         view(logweights, current_indices),
@@ -283,6 +298,9 @@ function _launch_prefilled_amis_round!(
         failure_storage,
         execution,
     )
+    catch cause
+        _throw_amis_stage(phase, cause)
+    end
     return nothing
 end
 
@@ -479,6 +497,8 @@ function _fit_amis_proposal!(
     samples = workspace.samples
     weights = workspace.normalized_weights
     centered_scaled = workspace.centered_scaled
+    phase = :moment
+    try
     _normalize_amis_weights!(weights, workspace.logweights, sample_count)
 
     T = eltype(samples)
@@ -495,10 +515,15 @@ function _fit_amis_proposal!(
     previous_variance = abs2(@inbounds(history.scales[previous_slot]))
     variance += sqrt(eps(T)) * previous_variance
     workspace.covariance[1] = variance
+
+    phase = :factorization
     isfinite(variance) && variance > zero(T) || throw(
         LinearAlgebra.PosDefException(1),
     )
     return SphericalGaussian(mean, sqrt(variance))
+    catch cause
+        _throw_amis_stage(phase, cause)
+    end
 end
 
 function _fit_amis_proposal!(
@@ -513,10 +538,12 @@ function _fit_amis_proposal!(
     covariance = workspace.covariance
     candidate_mean = workspace.candidate_mean
     candidate_factor = workspace.candidate_scale
-    _normalize_amis_weights!(weights, workspace.logweights, sample_count)
-
     T = eltype(samples)
     dimension = size(samples, 1)
+    phase = :moment
+    try
+    _normalize_amis_weights!(weights, workspace.logweights, sample_count)
+
     fill!(candidate_mean, zero(T))
     @inbounds for sample_index in 1:sample_count
         weight = weights[sample_index]
@@ -545,6 +572,7 @@ function _fit_amis_proposal!(
         covariance[coordinate, coordinate] += ridge
     end
 
+    phase = :factorization
     copyto!(candidate_factor, covariance)
     _amis_potrf!(MLDataDevices.CPUDevice(), candidate_factor)
     @inbounds for column in 1:dimension, row in 1:(column - 1)
@@ -569,6 +597,9 @@ function _fit_amis_proposal!(
     )
     workspace.candidate_lognormalizer[1] = candidate_lognormalizer
     return nothing
+    catch cause
+        _throw_amis_stage(phase, cause)
+    end
 end
 
 function _amis_potrf!(
@@ -674,6 +705,9 @@ function _fit_amis_proposal!(
         :,
         1:sample_count,
     )
+    backend = KernelAbstractions.get_backend(workspace.covariance)
+    phase = :moment
+    try
     _normalize_amis_weights!(
         workspace.normalized_weights,
         workspace.logweights,
@@ -686,7 +720,6 @@ function _fit_amis_proposal!(
     covariance = reshape(workspace.covariance, 1, 1)
     LinearAlgebra.mul!(covariance, centered, transpose(centered))
 
-    backend = KernelAbstractions.get_backend(workspace.covariance)
     ridge_kernel = _add_amis_scalar_ridge_kernel!(backend)
     ridge_kernel(
         workspace.covariance,
@@ -694,6 +727,9 @@ function _fit_amis_proposal!(
         previous_slot;
         ndrange=1,
     )
+    KernelAbstractions.synchronize(backend)
+
+    phase = :factorization
     finish_kernel = _finish_amis_scalar_candidate_kernel!(backend)
     finish_kernel(
         workspace.candidate_scale,
@@ -705,6 +741,9 @@ function _fit_amis_proposal!(
     )
     KernelAbstractions.synchronize(backend)
     return nothing
+    catch cause
+        _throw_amis_stage(phase, cause)
+    end
 end
 
 function _fit_amis_proposal!(
@@ -719,6 +758,9 @@ function _fit_amis_proposal!(
     samples = view(workspace.samples, :, 1:sample_count)
     weights = view(workspace.normalized_weights, 1:sample_count)
     centered = view(workspace.centered_scaled, :, 1:sample_count)
+    backend = KernelAbstractions.get_backend(workspace.covariance)
+    phase = :moment
+    try
     _normalize_amis_weights!(
         workspace.normalized_weights,
         workspace.logweights,
@@ -730,7 +772,6 @@ function _fit_amis_proposal!(
                 sqrt.(reshape(weights, 1, :))
     LinearAlgebra.mul!(workspace.covariance, centered, transpose(centered))
 
-    backend = KernelAbstractions.get_backend(workspace.covariance)
     ridge_kernel = _add_amis_factor_ridge_kernel!(backend)
     ridge_kernel(
         workspace.covariance,
@@ -739,6 +780,8 @@ function _fit_amis_proposal!(
         ndrange=1,
     )
     KernelAbstractions.synchronize(backend)
+
+    phase = :factorization
     copyto!(workspace.candidate_scale, workspace.covariance)
     _amis_potrf!(device, workspace.candidate_scale)
     finish_kernel = _finish_amis_factor_candidate_kernel!(backend)
@@ -752,6 +795,9 @@ function _fit_amis_proposal!(
     )
     KernelAbstractions.synchronize(backend)
     return nothing
+    catch cause
+        _throw_amis_stage(phase, cause)
+    end
 end
 
 function _store_amis_candidate!(
@@ -838,6 +884,10 @@ function _amis_round_phase(cause::SamplerExecutionError, default)
     return default
 end
 
+_amis_round_phase(cause::_AMISStageError, default) = cause.phase
+_amis_round_cause(cause) = cause
+_amis_round_cause(cause::_AMISStageError) = cause.cause
+
 function _amis_round_phase(cause, default)
     cause isa AllZeroWeightsError && default === :factorization && return :moment
     return default
@@ -888,7 +938,7 @@ function _capture_amis_round(
             AMISRoundError(
                 round,
                 failure_phase,
-                cause,
+                _amis_round_cause(cause),
                 (
                     round_size=round_size,
                     completed_rounds=completed_rounds,
@@ -977,7 +1027,6 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
 
     final_proposal = nothing
     for round in eachindex(schedule)
-        round_size = schedule[round]
         deferred_accelerator_snapshot = accelerator
         _capture_amis_round(method_state, transfers, round, :sampling, round - 1) do
             Random.randn!(sampler.rng, buffers.normal)
@@ -1074,7 +1123,13 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
                     throw(LinearAlgebra.PosDefException(1))
             end
         end
-        _capture_amis_round(method_state, transfers, round, :moment, round - 1) do
+        _capture_amis_round(
+            method_state,
+            transfers,
+            round,
+            :result_construction,
+            round - 1,
+        ) do
             summary = _logweight_summary(
                 view(
                     workspace.logweights,

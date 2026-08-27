@@ -40,6 +40,9 @@ end
 struct AMISKernelTarget{T} end
 struct AMISKernelVectorTarget{T} end
 struct AMISProposalTarget{T} end
+struct AMISKernelStageFailureExecution
+    phase::Symbol
+end
 
 function (::AMISKernelTarget{T})(sample)::T where {T}
     value = sample isa Real ? sample : only(sample)
@@ -102,6 +105,83 @@ if isdefined(AMISKernelIS, :_launch_prefilled_amis_round!)
                 proposal_slot,
                 solve_scratch,
                 sample_index,
+            )
+        end
+
+        _native_workgroupsize(
+            execution::Main.AMISKernelStageFailureExecution,
+            nsamples,
+        ) = _native_workgroupsize(_SerialCPUExecution(), nsamples)
+
+        function _launch_append_logmixture!(
+            lognumerators,
+            samples,
+            history,
+            slot,
+            logcounts,
+            failure_storage,
+            solve_scratch,
+            execution::Main.AMISKernelStageFailureExecution,
+        )
+            execution.phase === :denominator &&
+                error("intentional AMIS denominator launch failure")
+            return _launch_append_logmixture!(
+                lognumerators,
+                samples,
+                history,
+                slot,
+                logcounts,
+                failure_storage,
+                solve_scratch,
+                _SerialCPUExecution(),
+            )
+        end
+
+        function _launch_mis_round!(
+            samples,
+            output::_AMISRoundOutput,
+            failure_storage,
+            normal_buffer,
+            target,
+            history,
+            assignments,
+            denominator,
+            solve_scratch,
+            execution::Main.AMISKernelStageFailureExecution,
+        )
+            execution.phase === :sampling &&
+                error("intentional AMIS sampling launch failure")
+            return _launch_mis_round!(
+                samples,
+                output,
+                failure_storage,
+                normal_buffer,
+                target,
+                history,
+                assignments,
+                denominator,
+                solve_scratch,
+                _SerialCPUExecution(),
+            )
+        end
+
+        function _launch_form_amis_logweights!(
+            logweights,
+            logtargets,
+            lognumerators,
+            logtotal,
+            failure_storage,
+            execution::Main.AMISKernelStageFailureExecution,
+        )
+            execution.phase === :weight &&
+                error("intentional AMIS weight launch failure")
+            return _launch_form_amis_logweights!(
+                logweights,
+                logtargets,
+                lognumerators,
+                logtotal,
+                failure_storage,
+                _SerialCPUExecution(),
             )
         end
     end
@@ -344,27 +424,120 @@ end
         @test AMISKernelIS._amis_round_phase(failure, :sampling) === case.phase
     end
 
-    combined = (
-        count=UInt64(1),
-        first_logical_index=2,
-        first_block=0,
-        reason_bits=AMISKernelIS._NATIVE_TARGET_NAN |
-                    AMISKernelIS._AMIS_COVARIANCE_INVALID,
+    storage = zeros(UInt64, 3)
+    AMISKernelIS._record_native_failure!(
+        storage,
+        2,
+        0,
+        AMISKernelIS._NATIVE_TARGET_NAN,
+    )
+    AMISKernelIS._record_native_failure!(
+        storage,
+        4,
+        0,
+        AMISKernelIS._AMIS_COVARIANCE_INVALID,
+    )
+    packed = AMISKernelIS._device_failure_snapshot(
+        AMISKernelIS._DeviceFailureRecord(storage),
     )
     combined_failure = try
-        AMISKernelIS._throw_native_failures(
-            combined,
-            empty,
-            AMISKernelIS._NoNativeTargetFailures(),
-            AMISKernelIS._NoSampleTransform(),
-        )
+        AMISKernelIS._capture_amis_round(
+            1,
+            :sampling,
+            3,
+            0,
+            0,
+            nothing,
+            AMISKernelIS._ResultTransferCounter(0, 0),
+        ) do
+            packed.failure.reason_bits == AMISKernelIS._AMIS_COVARIANCE_INVALID ||
+                AMISKernelIS._throw_native_failures(
+                    packed.failure,
+                    packed.draw_failure,
+                    AMISKernelIS._NoNativeTargetFailures(),
+                    AMISKernelIS._NoSampleTransform(),
+                )
+        end
         nothing
     catch cause
         cause
     end
-    @test combined_failure isa SamplerExecutionError
+    @test packed.failure.count == 2
+    @test packed.failure.first_logical_index == 2
+    @test packed.failure.reason_bits == AMISKernelIS._NATIVE_TARGET_NAN
+    @test iszero(storage[3])
+    @test combined_failure isa AMISRoundError
     @test combined_failure.phase === :target
-    @test AMISKernelIS._amis_round_phase(combined_failure, :factorization) === :target
+    @test combined_failure.cause isa SamplerExecutionError
+    @test combined_failure.cause.sample_index == 2
+end
+
+@testset "AMIS launch exceptions retain their actual stage" begin
+    for phase in (:sampling, :denominator, :weight)
+        state = configure_amis_kernel_state(Float64, Val(false))
+        workspace = state.workspace
+        round_ids = zeros(Int, 5)
+        failure_storage = zeros(UInt64, 3)
+        target = AMISKernelIS._NativeDeviceTarget{Float64,AMISKernelTarget{Float64}}(
+            AMISKernelTarget{Float64}(),
+        )
+        round = phase === :denominator ? 2 : 1
+        if round == 2
+            AMISKernelIS._launch_prefilled_amis_round!(
+                workspace.samples,
+                workspace.logtargets,
+                workspace.lognumerators,
+                workspace.logweights,
+                round_ids,
+                failure_storage,
+                Float64[-0.5, 0.75],
+                target,
+                state.history,
+                state.logcounts,
+                state.offsets,
+                1,
+                workspace.centered_scaled,
+                AMISKernelIS._SerialCPUExecution(),
+            )
+        end
+        normals = round == 1 ? Float64[-0.5, 0.75] : Float64[-1, 0.25, 1]
+        failure = try
+            AMISKernelIS._capture_amis_round(
+                round,
+                :sampling,
+                state.schedule[round],
+                round - 1,
+                state.offsets[round] - 1,
+                nothing,
+                AMISKernelIS._ResultTransferCounter(0, 0),
+            ) do
+                AMISKernelIS._launch_prefilled_amis_round!(
+                    workspace.samples,
+                    workspace.logtargets,
+                    workspace.lognumerators,
+                    workspace.logweights,
+                    round_ids,
+                    failure_storage,
+                    normals,
+                    target,
+                    state.history,
+                    state.logcounts,
+                    state.offsets,
+                    round,
+                    workspace.centered_scaled,
+                    AMISKernelStageFailureExecution(phase),
+                )
+            end
+            nothing
+        catch cause
+            cause
+        end
+
+        @test failure isa AMISRoundError
+        @test failure.phase === phase
+        @test failure.cause isa ErrorException
+        @test occursin("$(phase) launch failure", failure.cause.msg)
+    end
 end
 
 @testset "AMIS factor candidate failure stays in device storage" begin

@@ -14,6 +14,7 @@ const AMIS_CUDA_HARDWARE = "NVIDIA A100-PCIE-40GB"
 
 struct AMISQuadraticTarget{T} end
 struct AMISZeroTarget{T} end
+struct AMISZeroSampleFailureTarget{T} end
 
 mutable struct AMISPrefilledDeviceRNG{B} <: Random.AbstractRNG
     batches::B
@@ -22,6 +23,11 @@ end
 
 function (::AMISZeroTarget{T})(sample)::T where {T}
     return zero(T)
+end
+
+function (::AMISZeroSampleFailureTarget{T})(sample)::T where {T}
+    value = sample isa Real ? sample : sample[1]
+    return iszero(value) ? T(NaN) : zero(T)
 end
 
 function Random.randn!(rng::AMISPrefilledDeviceRNG, destination::CUDA.AnyCuArray)
@@ -99,6 +105,24 @@ function assert_amis_factorization_failure_transfers(failure, ::Type{T}) where {
     @test record.reasons.summary_scaled_sum == (count=1, bytes=sizeof(T))
     @test record.reasons.covariance_diagnostic == (count=2, bytes=2sizeof(T))
     for reason in (:cdf_maximum, :cdf_sum, :summary_scaled_square_sum)
+        @test getfield(record.reasons, reason) == (count=0, bytes=0)
+    end
+    return record
+end
+
+function assert_amis_sample_fit_failure_transfers(failure, ::Type{T}) where {T}
+    record = reported_transfer_record(failure.diagnostics.transfers)
+    @test record.count == 3
+    @test record.bytes == 3sizeof(UInt64) + 2sizeof(T)
+    @test record.reasons.failure_snapshot == (count=1, bytes=3sizeof(UInt64))
+    @test record.reasons.summary_maximum == (count=1, bytes=sizeof(T))
+    @test record.reasons.summary_scaled_sum == (count=1, bytes=sizeof(T))
+    for reason in (
+        :cdf_maximum,
+        :cdf_sum,
+        :summary_scaled_square_sum,
+        :covariance_diagnostic,
+    )
         @test getfield(record.reasons, reason) == (count=0, bytes=0)
     end
     return record
@@ -636,6 +660,7 @@ function factor_overflow_transaction_case(device, ::Type{T}) where {T}
     @test !running_after_failure
     @test iszero(failure_storage[3])
     @test failure_snapshot.count == 1
+    @test failure_snapshot.first_logical_index == round_size + 1
     @test failure_snapshot.reason_bits == IS._AMIS_COVARIANCE_INVALID
     @test prepared.method_state.workspace.samples isa CUDA.AnyCuArray
     @test prepared.method_state.workspace.covariance isa CUDA.AnyCuArray
@@ -681,7 +706,105 @@ function factor_overflow_transaction_case(device, ::Type{T}) where {T}
         caller_device_restored=true,
         sample_and_covariance_resident=true,
         failure_snapshot=(count=1, bytes=3sizeof(UInt64)),
+        failure_index=failure_snapshot.first_logical_index,
         covariance_diagnostics=failure.diagnostics.covariance,
+        failure_transfers,
+        recovery_transfers,
+        successful_reuse=true,
+    )
+end
+
+function combined_sample_fit_failure_case(device, ::Type{T}) where {T}
+    round_size = 3
+    scale = sqrt(floatmax(T)) / T(4)
+    caller = CUDA.device()
+    proposal = FactorGaussian(T[0], reshape(T[scale], 1, 1))
+    source = prepare_sampler(
+        Random.Xoshiro(AMIS_CUDA_SEED + UInt64(0x400) + UInt64(sizeof(T))),
+        AMISZeroSampleFailureTarget{T}(),
+        AMIS(proposal; rounds=1, round_size);
+        threaded=true,
+    )
+    base = device(source)
+    batches = IS._with_backend_device(device) do
+        CUDA.CuArray(T[-8 -0.25; 0 0.25; 8 0.5])
+    end
+    rng = AMISPrefilledDeviceRNG(batches, 1)
+    prepared = IS._PreparedImportanceSampler(
+        rng,
+        base.random_buffers,
+        base.target,
+        base.algorithm,
+        base.method_state,
+        base.device,
+        base.threaded,
+        false,
+        false,
+    )
+    before_bits = proposal_bits(
+        current_proposal(MLDataDevices.cpu_device(), prepared),
+    )
+
+    failure = try
+        importance_sample!(prepared)
+        nothing
+    catch cause
+        cause
+    end
+    failure_storage = Array(
+        prepared.random_buffers.failure_scratch.record.storage,
+    )
+    failure_snapshot = IS._decode_native_failure(
+        failure_storage[1],
+        failure_storage[2],
+    )
+    after_bits = proposal_bits(
+        current_proposal(MLDataDevices.cpu_device(), prepared),
+    )
+
+    @test failure isa AMISRoundError
+    @test failure.round == 1
+    @test failure.phase === :target
+    @test failure.cause isa SamplerExecutionError
+    @test failure.cause.phase === :target
+    @test failure.cause.sample_index == 2
+    @test isnothing(failure.diagnostics.covariance)
+    failure_transfers = assert_amis_sample_fit_failure_transfers(failure, T)
+    @test failure_snapshot.count == 2
+    @test failure_snapshot.first_logical_index == 2
+    @test failure_snapshot.reason_bits == IS._NATIVE_TARGET_NAN
+    @test iszero(failure_storage[3])
+    @test after_bits == before_bits
+    @test rng.index == 2
+    @test !prepared.running
+    @test prepared.method_state.workspace.samples isa CUDA.AnyCuArray
+    @test prepared.method_state.workspace.covariance isa CUDA.AnyCuArray
+    @test CUDA.device() == caller
+
+    recovery = importance_sample!(prepared)
+    CUDA.synchronize()
+    @test recovery isa WeightedSamples
+    @test rng.index == 3
+    @test !prepared.running
+    @test CUDA.device() == caller
+    @test all(isfinite, Array(recovery.logweights))
+    recovery_transfers = assert_amis_transfers(
+        recovery.diagnostics.transfers,
+        1,
+        T,
+    )
+    return (
+        scalar_type=T,
+        sample_failure_index=2,
+        fit_failure_index=round_size + 1,
+        packed_failure_count=2,
+        selected_phase=:target,
+        selected_reason=:target_nan,
+        unchanged_committed_bits=true,
+        rng_advanced=true,
+        running_cleared=true,
+        caller_device_restored=true,
+        sample_and_covariance_resident=true,
         failure_transfers,
         recovery_transfers,
         successful_reuse=true,
@@ -738,6 +861,10 @@ function main()
         float32=factor_overflow_transaction_case(device, Float32),
         float64=factor_overflow_transaction_case(device, Float64),
     )
+    combined_sample_fit_failure = (
+        float32=combined_sample_fit_failure_case(device, Float32),
+        float64=combined_sample_fit_failure_case(device, Float64),
+    )
     @test CUDA.device() == caller_device
     return (
         environment=environment_record(),
@@ -751,6 +878,7 @@ function main()
         wrong_device,
         degenerate_scalar_covariance,
         factor_overflow,
+        combined_sample_fit_failure,
     )
 end
 

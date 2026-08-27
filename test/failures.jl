@@ -40,6 +40,24 @@ end
 struct AMISResultFailureTarget{T} end
 struct AMISZeroTarget{T} end
 
+struct AMISMomentFailureMatrix{T,A<:AbstractMatrix{T}} <: AbstractMatrix{T}
+    storage::A
+end
+
+Base.size(matrix::AMISMomentFailureMatrix) = size(matrix.storage)
+Base.IndexStyle(::Type{<:AMISMomentFailureMatrix}) = IndexCartesian()
+Base.getindex(matrix::AMISMomentFailureMatrix, i::Int, j::Int) = matrix.storage[i, j]
+Base.setindex!(matrix::AMISMomentFailureMatrix, value, i::Int, j::Int) =
+    setindex!(matrix.storage, value, i, j)
+
+function LinearAlgebra.mul!(
+    destination::AMISMomentFailureMatrix,
+    left,
+    right,
+)
+    error("intentional AMIS moment multiplication failure")
+end
+
 function (::AMISZeroTarget{T})(sample)::T where {T}
     return zero(T)
 end
@@ -727,6 +745,28 @@ end
     )
     @test target_failure.cause.captured.ex isa ErrorException
 
+    denominator_sampler = prepare_sampler(
+        AMISFailureRNG([
+            T[2sqrt(floatmax(T)), 0],
+            T[-1.0e50, 1.0e50],
+        ]),
+        AMISZeroTarget{T}(),
+        AMIS(SphericalGaussian(zero(T), T(1.0e-100)); rounds=1, round_size=2);
+        threaded=false,
+    )
+    denominator_failure = assert_amis_transaction_failure(
+        denominator_sampler,
+        :denominator,
+        SamplerExecutionError,
+        1,
+        2,
+    )
+    @test denominator_failure.cause.phase === :proposal_logdensity
+    @test denominator_failure.cause.sample_index == 1
+    @test denominator_failure.cause.captured.ex isa DomainError
+    @test importance_sample!(denominator_sampler) isa WeightedSamples
+    @test denominator_sampler.rng.index == 3
+
     sampling_sampler = prepare_sampler(
         AMISFailureRNG(deepcopy(batches[1:1])),
         AMISZeroTarget{T}(),
@@ -788,6 +828,53 @@ end
         1,
         2,
     )
+
+    moment_base = prepare_sampler(
+        AMISFailureRNG([T[-1, 0, 1, 0, -1, 1]]),
+        AMISZeroTarget{T}(),
+        AMIS(FactorGaussian(zeros(T, 2), T[1 0; 0 1]); rounds=1, round_size=3);
+        threaded=false,
+    )
+    old_workspace = moment_base.method_state.workspace
+    moment_workspace = ImportanceSamplers._AMISWorkspace(
+        old_workspace.samples,
+        old_workspace.logtargets,
+        old_workspace.lognumerators,
+        old_workspace.logweights,
+        old_workspace.normalized_weights,
+        old_workspace.centered_scaled,
+        AMISMomentFailureMatrix(old_workspace.covariance),
+        old_workspace.candidate_mean,
+        old_workspace.candidate_scale,
+        old_workspace.candidate_lognormalizer,
+    )
+    moment_state = ImportanceSamplers._PreparedAMIS(
+        moment_base.method_state.schedule,
+        moment_base.method_state.offsets,
+        moment_base.method_state.logcounts,
+        moment_base.method_state.history,
+        moment_workspace,
+    )
+    moment_sampler = ImportanceSamplers._PreparedImportanceSampler(
+        moment_base.rng,
+        moment_base.random_buffers,
+        moment_base.target,
+        moment_base.algorithm,
+        moment_state,
+        moment_base.device,
+        moment_base.threaded,
+        false,
+        false,
+    )
+    moment_failure = assert_amis_transaction_failure(
+        moment_sampler,
+        :moment,
+        ErrorException,
+        1,
+        2,
+    )
+    @test moment_failure.cause.msg ==
+          "intentional AMIS moment multiplication failure"
 
     for F in (Float32, Float64)
         huge_factor = F(2) * sqrt(floatmax(F))

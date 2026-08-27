@@ -166,12 +166,30 @@ mutable struct AMISExecutionTestRNG <: Random.AbstractRNG
     draws::Int
 end
 
+mutable struct AMISExecutionPrefilledRNG{T} <: Random.AbstractRNG
+    batches::Vector{Vector{T}}
+    index::Int
+end
+
 struct AMISZeroFloat32Target end
 (::AMISZeroFloat32Target)(sample)::Float32 = 0.0f0
+
+struct AMISZeroSampleFailureTarget{T} end
+
+function (::AMISZeroSampleFailureTarget{T})(sample)::T where {T}
+    value = sample isa Real ? sample : sample[1]
+    return iszero(value) ? T(NaN) : zero(T)
+end
 
 function Random.randn!(rng::AMISExecutionTestRNG, destination::AbstractArray)
     fill!(destination, zero(eltype(destination)))
     rng.draws += 1
+    return destination
+end
+
+function Random.randn!(rng::AMISExecutionPrefilledRNG, destination::AbstractArray)
+    copyto!(destination, rng.batches[rng.index])
+    rng.index += 1
     return destination
 end
 
@@ -209,6 +227,16 @@ end
     _backend_state_resident(::Main.AMISExecutionTestAccelerator, state) = true
     _owned_backend_rng(::Main.AMISExecutionTestAccelerator, seed::UInt64) =
         Main.AMISExecutionTestRNG(0)
+
+    function _amis_potrf!(
+        ::Main.AMISExecutionTestAccelerator,
+        factor::StridedMatrix{T},
+    ) where {T<:Union{Float32,Float64}}
+        all(isfinite, factor) || return factor
+        factorization = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(factor, :L))
+        copyto!(factor, factorization.L)
+        return factor
+    end
     _preflight_accelerator_method(
         ::Main.AMISExecutionTestAccelerator,
         target,
@@ -1426,6 +1454,75 @@ end
     end
     @test after == before
     @test AMIS_EXECUTION_TEST_CURRENT[] === :caller
+    @test !prepared.running
+end
+
+@testset "AMIS packed sample failure precedes the later fit sentinel" begin
+    T = Float64
+    round_size = 3
+    scale = sqrt(floatmax(T)) / T(4)
+    algorithm = AMIS(
+        FactorGaussian(T[0], reshape(T[scale], 1, 1));
+        rounds=1,
+        round_size,
+    )
+    device = AMISExecutionTestAccelerator()
+    base = device(prepare_sampler(
+        Random.Xoshiro(0x2230),
+        AMISZeroSampleFailureTarget{T}(),
+        algorithm;
+        threaded=true,
+    ))
+    base_buffers = base.random_buffers
+    failure_scratch = IS._NativeFailureScratch(
+        base_buffers.failure_scratch.record,
+        IS._NoNativeTargetFailures(),
+    )
+    buffers = IS._RandomBuffers(
+        base_buffers.uniform,
+        base_buffers.normal,
+        failure_scratch,
+    )
+    rng = AMISExecutionPrefilledRNG(
+        [T[-8, 0, 8], T[-0.25, 0.25, 0.5]],
+        1,
+    )
+    prepared = IS._PreparedImportanceSampler(
+        rng,
+        buffers,
+        base.target,
+        base.algorithm,
+        base.method_state,
+        base.device,
+        base.threaded,
+        false,
+        false,
+    )
+    before = current_proposal(MLDataDevices.cpu_device(), prepared)
+
+    failure = caught_device_error(() -> importance_sample!(prepared))
+    snapshot = IS._decode_native_failure(
+        prepared.random_buffers.failure_scratch.record.storage[1],
+        prepared.random_buffers.failure_scratch.record.storage[2],
+    )
+
+    @test failure isa AMISRoundError
+    @test failure.phase === :target
+    @test failure.cause isa SamplerExecutionError
+    @test failure.cause.sample_index == 2
+    @test snapshot.count == 2
+    @test snapshot.first_logical_index == 2
+    @test snapshot.reason_bits == IS._NATIVE_TARGET_NAN
+    @test iszero(prepared.random_buffers.failure_scratch.record.storage[3])
+    after = current_proposal(MLDataDevices.cpu_device(), prepared)
+    @test after.location == before.location
+    @test after.scale.factor == before.scale.factor
+    @test after.lognormalizer == before.lognormalizer
+    @test rng.index == 2
+    @test !prepared.running
+
+    @test importance_sample!(prepared) isa WeightedSamples
+    @test rng.index == 3
     @test !prepared.running
 end
 
