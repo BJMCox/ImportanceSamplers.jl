@@ -901,7 +901,7 @@ end
         @test ndims.(representative_arguments) == (2, 1, 1, 1, 1)
         @test all(argument -> argument isa SubArray, representative_arguments)
         backend = KernelAbstractions.get_backend(buffers.normals)
-        round_kernel = IS._mis_round_kernel!(backend)
+        round_kernel = IS._mis_round_launch_kernel!(backend)
         finalize_kernel = IS._dm_pmc_finalize_cdf_kernel!(backend)
         select_kernel = IS._dm_pmc_select_ancestors_kernel!(backend)
         gather_kernel = IS._dm_pmc_gather_ancestors_kernel!(backend)

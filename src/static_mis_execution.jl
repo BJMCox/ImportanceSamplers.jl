@@ -225,7 +225,7 @@ function _preflight_packed_static_mis_kernel_target(
         _preflight_kernel_argument(device, assignment_kernel, argument)
     end
 
-    sampling_kernel = _mis_round_kernel!(backend)
+    sampling_kernel = _mis_round_launch_kernel!(backend)
     for argument in (
         samples,
         logweights,
@@ -278,8 +278,7 @@ function _launch_packed_static_mis!(
 
     _launch_mis_round!(
         samples,
-        logweights,
-        proposal_ids,
+        _MISRoundOutput(logweights, proposal_ids),
         buffers.failure_scratch.record.storage,
         buffers.normal,
         target,

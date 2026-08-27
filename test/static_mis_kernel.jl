@@ -650,8 +650,7 @@ function run_static_mis_prefilled_round(
     target_evaluator = ISK._NativeDeviceTarget{T,typeof(target)}(target)
     ISK._launch_mis_round!(
         samples,
-        logweights,
-        proposal_ids,
+        ISK._MISRoundOutput(logweights, proposal_ids),
         failure_storage,
         normals,
         target_evaluator,
@@ -662,6 +661,33 @@ function run_static_mis_prefilled_round(
         execution,
     )
     return (; samples, logweights, proposal_ids, failure_storage, solve_scratch)
+end
+
+function static_mis_prefilled_launch_allocated!(
+    result,
+    bank,
+    normals,
+    assignments,
+    target,
+)
+    target_evaluator = ISK._NativeDeviceTarget{
+        eltype(result.logweights),
+        typeof(target),
+    }(target)
+    output = ISK._MISRoundOutput(result.logweights, result.proposal_ids)
+    fill!(result.failure_storage, zero(UInt64))
+    return @allocated ISK._launch_mis_round!(
+        result.samples,
+        output,
+        result.failure_storage,
+        normals,
+        target_evaluator,
+        bank,
+        assignments,
+        ISK._FullMixtureDenominator(),
+        result.solve_scratch,
+        ISK._SerialCPUExecution(),
+    )
 end
 
 @testset "shared packed MIS round execution" begin
@@ -718,6 +744,38 @@ end
             @test threaded.logweights == serial.logweights
             @test threaded.proposal_ids == serial.proposal_ids
             @test threaded.failure_storage == serial.failure_storage
+            @test static_mis_prefilled_launch_allocated!(
+                serial,
+                bank,
+                normals,
+                assignments,
+                target,
+            ) == 224
+
+            failed_normals = copy(normals)
+            failed_normals[3] = T(Inf)
+            serial_failure = run_static_mis_prefilled_round(
+                bank,
+                failed_normals,
+                assignments,
+                target,
+                ISK._SerialCPUExecution(),
+            )
+            threaded_failure = run_static_mis_prefilled_round(
+                bank,
+                failed_normals,
+                assignments,
+                target,
+                ISK._ThreadedCPUExecution(),
+            )
+            decoded = ISK._decode_native_failure(
+                serial_failure.failure_storage[1],
+                serial_failure.failure_storage[2],
+            )
+            @test decoded.first_logical_index == 2
+            @test decoded.reason_bits == ISK._NATIVE_GENERATED_NONFINITE
+            @test threaded_failure.failure_storage ==
+                  serial_failure.failure_storage
         end
 
         diagonal_scratch = ISK._allocate_mis_solve_scratch(

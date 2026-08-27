@@ -25,8 +25,7 @@ function run_dm_pmc_prefilled_round(bank, normals, assignments, target, executio
     target_evaluator = DMPMCKernelIS._NativeDeviceTarget{T,typeof(target)}(target)
     DMPMCKernelIS._launch_mis_round!(
         samples,
-        logweights,
-        proposal_ids,
+        DMPMCKernelIS._MISRoundOutput(logweights, proposal_ids),
         failure_storage,
         normals,
         target_evaluator,
@@ -41,6 +40,43 @@ function run_dm_pmc_prefilled_round(bank, normals, assignments, target, executio
         execution,
     )
     return (; samples, logweights, proposal_ids, failure_storage)
+end
+
+function dm_pmc_prefilled_launch_allocated!(
+    result,
+    bank,
+    normals,
+    assignments,
+    target,
+)
+    T = eltype(result.logweights)
+    denominator = DMPMCKernelIS._DMPMCRoundDenominator(
+        reshape(T[log(T(3) / T(4)), log(T(1) / T(4))], 2, 1),
+        1,
+    )
+    target_evaluator = DMPMCKernelIS._NativeDeviceTarget{T,typeof(target)}(target)
+    output = DMPMCKernelIS._MISRoundOutput(
+        result.logweights,
+        result.proposal_ids,
+    )
+    solve_scratch = DMPMCKernelIS._allocate_mis_solve_scratch(
+        normals,
+        bank,
+        length(assignments),
+    )
+    fill!(result.failure_storage, zero(UInt64))
+    return @allocated DMPMCKernelIS._launch_mis_round!(
+        result.samples,
+        output,
+        result.failure_storage,
+        normals,
+        target_evaluator,
+        bank,
+        assignments,
+        denominator,
+        solve_scratch,
+        DMPMCKernelIS._SerialCPUExecution(),
+    )
 end
 
 @testset "DM-PMC realized-count denominator reuses the MIS round" begin
@@ -78,6 +114,38 @@ end
         @test serial.proposal_ids == [1, 1, 1, 2]
         @test iszero(serial.failure_storage)
         @test threaded == serial
+        @test dm_pmc_prefilled_launch_allocated!(
+            serial,
+            bank,
+            normals,
+            assignments,
+            target,
+        ) == 320
+
+        failed_normals = copy(normals)
+        failed_normals[3] = T(Inf)
+        serial_failure = run_dm_pmc_prefilled_round(
+            bank,
+            failed_normals,
+            assignments,
+            target,
+            DMPMCKernelIS._SerialCPUExecution(),
+        )
+        threaded_failure = run_dm_pmc_prefilled_round(
+            bank,
+            failed_normals,
+            assignments,
+            target,
+            DMPMCKernelIS._ThreadedCPUExecution(),
+        )
+        decoded = DMPMCKernelIS._decode_native_failure(
+            serial_failure.failure_storage[1],
+            serial_failure.failure_storage[2],
+        )
+        @test decoded.first_logical_index == 3
+        @test decoded.reason_bits == DMPMCKernelIS._NATIVE_GENERATED_NONFINITE
+        @test threaded_failure.failure_storage ==
+              serial_failure.failure_storage
     end
 end
 

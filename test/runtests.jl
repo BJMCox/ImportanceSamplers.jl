@@ -11,6 +11,7 @@ test_files = if isempty(ARGS)
         "adaptive_schedule",
         "log_mixture_accumulator",
         "amis",
+        "amis_kernel",
         "dm_pmc",
         "dm_pmc_kernel",
         "device_api",

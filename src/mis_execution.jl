@@ -72,6 +72,71 @@ end
 
 struct _NoMISSolveScratch end
 
+struct _MISRoundOutput{W,I}
+    logweights::W
+    proposal_ids::I
+end
+
+struct _AMISRoundOutput{T,N,W,R,L}
+    logtargets::T
+    lognumerators::N
+    logweights::W
+    round_ids::R
+    logtotal::L
+    round::Int
+end
+
+@inline _initialize_mis_output!(::_MISRoundOutput, sample_index) = nothing
+
+@inline function _initialize_mis_output!(output::_AMISRoundOutput, sample_index)
+    T = eltype(output.logweights)
+    @inbounds output.logtargets[sample_index] = T(-Inf)
+    @inbounds output.lognumerators[sample_index] = zero(T)
+    @inbounds output.logweights[sample_index] = T(-Inf)
+    return nothing
+end
+
+@inline function _store_mis_output!(
+    output::_MISRoundOutput,
+    sample_index,
+    target_log,
+    logdenominator,
+    bank,
+    generating_slot,
+)
+    logweight, reason = _subtract_logweight(target_log, logdenominator)
+    if iszero(reason)
+        @inbounds output.logweights[sample_index] = logweight
+        @inbounds output.proposal_ids[sample_index] =
+            bank.proposal_ids[generating_slot]
+    end
+    return reason
+end
+
+@inline function _store_mis_output!(
+    output::_AMISRoundOutput,
+    sample_index,
+    target_log,
+    lognumerator,
+    bank,
+    generating_slot,
+)
+    logweight, reason = _logweight_from_logmixture(
+        target_log,
+        lognumerator,
+        output.logtotal,
+    )
+    if iszero(reason)
+        @inbounds output.logtargets[sample_index] = target_log
+        @inbounds output.lognumerators[sample_index] = lognumerator
+        @inbounds output.logweights[sample_index] = logweight
+        @inbounds output.round_ids[sample_index] = output.round
+    end
+    return reason
+end
+
+@inline _mis_dimension(bank) = size(bank.locations, 1)
+
 function _allocate_mis_solve_scratch(
     prototype,
     bank::_PackedDiagonalGaussianBank,
@@ -93,10 +158,10 @@ function _allocate_mis_solve_scratch(
     )
 end
 
-@kernel function _mis_round_kernel!(
+@inline function _mis_round_kernel!(
+    sample_index,
     samples,
-    logweights,
-    proposal_ids,
+    output,
     failure_storage,
     normal_buffer,
     target,
@@ -105,9 +170,9 @@ end
     denominator_policy,
     solve_scratch,
 )
-    sample_index = @index(Global, Linear)
+    _initialize_mis_output!(output, sample_index)
     generating_slot = @inbounds assignments[sample_index]
-    dimension = size(bank.locations, 1)
+    dimension = _mis_dimension(bank)
     normal_offset = (sample_index - 1) * dimension + 1
     valid = _native_store_gaussian!(
         samples,
@@ -152,28 +217,29 @@ end
                     denominator_reason,
                 )
             else
-                logweight, logweight_reason = _subtract_logweight(
+                output_reason = _store_mis_output!(
+                    output,
+                    sample_index,
                     target_log,
                     denominator,
+                    bank,
+                    generating_slot,
                 )
-                if iszero(logweight_reason)
-                    @inbounds logweights[sample_index] = logweight
-                    @inbounds proposal_ids[sample_index] =
-                        bank.proposal_ids[generating_slot]
-                else
+                if !iszero(output_reason)
                     _record_native_failure!(
                         failure_storage,
                         sample_index,
                         0,
-                        logweight_reason,
+                        output_reason,
                     )
                 end
             end
         end
     end
+    return nothing
 end
 
-function _launch_mis_round!(
+@kernel function _mis_round_launch_kernel!(
     samples,
     logweights,
     proposal_ids,
@@ -184,14 +250,80 @@ function _launch_mis_round!(
     assignments,
     denominator,
     solve_scratch,
+)
+    sample_index = @index(Global, Linear)
+    output = _MISRoundOutput(logweights, proposal_ids)
+    _mis_round_kernel!(
+        sample_index,
+        samples,
+        output,
+        failure_storage,
+        normal_buffer,
+        target,
+        bank,
+        assignments,
+        denominator,
+        solve_scratch,
+    )
+end
+
+@kernel function _amis_round_launch_kernel!(
+    samples,
+    logtargets,
+    lognumerators,
+    logweights,
+    round_ids,
+    logtotal,
+    round,
+    failure_storage,
+    normal_buffer,
+    target,
+    history,
+    assignments,
+    denominator,
+    solve_scratch,
+)
+    sample_index = @index(Global, Linear)
+    output = _AMISRoundOutput(
+        logtargets,
+        lognumerators,
+        logweights,
+        round_ids,
+        logtotal,
+        round,
+    )
+    _mis_round_kernel!(
+        sample_index,
+        samples,
+        output,
+        failure_storage,
+        normal_buffer,
+        target,
+        history,
+        assignments,
+        denominator,
+        solve_scratch,
+    )
+end
+
+function _launch_mis_round!(
+    samples,
+    output::_MISRoundOutput,
+    failure_storage,
+    normal_buffer,
+    target,
+    bank,
+    assignments,
+    denominator,
+    solve_scratch,
     execution,
 )
     backend = KernelAbstractions.get_backend(normal_buffer)
-    kernel = _mis_round_kernel!(backend)
+    kernel = _mis_round_launch_kernel!(backend)
     kernel(
         samples,
-        logweights,
-        proposal_ids,
+        output.logweights,
+        output.proposal_ids,
         failure_storage,
         normal_buffer,
         target,
@@ -199,8 +331,50 @@ function _launch_mis_round!(
         assignments,
         denominator,
         solve_scratch;
-        ndrange=length(logweights),
-        workgroupsize=_native_workgroupsize(execution, length(logweights)),
+        ndrange=length(output.logweights),
+        workgroupsize=_native_workgroupsize(
+            execution,
+            length(output.logweights),
+        ),
+    )
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
+function _launch_mis_round!(
+    samples,
+    output::_AMISRoundOutput,
+    failure_storage,
+    normal_buffer,
+    target,
+    history,
+    assignments,
+    denominator,
+    solve_scratch,
+    execution,
+)
+    backend = KernelAbstractions.get_backend(normal_buffer)
+    kernel = _amis_round_launch_kernel!(backend)
+    kernel(
+        samples,
+        output.logtargets,
+        output.lognumerators,
+        output.logweights,
+        output.round_ids,
+        output.logtotal,
+        output.round,
+        failure_storage,
+        normal_buffer,
+        target,
+        history,
+        assignments,
+        denominator,
+        solve_scratch;
+        ndrange=length(output.logweights),
+        workgroupsize=_native_workgroupsize(
+            execution,
+            length(output.logweights),
+        ),
     )
     KernelAbstractions.synchronize(backend)
     return nothing

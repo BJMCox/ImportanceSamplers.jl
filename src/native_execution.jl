@@ -148,8 +148,21 @@ end
 @inline _packed_sample_coordinate(sample::AbstractVector, coordinate) =
     @inbounds sample[coordinate]
 
+@inline _packed_gaussian_location(bank::_PackedFactorGaussianBank, row, slot) =
+    @inbounds bank.locations[row, slot]
+@inline _packed_gaussian_location(history::_AMISFactorHistory, row, slot) =
+    @inbounds history.means[row, slot]
+@inline _packed_gaussian_factor(bank::_PackedFactorGaussianBank, row, column, slot) =
+    @inbounds bank.factors[row, column, slot]
+@inline _packed_gaussian_factor(history::_AMISFactorHistory, row, column, slot) =
+    @inbounds history.factors[row, column, slot]
+@inline _packed_gaussian_lognormalizer(bank::_PackedFactorGaussianBank, slot) =
+    @inbounds bank.lognormalizers[slot]
+@inline _packed_gaussian_lognormalizer(history::_AMISFactorHistory, slot) =
+    @inbounds history.lognormalizers[slot]
+
 @inline function _packed_gaussian_logdensity!(
-    bank::_PackedFactorGaussianBank,
+    bank::Union{_PackedFactorGaussianBank,_AMISFactorHistory},
     sample,
     proposal_slot,
     solve_scratch,
@@ -157,33 +170,56 @@ end
 )
     T = eltype(bank.lognormalizers)
     squared_radius = zero(T)
-    for row in axes(bank.locations, 1)
+    for row in 1:_mis_dimension(bank)
         standardized = _packed_sample_coordinate(sample, row) -
-                       @inbounds(bank.locations[row, proposal_slot])
+                       _packed_gaussian_location(bank, row, proposal_slot)
         for column in 1:(row - 1)
             standardized -= @inbounds(
-                bank.factors[row, column, proposal_slot] *
+                _packed_gaussian_factor(bank, row, column, proposal_slot) *
                 solve_scratch[column, sample_index]
             )
         end
-        standardized /= @inbounds bank.factors[row, row, proposal_slot]
+        standardized /= _packed_gaussian_factor(
+            bank,
+            row,
+            row,
+            proposal_slot,
+        )
         @inbounds solve_scratch[row, sample_index] = standardized
         squared_radius += abs2(standardized)
     end
-    return @inbounds(bank.lognormalizers[proposal_slot]) - T(0.5) * squared_radius
+    return _packed_gaussian_lognormalizer(bank, proposal_slot) -
+           T(0.5) * squared_radius
 end
 
-@inline function _packed_gaussian_logdensity(bank, sample, proposal_slot)
+@inline _packed_gaussian_location(bank::_PackedDiagonalGaussianBank, coordinate, slot) =
+    @inbounds bank.locations[coordinate, slot]
+@inline _packed_gaussian_location(history::_AMISScalarHistory, coordinate, slot) =
+    @inbounds history.means[slot]
+@inline _packed_gaussian_scale(bank::_PackedDiagonalGaussianBank, coordinate, slot) =
+    @inbounds bank.scales[coordinate, slot]
+@inline _packed_gaussian_scale(history::_AMISScalarHistory, coordinate, slot) =
+    @inbounds history.scales[slot]
+@inline _packed_gaussian_lognormalizer(bank::_PackedDiagonalGaussianBank, slot) =
+    @inbounds bank.lognormalizers[slot]
+@inline _packed_gaussian_lognormalizer(history::_AMISScalarHistory, slot) =
+    @inbounds history.lognormalizers[slot]
+
+@inline function _packed_gaussian_logdensity(
+    bank::Union{_PackedDiagonalGaussianBank,_AMISScalarHistory},
+    sample,
+    proposal_slot,
+)
     T = eltype(bank.lognormalizers)
     squared_radius = zero(T)
-    for coordinate in axes(bank.locations, 1)
+    for coordinate in 1:_mis_dimension(bank)
         standardized = (
             _packed_sample_coordinate(sample, coordinate) -
-            @inbounds(bank.locations[coordinate, proposal_slot])
-        ) / @inbounds(bank.scales[coordinate, proposal_slot])
+            _packed_gaussian_location(bank, coordinate, proposal_slot)
+        ) / _packed_gaussian_scale(bank, coordinate, proposal_slot)
         squared_radius += abs2(standardized)
     end
-    return @inbounds(bank.lognormalizers[proposal_slot]) -
+    return _packed_gaussian_lognormalizer(bank, proposal_slot) -
            T(0.5) * squared_radius
 end
 

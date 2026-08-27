@@ -321,8 +321,7 @@ function _importance_sample_cpu!(
         _capture_dm_pmc_round(round, :sample_and_weight, round_size, round - 1) do
             _launch_mis_round!(
                 round_samples,
-                round_logweights,
-                round_proposal_ids,
+                _MISRoundOutput(round_logweights, round_proposal_ids),
                 buffers.failure_scratch.record.storage,
                 buffers.normals,
                 target_evaluator,

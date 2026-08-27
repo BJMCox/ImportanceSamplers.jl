@@ -531,7 +531,7 @@ function _preflight_accelerator_method(
     representative_round = findmax(plan.schedule)[2]
     round_views = _dm_pmc_round_views(method_state, representative_round)
 
-    round_kernel = _mis_round_kernel!(backend)
+    round_kernel = _mis_round_launch_kernel!(backend)
     denominator =
         _DMPMCRoundDenominator(plan.logcoefficients, representative_round)
     for argument in (
