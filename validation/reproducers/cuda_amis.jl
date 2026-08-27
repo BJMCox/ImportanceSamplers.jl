@@ -543,7 +543,7 @@ end
 
 function factor_overflow_transaction_case(device, ::Type{T}) where {T}
     round_size = 3
-    scale = sqrt(floatmax(T))
+    scale = sqrt(floatmax(T)) / T(4)
     caller = CUDA.device()
     proposal = FactorGaussian(T[0], reshape(T[scale], 1, 1))
     source = prepare_sampler(
@@ -554,7 +554,7 @@ function factor_overflow_transaction_case(device, ::Type{T}) where {T}
     )
     base = device(source)
     batches = IS._with_backend_device(device) do
-        CUDA.CuArray(T[-2 -0.25; 0 0; 2 0.25])
+        CUDA.CuArray(T[-8 -0.25; 0 0; 8 0.25])
     end
     rng = AMISPrefilledDeviceRNG(batches, 1)
     prepared = IS._PreparedImportanceSampler(
@@ -629,7 +629,7 @@ function factor_overflow_transaction_case(device, ::Type{T}) where {T}
     return (
         scalar_type=T,
         normal_batches=(
-            (-T(2), zero(T), T(2)),
+            (-T(8), zero(T), T(8)),
             (-T(0.25), zero(T), T(0.25)),
         ),
         round_size,
