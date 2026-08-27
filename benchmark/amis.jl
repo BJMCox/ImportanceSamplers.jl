@@ -66,7 +66,7 @@ function amis_prepare(device_kind, ::Type{T}, geometry, seed) where {T}
         Xoshiro(seed),
         AMISBenchmarkTarget{T}(),
         algorithm;
-        threaded=device_kind === :cuda,
+        threaded=true,
     )
     return device_kind === :cpu ? sampler : amis_cuda_device()(sampler)
 end
@@ -167,6 +167,7 @@ function benchmark_record(sampler, device_kind)
         target_evaluations_per_second=result.diagnostics.target_evaluations / seconds,
         proposal_evaluations=result.diagnostics.proposal_evaluations,
         proposal_evaluations_per_second=result.diagnostics.proposal_evaluations / seconds,
+        execution=result.diagnostics.execution,
         host_allocations=evaluation.host_allocations,
         host_allocated_bytes=evaluation.host_allocated_bytes,
         owned_bytes=storage.owned_bytes,
@@ -213,10 +214,20 @@ function benchmark_amis_row(device_kind, ::Type{T}, geometry) where {T}
     all(record -> record.benchmarktools_evaluations == 1, records) || error(
         "an AMIS benchmark record used more than one evaluation",
     )
+    executions = unique(record.execution for record in records)
+    length(executions) == 1 || error("AMIS benchmark execution modes differ")
+    execution = only(executions)
+    if AMIS_BENCHMARK_LONG && device_kind === :cpu && geometry === :factor &&
+       Threads.nthreads(:default) > 1
+        execution === :threaded || error(
+            "long matched CPU benchmarks require threaded execution",
+        )
+    end
     return (;
         device=device_kind,
         scalar_type=T,
         geometry,
+        execution,
         rounds=AMIS_BENCHMARK_ROUNDS,
         round_size=AMIS_BENCHMARK_ROUND_SIZE,
         prepared_samplers=AMIS_BENCHMARK_REPLICATES,
