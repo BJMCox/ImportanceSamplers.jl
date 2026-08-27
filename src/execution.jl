@@ -70,6 +70,48 @@ _record_device_scalar_transfer!(counter, storage, type::Type, reason::Val) =
     _is_host_storage(storage) ?
     nothing : _record_scalar_transfer!(counter, type, reason)
 
+function _logweight_summary(
+    logweights,
+    transfers::_ResultTransferCounter=_ResultTransferCounter(0, 0),
+)
+    maximum_logweight = maximum(logweights)
+    _record_device_scalar_transfer!(
+        transfers,
+        logweights,
+        eltype(logweights),
+        Val(:summary_maximum),
+    )
+    scaled_sum = mapreduce(
+        value -> exp(value - maximum_logweight),
+        +,
+        logweights;
+        init=zero(eltype(logweights)),
+    )
+    _record_device_scalar_transfer!(
+        transfers,
+        logweights,
+        eltype(logweights),
+        Val(:summary_scaled_sum),
+    )
+    scaled_square_sum = mapreduce(
+        value -> abs2(exp(value - maximum_logweight)),
+        +,
+        logweights;
+        init=zero(eltype(logweights)),
+    )
+    _record_device_scalar_transfer!(
+        transfers,
+        logweights,
+        eltype(logweights),
+        Val(:summary_scaled_square_sum),
+    )
+    T = eltype(logweights)
+    return (
+        ess=abs2(scaled_sum) / scaled_square_sum,
+        lognormalizer=maximum_logweight + log(scaled_sum) - log(T(length(logweights))),
+    )
+end
+
 struct _KernelExecution{E}
     cpu_execution::E
 end

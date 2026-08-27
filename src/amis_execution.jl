@@ -448,50 +448,6 @@ function _normalize_amis_weights!(
     return nothing
 end
 
-function _amis_round_summary(
-    logweights,
-    sample_count,
-    transfers::_ResultTransferCounter=_ResultTransferCounter(0, 0),
-)
-    active_logweights = view(logweights, 1:sample_count)
-    maximum_logweight = maximum(active_logweights)
-    _record_device_scalar_transfer!(
-        transfers,
-        logweights,
-        eltype(logweights),
-        Val(:summary_maximum),
-    )
-    scaled_sum = mapreduce(
-        value -> exp(value - maximum_logweight),
-        +,
-        active_logweights;
-        init=zero(eltype(logweights)),
-    )
-    _record_device_scalar_transfer!(
-        transfers,
-        logweights,
-        eltype(logweights),
-        Val(:summary_scaled_sum),
-    )
-    scaled_square_sum = mapreduce(
-        value -> abs2(exp(value - maximum_logweight)),
-        +,
-        active_logweights;
-        init=zero(eltype(logweights)),
-    )
-    _record_device_scalar_transfer!(
-        transfers,
-        logweights,
-        eltype(logweights),
-        Val(:summary_scaled_square_sum),
-    )
-    T = eltype(logweights)
-    return (
-        ess=abs2(scaled_sum) / scaled_square_sum,
-        lognormalizer=maximum_logweight + log(scaled_sum) - log(T(sample_count)),
-    )
-end
-
 function _fit_amis_proposal!(
     workspace::_AMISWorkspace,
     history::_AMISScalarHistory,
@@ -990,9 +946,11 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
             end
         end
         _capture_amis_round(round, :diagnostics, round_size, round) do
-            summary = _amis_round_summary(
-                workspace.logweights,
-                method_state.offsets[round + 1] - 1,
+            summary = _logweight_summary(
+                view(
+                    workspace.logweights,
+                    1:(method_state.offsets[round + 1] - 1),
+                ),
                 transfers,
             )
             round_ess[round] = summary.ess

@@ -85,6 +85,140 @@ function literal_weight_summary(logweights)
     )
 end
 
+struct LiteralAMISScalarProposal{T}
+    location::T
+    scale::T
+    lognormalizer::T
+end
+
+struct LiteralAMISFactorProposal{T}
+    location::Vector{T}
+    factor::Matrix{T}
+    lognormalizer::T
+end
+
+literal_amis_proposal(proposal, ::Val{:scalar}) = LiteralAMISScalarProposal(
+    proposal.location,
+    proposal.scale.scale,
+    proposal.lognormalizer,
+)
+
+literal_amis_proposal(proposal, ::Val{:factor}) = LiteralAMISFactorProposal(
+    copy(proposal.location),
+    copy(proposal.scale.factor),
+    proposal.lognormalizer,
+)
+
+function literal_amis_history(prepared, initial, ::Val{:scalar})
+    history = prepared.method_state.history
+    means = Array(history.means)
+    scales = Array(history.scales)
+    lognormalizers = Array(history.lognormalizers)
+    proposals = [initial]
+    for slot in 2:length(means)
+        push!(
+            proposals,
+            LiteralAMISScalarProposal(
+                means[slot],
+                scales[slot],
+                lognormalizers[slot],
+            ),
+        )
+    end
+    return proposals
+end
+
+function literal_amis_history(prepared, initial, ::Val{:factor})
+    history = prepared.method_state.history
+    means = Array(history.means)
+    factors = Array(history.factors)
+    lognormalizers = Array(history.lognormalizers)
+    proposals = [initial]
+    for slot in 2:size(means, 2)
+        push!(
+            proposals,
+            LiteralAMISFactorProposal(
+                Vector(view(means, :, slot)),
+                Matrix(view(factors, :, :, slot)),
+                lognormalizers[slot],
+            ),
+        )
+    end
+    return proposals
+end
+
+function literal_amis_logdensity(proposal::LiteralAMISScalarProposal{T}, sample) where {T}
+    standardized = (sample - proposal.location) / proposal.scale
+    return proposal.lognormalizer - T(0.5) * abs2(standardized)
+end
+
+function literal_amis_logdensity(proposal::LiteralAMISFactorProposal{T}, sample) where {T}
+    dimension = length(proposal.location)
+    standardized = zeros(T, dimension)
+    for row in 1:dimension
+        value = sample[row] - proposal.location[row]
+        for column in 1:(row - 1)
+            value -= proposal.factor[row, column] * standardized[column]
+        end
+        standardized[row] = value / proposal.factor[row, row]
+    end
+    return proposal.lognormalizer - T(0.5) * sum(abs2, standardized)
+end
+
+function literal_amis_logaddexp(left::T, right::T) where {T}
+    maximum_value = max(left, right)
+    return maximum_value + log(exp(left - maximum_value) + exp(right - maximum_value))
+end
+
+literal_amis_sample(samples::AbstractVector, sample_index) = samples[sample_index]
+literal_amis_sample(samples::AbstractMatrix, sample_index) = view(samples, :, sample_index)
+
+function literal_amis_round_diagnostics(samples, target, proposals, schedule)
+    T = typeof(first(proposals).lognormalizer)
+    round_ess = Vector{T}(undef, length(schedule))
+    round_lognormalizers = similar(round_ess)
+    retained_count = 0
+    for round in eachindex(schedule)
+        retained_count += schedule[round]
+        logweights = Vector{T}(undef, retained_count)
+        for sample_index in 1:retained_count
+            sample = literal_amis_sample(samples, sample_index)
+            lognumerator = T(-Inf)
+            for proposal_round in 1:round
+                term = log(T(schedule[proposal_round])) +
+                       literal_amis_logdensity(proposals[proposal_round], sample)
+                lognumerator = literal_amis_logaddexp(lognumerator, term)
+            end
+            logweights[sample_index] = target(sample) -
+                                       lognumerator +
+                                       log(T(retained_count))
+        end
+        summary = literal_weight_summary(logweights)
+        round_ess[round] = summary.ess
+        round_lognormalizers[round] = summary.lognormalizer
+    end
+    return (; round_ess, round_lognormalizers)
+end
+
+function assert_amis_round_diagnostics(
+    prepared,
+    result,
+    samples,
+    initial_proposal,
+    target,
+    schedule,
+    kind,
+)
+    initial = literal_amis_proposal(initial_proposal, Val(kind))
+    proposals = literal_amis_history(prepared, initial, Val(kind))
+    expected = literal_amis_round_diagnostics(samples, target, proposals, schedule)
+    T = eltype(result.logweights)
+    @test result.diagnostics.round_ess ≈ expected.round_ess rtol = 64eps(T)
+    @test result.diagnostics.round_lognormalizers ≈
+          expected.round_lognormalizers rtol = 64eps(T)
+    return expected
+end
+
 function assert_amis_residence(prepared, result)
     state = prepared.method_state
     history = state.history
@@ -128,9 +262,10 @@ function public_execution_case(
 ) where {T}
     schedule = [9, 11, 13]
     proposal = amis_proposal(T, Val(kind))
+    target = AMISQuadraticTarget{T}()
     source = prepare_sampler(
         Random.Xoshiro(AMIS_CUDA_SEED + UInt(sizeof(T)) + UInt(kind === :factor)),
-        AMISQuadraticTarget{T}(),
+        target,
         AMIS(proposal; rounds=length(schedule), round_size=schedule);
         threaded=true,
     )
@@ -153,15 +288,20 @@ function public_execution_case(
     @test length(first_result) == sum(schedule)
     @test first_rounds == expected_rounds
     @test all(isfinite, first_logweights)
-    final_summary = literal_weight_summary(first_logweights)
     @test first_result.diagnostics.method === :amis
     @test first_result.diagnostics.round_ess isa Vector{T}
     @test first_result.diagnostics.round_lognormalizers isa Vector{T}
     @test length(first_result.diagnostics.round_ess) == length(schedule)
     @test length(first_result.diagnostics.round_lognormalizers) == length(schedule)
-    @test first_result.diagnostics.round_ess[end] ≈ final_summary.ess rtol = 64eps(T)
-    @test first_result.diagnostics.round_lognormalizers[end] ≈
-          final_summary.lognormalizer rtol = 64eps(T)
+    assert_amis_round_diagnostics(
+        prepared,
+        first_result,
+        first_samples,
+        proposal,
+        target,
+        schedule,
+        kind,
+    )
     first_transfers = assert_amis_transfers(
         first_result.diagnostics.transfers,
         length(schedule),
@@ -185,6 +325,7 @@ function public_execution_case(
         second_result = importance_sample!(prepared)
         CUDA.synchronize()
         assert_amis_residence(prepared, second_result)
+        second_samples = Array(second_result.samples)
         @test Array(first_result.samples) == first_samples
         @test Array(first_result.logweights) == first_logweights
         @test Array(first_result.provenance.round) == first_rounds
@@ -196,6 +337,15 @@ function public_execution_case(
         @test first_result.diagnostics.round_ess !== second_result.diagnostics.round_ess
         @test first_result.diagnostics.round_lognormalizers !==
               second_result.diagnostics.round_lognormalizers
+        assert_amis_round_diagnostics(
+            prepared,
+            second_result,
+            second_samples,
+            learned,
+            target,
+            schedule,
+            kind,
+        )
         second_learned = current_proposal(MLDataDevices.cpu_device(), prepared)
         @test second_learned.location != first_learned_location
         second_transfers = assert_amis_transfers(

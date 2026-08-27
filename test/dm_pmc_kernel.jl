@@ -218,13 +218,13 @@ end
 
 @testset "DM-PMC round ESS is stable for extreme finite weights" begin
     for T in (Float32, Float64)
-        equal_positive = DMPMCKernelIS._dm_pmc_round_summary(
+        equal_positive = DMPMCKernelIS._logweight_summary(
             T[floatmax(T), floatmax(T)],
         )
-        equal_negative = DMPMCKernelIS._dm_pmc_round_summary(
+        equal_negative = DMPMCKernelIS._logweight_summary(
             T[-floatmax(T), -floatmax(T)],
         )
-        concentrated = DMPMCKernelIS._dm_pmc_round_summary(
+        concentrated = DMPMCKernelIS._logweight_summary(
             T[floatmax(T), -floatmax(T)],
         )
 

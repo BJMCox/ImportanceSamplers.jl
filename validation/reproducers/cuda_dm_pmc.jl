@@ -490,7 +490,7 @@ function strict_resampling_and_ess_case(::Type{T}) where {T}
     selected = Array(ancestors)
     @test selected == [2, 4, 4, 4]
     transfers = IS._ResultTransferCounter(0, 0)
-    summary = IS._dm_pmc_round_summary(
+    summary = IS._logweight_summary(
         CuArray(T[floatmax(T), floatmax(T)]),
         transfers,
     )

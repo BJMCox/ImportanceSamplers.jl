@@ -125,6 +125,9 @@ end
 struct KernelArgumentTestAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
 MLDataDevices.functional(::KernelArgumentTestAccelerator) = true
 MLDataDevices.get_device(::KernelArgumentTestArray) = KernelArgumentTestAccelerator()
+MLDataDevices.get_device(
+    array::SubArray{T,N,<:KernelArgumentTestArray},
+) where {T,N} = MLDataDevices.get_device(parent(array))
 const KERNEL_ARGUMENT_TEST_CURRENT = Ref(:caller)
 const KERNEL_ARGUMENT_TEST_CPU_COPIES = Ref(0)
 const KERNEL_ARGUMENT_TEST_CPU_ELEMENTS = Ref(0)
@@ -1320,7 +1323,7 @@ end
         logweights = KernelArgumentTestArray(T[log(T(1)), log(T(3)), log(T(2)), T(100)])
         transfers = IS._ResultTransferCounter(0, 0)
 
-        summary = @inferred IS._amis_round_summary(logweights, 3, transfers)
+        summary = @inferred IS._logweight_summary(view(logweights, 1:3), transfers)
 
         @test summary.ess ≈ T(18 / 7) rtol = 8eps(T)
         @test summary.lognormalizer ≈ log(T(2)) rtol = 8eps(T)
