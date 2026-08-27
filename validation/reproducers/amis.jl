@@ -513,10 +513,30 @@ function validate_capability_rows()
     @test AMIS_BENCHMARK_ROWS == (
         (:cpu, Float32, :scalar),
         (:cpu, Float32, :factor),
+        (:cpu, Float64, :scalar),
         (:cpu, Float64, :factor),
+        (:cuda, Float32, :scalar),
         (:cuda, Float32, :factor),
+        (:cuda, Float64, :scalar),
         (:cuda, Float64, :factor),
     )
+    baseline = first(AMIS_PERFORMANCE_SCALING_CELLS)
+    @test Tuple(cell.label for cell in AMIS_PERFORMANCE_SCALING_CELLS) ==
+          (:baseline, :rounds, :dimension, :total_samples)
+    @test all(
+        cell -> length(unique(cell.schedule)) > 1,
+        AMIS_PERFORMANCE_SCALING_CELLS,
+    )
+    @test AMIS_PERFORMANCE_SCALING_CELLS[2].dimension == baseline.dimension
+    @test sum(AMIS_PERFORMANCE_SCALING_CELLS[2].schedule) == sum(baseline.schedule)
+    @test length(AMIS_PERFORMANCE_SCALING_CELLS[2].schedule) !=
+          length(baseline.schedule)
+    @test AMIS_PERFORMANCE_SCALING_CELLS[3].dimension != baseline.dimension
+    @test AMIS_PERFORMANCE_SCALING_CELLS[3].schedule == baseline.schedule
+    @test AMIS_PERFORMANCE_SCALING_CELLS[4].dimension == baseline.dimension
+    @test length(AMIS_PERFORMANCE_SCALING_CELLS[4].schedule) ==
+          length(baseline.schedule)
+    @test sum(AMIS_PERFORMANCE_SCALING_CELLS[4].schedule) != sum(baseline.schedule)
     for row in AMIS_CAPABILITY_ROWS
         proposal = row.proposal(row.type)
         sampler = prepare_sampler(

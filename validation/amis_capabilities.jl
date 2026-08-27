@@ -44,12 +44,28 @@ const AMIS_SCHEDULE_CAPABILITY_ROWS = (
     (label=:unequal, schedule=rounds -> collect(257:113:(257 + 113 * (rounds - 1)))),
 )
 
-const AMIS_BENCHMARK_ROWS = (
-    (:cpu, Float32, :scalar),
-    (:cpu, Float32, :factor),
-    (:cpu, Float64, :factor),
-    (:cuda, Float32, :factor),
-    (:cuda, Float64, :factor),
+const AMIS_BENCHMARK_TYPE_GEOMETRIES = (
+    (Float32, :scalar),
+    (Float32, :factor),
+    (Float64, :scalar),
+    (Float64, :factor),
+)
+
+const AMIS_BENCHMARK_ROWS = Tuple(
+    (device, T, geometry) for device in (:cpu, :cuda) for
+    (T, geometry) in AMIS_BENCHMARK_TYPE_GEOMETRIES
+)
+
+# Each non-baseline cell changes one scaling axis while all schedules remain unequal.
+const AMIS_PERFORMANCE_SCALING_CELLS = (
+    (label=:baseline, dimension=4, schedule=(512, 1_024, 2_048, 4_608)),
+    (
+        label=:rounds,
+        dimension=4,
+        schedule=(128, 256, 512, 768, 1_024, 1_280, 1_664, 2_560),
+    ),
+    (label=:dimension, dimension=16, schedule=(512, 1_024, 2_048, 4_608)),
+    (label=:total_samples, dimension=4, schedule=(1_024, 2_048, 4_096, 9_216)),
 )
 
 const AMIS_SCALING_ROUNDS = (2, 4, 8)
