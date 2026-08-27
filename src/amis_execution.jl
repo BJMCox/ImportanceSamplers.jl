@@ -284,6 +284,115 @@ function _launch_prefilled_amis_round!(
     return nothing
 end
 
+function _preflight_amis_kernels(
+    device,
+    target,
+    method_state::_PreparedAMIS,
+    buffers::_RandomBuffers,
+)
+    history = method_state.history
+    workspace = method_state.workspace
+    representative_round = findmax(method_state.schedule)[2]
+    first_sample = method_state.offsets[representative_round]
+    last_sample = method_state.offsets[representative_round + 1] - 1
+    new_indices = first_sample:last_sample
+    samples = _sample_view(workspace.samples, new_indices)
+    binding_sample = _native_binding_sample(samples)
+    bound_target = _bind_resolved_target(target, binding_sample)
+    log_type = eltype(workspace.logweights)
+    target_argument = _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
+    backend = KernelAbstractions.get_backend(buffers.normal)
+    round_ids = similar(workspace.logweights, Int, length(new_indices))
+    logtotal = log(eltype(method_state.logcounts)(last_sample))
+    assignments = _FixedMISAssignments(
+        representative_round,
+        length(new_indices),
+    )
+    denominator = _AMISMixtureDenominator(
+        method_state.logcounts,
+        representative_round,
+    )
+
+    round_kernel = _amis_round_launch_kernel!(backend)
+    for argument in (
+        samples,
+        view(workspace.logtargets, new_indices),
+        view(workspace.lognumerators, new_indices),
+        view(workspace.logweights, new_indices),
+        round_ids,
+        logtotal,
+        representative_round,
+        buffers.failure_scratch.record.storage,
+        buffers.normal,
+        target_argument,
+        history,
+        assignments,
+        denominator,
+        workspace.centered_scaled,
+    )
+        _preflight_kernel_argument(device, round_kernel, argument)
+    end
+
+    append_kernel = _append_logmixture_kernel!(backend)
+    old_count = max(first_sample - 1, 1)
+    old_indices = 1:old_count
+    for argument in (
+        view(workspace.lognumerators, old_indices),
+        _sample_view(workspace.samples, old_indices),
+        history,
+        representative_round,
+        method_state.logcounts,
+        buffers.failure_scratch.record.storage,
+        workspace.centered_scaled,
+    )
+        _preflight_kernel_argument(device, append_kernel, argument)
+    end
+
+    weight_kernel = _form_amis_logweights_kernel!(backend)
+    current_indices = 1:last_sample
+    for argument in (
+        view(workspace.logweights, current_indices),
+        view(workspace.logtargets, current_indices),
+        view(workspace.lognumerators, current_indices),
+        logtotal,
+        buffers.failure_scratch.record.storage,
+    )
+        _preflight_kernel_argument(device, weight_kernel, argument)
+    end
+
+    if history isa _AMISScalarHistory
+        ridge_kernel = _add_amis_scalar_ridge_kernel!(backend)
+        for argument in (workspace.covariance, history.scales, representative_round)
+            _preflight_kernel_argument(device, ridge_kernel, argument)
+        end
+        finish_kernel = _finish_amis_scalar_candidate_kernel!(backend)
+        for argument in (
+            workspace.candidate_scale,
+            workspace.candidate_lognormalizer,
+            workspace.covariance,
+        )
+            _preflight_kernel_argument(device, finish_kernel, argument)
+        end
+    else
+        ridge_kernel = _add_amis_factor_ridge_kernel!(backend)
+        for argument in (
+            workspace.covariance,
+            history.factors,
+            representative_round,
+        )
+            _preflight_kernel_argument(device, ridge_kernel, argument)
+        end
+        finish_kernel = _finish_amis_factor_candidate_kernel!(backend)
+        for argument in (
+            workspace.candidate_scale,
+            workspace.candidate_lognormalizer,
+        )
+            _preflight_kernel_argument(device, finish_kernel, argument)
+        end
+    end
+    return nothing
+end
+
 function _normalize_amis_weights!(normalized_weights, logweights, sample_count)
     T = eltype(normalized_weights)
     maximum_logweight = maximum(view(logweights, 1:sample_count))
@@ -302,6 +411,36 @@ function _normalize_amis_weights!(normalized_weights, logweights, sample_count)
     @inbounds for sample_index in 1:sample_count
         normalized_weights[sample_index] *= inverse_total
     end
+    return nothing
+end
+
+function _normalize_amis_weights!(
+    normalized_weights,
+    logweights,
+    sample_count,
+    transfers::_ResultTransferCounter,
+)
+    T = eltype(normalized_weights)
+    active_logweights = view(logweights, 1:sample_count)
+    maximum_logweight = maximum(active_logweights)
+    _record_device_scalar_transfer!(
+        transfers,
+        logweights,
+        eltype(logweights),
+        Val(:summary_maximum),
+    )
+    maximum_logweight == -Inf && throw(AllZeroWeightsError())
+    active_weights = view(normalized_weights, 1:sample_count)
+    active_weights .= exp.(active_logweights .- maximum_logweight)
+    total = sum(active_weights)
+    _record_device_scalar_transfer!(
+        transfers,
+        normalized_weights,
+        T,
+        Val(:summary_scaled_sum),
+    )
+    isfinite(total) && total > zero(T) || throw(AllZeroWeightsError())
+    active_weights ./= total
     return nothing
 end
 
@@ -376,12 +515,189 @@ function _fit_amis_proposal!(
         covariance[coordinate, coordinate] += ridge
     end
 
-    candidate_factor, info = LinearAlgebra.LAPACK.potrf!('L', covariance)
-    iszero(info) || throw(LinearAlgebra.PosDefException(info))
+    candidate_factor = _amis_potrf!(MLDataDevices.CPUDevice(), covariance)
     @inbounds for column in 1:dimension, row in 1:(column - 1)
         candidate_factor[row, column] = zero(T)
     end
     return FactorGaussian(mean, candidate_factor)
+end
+
+function _amis_potrf!(
+    ::MLDataDevices.AbstractCPUDevice,
+    factor::StridedMatrix{T},
+) where {T<:Union{Float32,Float64}}
+    factor, info = LinearAlgebra.LAPACK.potrf!('L', factor)
+    iszero(info) || throw(LinearAlgebra.PosDefException(info))
+    return factor
+end
+
+@kernel function _add_amis_scalar_ridge_kernel!(covariance, scales, previous_slot)
+    covariance[1] += sqrt(eps(eltype(covariance))) * abs2(scales[previous_slot])
+end
+
+@kernel function _add_amis_factor_ridge_kernel!(
+    covariance,
+    factors,
+    previous_slot,
+)
+    T = eltype(covariance)
+    dimension = size(covariance, 1)
+    previous_trace = zero(T)
+    for column in 1:dimension, row in column:dimension
+        previous_trace += abs2(factors[row, column, previous_slot])
+    end
+    ridge = sqrt(eps(T)) * previous_trace / T(dimension)
+    for coordinate in 1:dimension
+        covariance[coordinate, coordinate] += ridge
+    end
+end
+
+@kernel function _finish_amis_scalar_candidate_kernel!(
+    candidate_scale,
+    candidate_lognormalizer,
+    covariance,
+)
+    T = eltype(candidate_scale)
+    scale = sqrt(covariance[1])
+    candidate_scale[1] = scale
+    candidate_lognormalizer[1] = _gaussian_lognormalizer(T, 1, log(scale))
+end
+
+@kernel function _finish_amis_factor_candidate_kernel!(
+    candidate_factor,
+    candidate_lognormalizer,
+)
+    index = @index(Global, Linear)
+    dimension = size(candidate_factor, 1)
+    row = mod1(index, dimension)
+    column = cld(index, dimension)
+    row < column && (candidate_factor[row, column] = zero(eltype(candidate_factor)))
+    if index == 1
+        T = eltype(candidate_factor)
+        logabsdet = zero(T)
+        for coordinate in 1:dimension
+            logabsdet += log(candidate_factor[coordinate, coordinate])
+        end
+        candidate_lognormalizer[1] =
+            _gaussian_lognormalizer(T, dimension, logabsdet)
+    end
+end
+
+function _fit_amis_proposal!(
+    device::MLDataDevices.AbstractAcceleratorDevice,
+    workspace::_AMISWorkspace,
+    history::_AMISScalarHistory,
+    previous_slot,
+    sample_count,
+    transfers,
+)
+    samples = view(reshape(workspace.samples, 1, :), :, 1:sample_count)
+    weights = view(workspace.normalized_weights, 1:sample_count)
+    centered = view(
+        reshape(workspace.centered_scaled, 1, :),
+        :,
+        1:sample_count,
+    )
+    _normalize_amis_weights!(
+        workspace.normalized_weights,
+        workspace.logweights,
+        sample_count,
+        transfers,
+    )
+    LinearAlgebra.mul!(workspace.candidate_mean, samples, weights)
+    centered .= (samples .- reshape(workspace.candidate_mean, 1, 1)) .*
+                sqrt.(reshape(weights, 1, :))
+    covariance = reshape(workspace.covariance, 1, 1)
+    LinearAlgebra.mul!(covariance, centered, transpose(centered))
+
+    backend = KernelAbstractions.get_backend(workspace.covariance)
+    ridge_kernel = _add_amis_scalar_ridge_kernel!(backend)
+    ridge_kernel(
+        workspace.covariance,
+        history.scales,
+        previous_slot;
+        ndrange=1,
+    )
+    finish_kernel = _finish_amis_scalar_candidate_kernel!(backend)
+    finish_kernel(
+        workspace.candidate_scale,
+        workspace.candidate_lognormalizer,
+        workspace.covariance;
+        ndrange=1,
+    )
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
+function _fit_amis_proposal!(
+    device::MLDataDevices.AbstractAcceleratorDevice,
+    workspace::_AMISWorkspace,
+    history::_AMISFactorHistory,
+    previous_slot,
+    sample_count,
+    transfers,
+)
+    samples = view(workspace.samples, :, 1:sample_count)
+    weights = view(workspace.normalized_weights, 1:sample_count)
+    centered = view(workspace.centered_scaled, :, 1:sample_count)
+    _normalize_amis_weights!(
+        workspace.normalized_weights,
+        workspace.logweights,
+        sample_count,
+        transfers,
+    )
+    LinearAlgebra.mul!(workspace.candidate_mean, samples, weights)
+    centered .= (samples .- reshape(workspace.candidate_mean, :, 1)) .*
+                sqrt.(reshape(weights, 1, :))
+    LinearAlgebra.mul!(workspace.covariance, centered, transpose(centered))
+
+    backend = KernelAbstractions.get_backend(workspace.covariance)
+    ridge_kernel = _add_amis_factor_ridge_kernel!(backend)
+    ridge_kernel(
+        workspace.covariance,
+        history.factors,
+        previous_slot;
+        ndrange=1,
+    )
+    KernelAbstractions.synchronize(backend)
+    copyto!(workspace.candidate_scale, workspace.covariance)
+    _amis_potrf!(device, workspace.candidate_scale)
+    finish_kernel = _finish_amis_factor_candidate_kernel!(backend)
+    finish_kernel(
+        workspace.candidate_scale,
+        workspace.candidate_lognormalizer;
+        ndrange=length(workspace.candidate_scale),
+    )
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
+function _store_amis_candidate!(
+    history::_AMISScalarHistory,
+    slot,
+    workspace::_AMISWorkspace,
+)
+    copyto!(view(history.means, slot:slot), workspace.candidate_mean)
+    copyto!(view(history.scales, slot:slot), workspace.candidate_scale)
+    copyto!(
+        view(history.lognormalizers, slot:slot),
+        workspace.candidate_lognormalizer,
+    )
+    return nothing
+end
+
+function _store_amis_candidate!(
+    history::_AMISFactorHistory,
+    slot,
+    workspace::_AMISWorkspace,
+)
+    copyto!(view(history.means, :, slot), workspace.candidate_mean)
+    copyto!(view(history.factors, :, :, slot), workspace.candidate_scale)
+    copyto!(
+        view(history.lognormalizers, slot:slot),
+        workspace.candidate_lognormalizer,
+    )
+    return nothing
 end
 
 function _store_amis_proposal!(
@@ -464,7 +780,9 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
     schedule = method_state.schedule
     rounds = length(schedule)
     total_samples = last(method_state.offsets) - 1
-    round_ids = Vector{Int}(undef, total_samples)
+    round_ids = similar(workspace.logweights, Int, total_samples)
+    transfers = _ResultTransferCounter(0, 0)
+    accelerator = sampler.device isa MLDataDevices.AbstractAcceleratorDevice
     _reset_amis_history!(history)
 
     target = _capture_amis_round(1, :sample_and_weight, schedule[1], 0) do
@@ -510,6 +828,12 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
                 execution,
             )
             snapshot = _device_failure_snapshot(buffers.failure_scratch.record)
+            _record_reported_transfer!(
+                transfers,
+                snapshot.transfers.count,
+                snapshot.transfers.bytes,
+                Val(:failure_snapshot),
+            )
             _throw_native_failures(
                 snapshot.failure,
                 snapshot.draw_failure,
@@ -523,9 +847,31 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
             round_size,
             round - 1,
         ) do
-            _fit_amis_proposal!(workspace, history, round, method_state.offsets[round + 1] - 1)
+            if accelerator
+                _fit_amis_proposal!(
+                    sampler.device,
+                    workspace,
+                    history,
+                    round,
+                    method_state.offsets[round + 1] - 1,
+                    transfers,
+                )
+            else
+                _fit_amis_proposal!(
+                    workspace,
+                    history,
+                    round,
+                    method_state.offsets[round + 1] - 1,
+                )
+            end
         end
-        round < rounds && _store_amis_proposal!(history, round + 1, final_proposal)
+        if round < rounds
+            if accelerator
+                _store_amis_candidate!(history, round + 1, workspace)
+            else
+                _store_amis_proposal!(history, round + 1, final_proposal)
+            end
+        end
     end
 
     diagnostics = (
@@ -533,11 +879,11 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
         execution=_execution_name(execution),
         threaded=sampler.threaded,
         rounds=rounds,
-        round_sizes=copy(schedule),
+        round_sizes=collect(schedule),
         target_evaluations=total_samples,
         proposal_evaluations=rounds * total_samples,
         failures=0,
-        transfers=(count=0, bytes=0),
+        transfers=transfers,
     )
     result = _capture_amis_round(
         rounds,
@@ -553,6 +899,10 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
             diagnostics,
         )
     end
-    _store_amis_proposal!(history, 1, final_proposal)
+    if accelerator
+        _store_amis_candidate!(history, 1, workspace)
+    else
+        _store_amis_proposal!(history, 1, final_proposal)
+    end
     return result
 end

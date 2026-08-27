@@ -109,7 +109,7 @@ struct _AMISFactorHistory{M,F,N}
     lognormalizers::N
 end
 
-struct _AMISWorkspace{S,T,N,W,P,C,V}
+struct _AMISWorkspace{S,T,N,W,P,C,V,M,F,L}
     samples::S
     logtargets::T
     lognumerators::N
@@ -117,6 +117,9 @@ struct _AMISWorkspace{S,T,N,W,P,C,V}
     normalized_weights::P
     centered_scaled::C
     covariance::V
+    candidate_mean::M
+    candidate_scale::F
+    candidate_lognormalizer::L
 end
 
 struct _PreparedAMIS{S,O,L,H,W}
@@ -191,12 +194,17 @@ function _allocate_amis_workspace(
         samples = similar(prototype, T, capacity)
         centered_scaled = similar(prototype, T, capacity)
         covariance = similar(prototype, T, 1)
+        candidate_mean = similar(prototype, T, 1)
+        candidate_scale = similar(prototype, T, 1)
     else
         dimension = length(location)
         samples = similar(prototype, T, dimension, capacity)
         centered_scaled = similar(prototype, T, dimension, capacity)
         covariance = similar(prototype, T, dimension, dimension)
+        candidate_mean = similar(prototype, T, dimension)
+        candidate_scale = similar(prototype, T, dimension, dimension)
     end
+    candidate_lognormalizer = similar(prototype, T, 1)
     return _AMISWorkspace(
         samples,
         logtargets,
@@ -205,7 +213,27 @@ function _allocate_amis_workspace(
         normalized_weights,
         centered_scaled,
         covariance,
+        candidate_mean,
+        candidate_scale,
+        candidate_lognormalizer,
     )
+end
+
+function _initialize_amis_covariance!(
+    covariance,
+    history::_AMISScalarHistory,
+)
+    covariance[1] = abs2(history.scales[1])
+    return covariance
+end
+
+function _initialize_amis_covariance!(
+    covariance,
+    history::_AMISFactorHistory,
+)
+    factor = view(history.factors, :, :, 1)
+    LinearAlgebra.mul!(covariance, factor, transpose(factor))
+    return covariance
 end
 
 function _prepare_amis_state(algorithm::AMIS, ::Type{L}) where {L}
@@ -225,6 +253,7 @@ function _prepare_amis_state(algorithm::AMIS, ::Type{L}) where {L}
         offsets[end] - 1,
         L,
     )
+    _initialize_amis_covariance!(workspace.covariance, history)
     return _PreparedAMIS(
         schedule,
         offsets,
@@ -320,6 +349,9 @@ function _copy_amis_workspace(device, workspace::_AMISWorkspace)
         _copy_to_device(device, workspace.normalized_weights),
         _copy_to_device(device, workspace.centered_scaled),
         _copy_to_device(device, workspace.covariance),
+        _copy_to_device(device, workspace.candidate_mean),
+        _copy_to_device(device, workspace.candidate_scale),
+        _copy_to_device(device, workspace.candidate_lognormalizer),
     )
 end
 
@@ -328,13 +360,33 @@ function _prepare_transferred_method_state(
     algorithm::AMIS,
     method_state::_PreparedAMIS,
 )
-    return _PreparedAMIS(
+    transferred = _PreparedAMIS(
         Tuple(method_state.schedule),
         Tuple(method_state.offsets),
         _copy_to_device(device, method_state.logcounts),
         _copy_amis_history(device, method_state.history),
         _copy_amis_workspace(device, method_state.workspace),
     )
+    _preflight_amis_factorization!(device, transferred)
+    return transferred
+end
+
+_preflight_amis_factorization!(
+    device,
+    method_state::_PreparedAMIS{S,O,L,H,W},
+) where {S,O,L,H<:_AMISScalarHistory,W} =
+    nothing
+
+function _preflight_amis_factorization!(
+    device,
+    method_state::_PreparedAMIS{S,O,L,H,W},
+) where {S,O,L,H<:_AMISFactorHistory,W}
+    _amis_potrf!(device, method_state.workspace.covariance)
+    return nothing
+end
+
+function _amis_potrf!(device, factor)
+    throw(SamplerDeviceError(device, :accelerator_factorization_unavailable))
 end
 
 _transferred_backend_state(
@@ -358,23 +410,79 @@ function _preflight_accelerator_method(
     method_state::_PreparedAMIS,
     random_buffers::_RandomBuffers,
 )
-    throw(SamplerDeviceError(device, :accelerator_factorization_unavailable))
+    return _preflight_amis_kernels(
+        device,
+        target,
+        method_state,
+        random_buffers,
+    )
 end
 
 """
     current_proposal(sampler)
 
 Return an independent native Gaussian snapshot of the proposal committed by a
-CPU-prepared [`AMIS`](@ref) sampler. A successful call commits its final fitted
-proposal for the next call; a failed call leaves this snapshot unchanged.
+CPU-prepared [`AMIS`](@ref) sampler. For an accelerator-prepared sampler, pass
+an explicit preserving CPU destination. A successful call commits its final
+fitted proposal for the next call; a failed call leaves this snapshot unchanged.
 """
 function current_proposal(
     sampler::_PreparedImportanceSampler{R,B,T,A,M,D},
 ) where {R,B,T,A<:AMIS,M<:_PreparedAMIS,D}
-    sampler.device isa MLDataDevices.AbstractCPUDevice || throw(
-        ArgumentError("current_proposal for AMIS is available only on CPU"),
+    sampler.device isa MLDataDevices.AbstractAcceleratorDevice && throw(
+        ArgumentError(
+            "current_proposal(sampler) does not copy accelerator state " *
+            "implicitly; call current_proposal(cpu_device(), sampler) " *
+            "to request an explicit CPU snapshot",
+        ),
     )
     return _amis_proposal_snapshot(sampler.method_state.history)
+end
+
+function current_proposal(
+    destination::MLDataDevices.AbstractCPUDevice,
+    sampler::_PreparedImportanceSampler{R,B,T,A,M,D},
+) where {R,B,T,A<:AMIS,M<:_PreparedAMIS,D}
+    if applicable(eltype, destination)
+        policy = eltype(destination)
+        policy in (Missing, Nothing) || throw(
+            ArgumentError(
+                "current_proposal requires a preserving CPU destination; " *
+                "use MLDataDevices.cpu_device() without a scalar conversion",
+            ),
+        )
+    end
+    history = sampler.method_state.history
+    parameters = _with_backend_device(sampler.device) do
+        _copy_amis_snapshot_parameters(destination, history)
+    end
+    return _amis_proposal_snapshot(parameters...)
+end
+
+function current_proposal(
+    destination::MLDataDevices.AbstractDevice,
+    sampler::_PreparedImportanceSampler{R,B,T,A,M,D},
+) where {R,B,T,A<:AMIS,M<:_PreparedAMIS,D}
+    throw(
+        ArgumentError(
+            "current_proposal requires a CPU destination; got " *
+            string(typeof(destination)),
+        ),
+    )
+end
+
+function _copy_amis_snapshot_parameters(destination, history::_AMISScalarHistory)
+    return (
+        destination(Array(view(history.means, 1:1))),
+        destination(Array(view(history.scales, 1:1))),
+    )
+end
+
+function _copy_amis_snapshot_parameters(destination, history::_AMISFactorHistory)
+    return (
+        destination(Array(view(history.means, :, 1))),
+        destination(Array(view(history.factors, :, :, 1))),
+    )
 end
 
 function _amis_proposal_snapshot(history::_AMISScalarHistory)
@@ -383,7 +491,13 @@ end
 
 function _amis_proposal_snapshot(history::_AMISFactorHistory)
     return FactorGaussian(
-        copy(view(history.means, :, 1)),
-        copy(view(history.factors, :, :, 1)),
+        view(history.means, :, 1),
+        view(history.factors, :, :, 1),
     )
 end
+
+_amis_proposal_snapshot(means::AbstractVector, scales::AbstractVector) =
+    SphericalGaussian(means[1], scales[1])
+
+_amis_proposal_snapshot(mean::AbstractVector, factor::AbstractMatrix) =
+    FactorGaussian(mean, factor)
