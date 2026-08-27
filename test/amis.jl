@@ -128,7 +128,7 @@ function assert_factor_amis_storage(proposal, expected_factor, ::Type{L}) where 
     @test length(workspace.logtargets) == 15
     @test length(workspace.lognumerators) == 15
     @test length(workspace.logweights) == 15
-    @test length(workspace.round_ids) == 15
+    @test !hasproperty(workspace, :round_ids)
     @test length(workspace.normalized_weights) == 15
     @test size(workspace.centered_scaled) == (d, 15)
     @test size(workspace.covariance) == (d, d)
@@ -201,4 +201,8 @@ end
         end
         @test rand(rng, UInt64) == rand(expected_rng, UInt64)
     end
+end
+
+@testset "AMIS positional construction remains private" begin
+    @test_throws MethodError AMIS(TestScalarProposal(0.0), 0, [0])
 end

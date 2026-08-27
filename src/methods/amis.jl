@@ -1,3 +1,6 @@
+mutable struct _ValidatedAMISToken end
+const _VALIDATED_AMIS_TOKEN = _ValidatedAMISToken()
+
 """
     AMIS(proposal; rounds, round_size)
 
@@ -11,12 +14,24 @@ struct AMIS{P,S} <: AbstractImportanceSampler
     proposal::P
     rounds::Int
     round_size::S
+
+    function AMIS(
+        proposal::P,
+        rounds::Int,
+        round_size::S,
+        token::_ValidatedAMISToken,
+    ) where {P,S}
+        token === _VALIDATED_AMIS_TOKEN || throw(
+            ArgumentError("invalid internal algorithm-construction token"),
+        )
+        return new{P,S}(proposal, rounds, round_size)
+    end
 end
 
 function AMIS(proposal; rounds, round_size)
     schedule = _validate_adaptive_schedule(rounds, round_size)
     _validate_amis_proposal(proposal)
-    return AMIS(proposal, rounds, schedule)
+    return AMIS(proposal, rounds, schedule, _VALIDATED_AMIS_TOKEN)
 end
 
 function _validate_amis_proposal(proposal::_GaussianProposal)
@@ -73,12 +88,11 @@ struct _AMISFactorHistory{M,F,N}
     lognormalizers::N
 end
 
-struct _AMISWorkspace{S,T,N,W,R,P,C,V}
+struct _AMISWorkspace{S,T,N,W,P,C,V}
     samples::S
     logtargets::T
     lognumerators::N
     logweights::W
-    round_ids::R
     normalized_weights::P
     centered_scaled::C
     covariance::V
@@ -151,7 +165,6 @@ function _allocate_amis_workspace(
     logtargets = similar(prototype, L, capacity)
     lognumerators = similar(prototype, L, capacity)
     logweights = similar(prototype, L, capacity)
-    round_ids = similar(prototype, Int, capacity)
     normalized_weights = similar(prototype, T, capacity)
     if location isa _NativeGaussianFloat
         samples = similar(prototype, T, capacity)
@@ -168,7 +181,6 @@ function _allocate_amis_workspace(
         logtargets,
         lognumerators,
         logweights,
-        round_ids,
         normalized_weights,
         centered_scaled,
         covariance,
@@ -246,7 +258,12 @@ function _copy_algorithm(device, algorithm::AMIS)
     _validate_amis_proposal(proposal)
     round_size = algorithm.round_size isa Vector ?
                  copy(algorithm.round_size) : algorithm.round_size
-    return AMIS(proposal, algorithm.rounds, round_size)
+    return AMIS(
+        proposal,
+        algorithm.rounds,
+        round_size,
+        _VALIDATED_AMIS_TOKEN,
+    )
 end
 
 function _copy_accelerator_algorithm(
@@ -279,7 +296,6 @@ function _copy_amis_workspace(device, workspace::_AMISWorkspace)
         _copy_to_device(device, workspace.logtargets),
         _copy_to_device(device, workspace.lognumerators),
         _copy_to_device(device, workspace.logweights),
-        _copy_to_device(device, workspace.round_ids),
         _copy_to_device(device, workspace.normalized_weights),
         _copy_to_device(device, workspace.centered_scaled),
         _copy_to_device(device, workspace.covariance),

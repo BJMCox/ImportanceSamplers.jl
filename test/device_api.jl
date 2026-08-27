@@ -1066,7 +1066,6 @@ end
             workspace.logtargets,
             workspace.lognumerators,
             workspace.logweights,
-            workspace.round_ids,
             workspace.normalized_weights,
             workspace.centered_scaled,
             workspace.covariance,
