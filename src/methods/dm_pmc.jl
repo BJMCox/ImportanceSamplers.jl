@@ -2,6 +2,27 @@ mutable struct _ValidatedDeterministicMixturePMCToken end
 const _VALIDATED_DETERMINISTIC_MIXTURE_PMC_TOKEN =
     _ValidatedDeterministicMixturePMCToken()
 
+function _validate_adaptive_schedule(rounds, round_size)
+    rounds isa Int && rounds > 0 || throw(ArgumentError("rounds must be a positive Int"))
+    if round_size isa Int
+        round_size > 0 || throw(ArgumentError("round_size must be positive"))
+        return round_size
+    end
+    round_size isa Vector{Int} || throw(
+        ArgumentError("round_size must be a positive Int or Vector{Int}"),
+    )
+    length(round_size) == rounds || throw(
+        DimensionMismatch("round_size must contain one entry per round"),
+    )
+    all(>(0), round_size) || throw(
+        ArgumentError("every round_size entry must be positive"),
+    )
+    return copy(round_size)
+end
+
+_resolve_adaptive_schedule(rounds, round_size::Int) = fill(round_size, rounds)
+_resolve_adaptive_schedule(rounds, round_size::Vector{Int}) = copy(round_size)
+
 """
     DeterministicMixturePMC(bank; rounds, round_size)
 
@@ -28,10 +49,7 @@ struct DeterministicMixturePMC{B<:ProposalBank,S} <: AbstractImportanceSampler
 end
 
 function DeterministicMixturePMC(bank::ProposalBank; rounds, round_size)
-    rounds isa Int && rounds > 0 || throw(
-        ArgumentError("rounds must be a positive Int"),
-    )
-    validated_round_size = _validate_dm_pmc_round_size(round_size, rounds)
+    validated_round_size = _validate_adaptive_schedule(rounds, round_size)
     return DeterministicMixturePMC(
         bank,
         rounds,
@@ -40,40 +58,9 @@ function DeterministicMixturePMC(bank::ProposalBank; rounds, round_size)
     )
 end
 
-function _validate_dm_pmc_round_size(round_size::Int, rounds)
-    round_size > 0 || throw(ArgumentError("round_size must be positive"))
-    return round_size
-end
-
-function _validate_dm_pmc_round_size(round_size::Vector{Int}, rounds)
-    length(round_size) == rounds || throw(
-        DimensionMismatch("round_size must contain one entry per round"),
-    )
-    all(>(0), round_size) || throw(
-        ArgumentError("every round_size entry must be positive"),
-    )
-    return copy(round_size)
-end
-
-_validate_dm_pmc_round_size(round_size, rounds) = throw(
-    ArgumentError("round_size must be a positive Int or Vector{Int}"),
-)
-
-function _resolve_round_schedule(
-    algorithm::DeterministicMixturePMC{B,Int},
-) where {B}
-    return fill(algorithm.round_size, algorithm.rounds)
-end
-
-function _resolve_round_schedule(
-    algorithm::DeterministicMixturePMC{B,<:Vector{Int}},
-) where {B}
-    return copy(algorithm.round_size)
-end
-
 _algorithm_proposal(algorithm::DeterministicMixturePMC) = algorithm.bank
 _algorithm_sample_budget(algorithm::DeterministicMixturePMC) =
-    sum(_resolve_round_schedule(algorithm))
+    sum(_resolve_adaptive_schedule(algorithm.rounds, algorithm.round_size))
 
 """
     current_proposal(sampler)
@@ -397,7 +384,7 @@ function _dm_pmc_allocation_plan(bank, active_masses, schedule)
 end
 
 function _prepare_dm_pmc_state(algorithm::DeterministicMixturePMC)
-    schedule = _resolve_round_schedule(algorithm)
+    schedule = _resolve_adaptive_schedule(algorithm.rounds, algorithm.round_size)
     bank = _prepare_dm_pmc_bank(algorithm.bank)
     active_masses = algorithm.bank.masses[bank.proposal_ids]
     plan = _dm_pmc_allocation_plan(bank, active_masses, schedule)

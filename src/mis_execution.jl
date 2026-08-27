@@ -64,6 +64,12 @@ end
     return value, generating_logdensity, reason
 end
 
+@inline _append_logmixture(lognumerator, logcoefficient, logdensity) =
+    LogExpFunctions.logaddexp(lognumerator, logcoefficient + logdensity)
+
+@inline _logweight_from_logmixture(logtarget, lognumerator, logtotal) =
+    _subtract_logweight(logtarget, lognumerator - logtotal)
+
 struct _NoMISSolveScratch end
 
 function _allocate_mis_solve_scratch(
