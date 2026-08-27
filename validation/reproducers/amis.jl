@@ -107,6 +107,16 @@ function literal_normalized_weights(logweights::Vector{T}) where {T}
     return weights
 end
 
+function literal_weight_summary(logweights::Vector{T}) where {T}
+    weights = literal_normalized_weights(logweights)
+    maximum_logweight = maximum(logweights)
+    scaled_sum = sum(exp.(logweights .- maximum_logweight))
+    return (
+        ess=inv(sum(abs2, weights)),
+        lognormalizer=maximum_logweight + log(scaled_sum) - log(T(length(logweights))),
+    )
+end
+
 function literal_cholesky(covariance::Matrix{T}) where {T}
     dimension = size(covariance, 1)
     factor = zeros(T, dimension, dimension)
@@ -187,6 +197,8 @@ function literal_amis(initial, schedule, normal_batches, target)
     lognumerators = fill(T(-Inf), total_samples)
     logweights = Vector{T}(undef, total_samples)
     round_ids = Vector{Int}(undef, total_samples)
+    round_ess = Vector{T}(undef, length(schedule))
+    round_lognormalizers = similar(round_ess)
     history = LiteralGaussian[initial]
     first_sample = 1
 
@@ -232,6 +244,9 @@ function literal_amis(initial, schedule, normal_batches, target)
                                        lognumerators[sample_index] +
                                        log(T(last_sample))
         end
+        summary = literal_weight_summary(logweights[1:last_sample])
+        round_ess[round] = summary.ess
+        round_lognormalizers[round] = summary.lognormalizer
         push!(
             history,
             literal_fit(
@@ -242,7 +257,16 @@ function literal_amis(initial, schedule, normal_batches, target)
         )
         first_sample = last_sample + 1
     end
-    return (; samples, logtargets, lognumerators, logweights, round_ids, history)
+    return (;
+        samples,
+        logtargets,
+        lognumerators,
+        logweights,
+        round_ids,
+        round_ess,
+        round_lognormalizers,
+        history,
+    )
 end
 
 function oracle_case(::Type{T}, geometry, schedule) where {T}
@@ -293,6 +317,10 @@ function validate_oracle_case(::Type{T}, geometry, schedule) where {T}
     @test result.samples ≈ oracle.samples rtol=tolerance atol=tolerance
     @test result.logweights ≈ oracle.logweights rtol=tolerance atol=tolerance
     @test result.provenance.round == oracle.round_ids
+    @test result.diagnostics.method === :amis
+    @test result.diagnostics.round_ess ≈ oracle.round_ess rtol=tolerance atol=tolerance
+    @test result.diagnostics.round_lognormalizers ≈
+          oracle.round_lognormalizers rtol=tolerance atol=tolerance
     final = oracle.history[end]
     if geometry === :scalar
         @test case.learned.location ≈ final.location rtol=tolerance atol=tolerance

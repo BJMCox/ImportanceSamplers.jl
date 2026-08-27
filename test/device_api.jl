@@ -124,6 +124,7 @@ end
 
 struct KernelArgumentTestAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
 MLDataDevices.functional(::KernelArgumentTestAccelerator) = true
+MLDataDevices.get_device(::KernelArgumentTestArray) = KernelArgumentTestAccelerator()
 const KERNEL_ARGUMENT_TEST_CURRENT = Ref(:caller)
 const KERNEL_ARGUMENT_TEST_CPU_COPIES = Ref(0)
 const KERNEL_ARGUMENT_TEST_CPU_ELEMENTS = Ref(0)
@@ -1312,6 +1313,23 @@ end
     @test unsupported_error isa SamplerDeviceError
     @test unsupported_error.reason === :accelerator_factorization_unavailable
     @test rand(unsupported.rng, UInt64) == rand(expected_unsupported_rng, UInt64)
+end
+
+@testset "AMIS round diagnostics transfer only three device scalars" begin
+    for T in (Float32, Float64)
+        logweights = KernelArgumentTestArray(T[log(T(1)), log(T(3)), log(T(2)), T(100)])
+        transfers = IS._ResultTransferCounter(0, 0)
+
+        summary = @inferred IS._amis_round_summary(logweights, 3, transfers)
+
+        @test summary.ess ≈ T(18 / 7) rtol = 8eps(T)
+        @test summary.lognormalizer ≈ log(T(2)) rtol = 8eps(T)
+        @test transfers.count == 3
+        @test transfers.bytes == 3sizeof(T)
+        @test transfers.reasons.summary_maximum.count == 1
+        @test transfers.reasons.summary_scaled_sum.count == 1
+        @test transfers.reasons.summary_scaled_square_sum.count == 1
+    end
 end
 
 @testset "AMIS accelerator scalar covariance failure is transactional" begin

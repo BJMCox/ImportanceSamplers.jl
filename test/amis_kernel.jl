@@ -38,6 +38,7 @@ end
 
 struct AMISKernelTarget{T} end
 struct AMISKernelVectorTarget{T} end
+struct AMISProposalTarget{T} end
 
 function (::AMISKernelTarget{T})(sample)::T where {T}
     value = sample isa Real ? sample : only(sample)
@@ -46,6 +47,10 @@ end
 
 function (::AMISKernelVectorTarget{T})(sample)::T where {T}
     return -sum(abs2, sample) / T(2)
+end
+
+function (::AMISProposalTarget{T})(sample)::T where {T}
+    return amis_kernel_logdensity(T(sample), zero(T), one(T))
 end
 
 function (target::AMISKernelCountingTarget{T})(sample)::T where {T}
@@ -300,6 +305,56 @@ end
     @test logweights == [-123.0, 0.0]
     @test AMISKernelIS._logweight_from_logmixture(0.0, -Inf, 0.0)[2] ==
           AMISKernelIS._NATIVE_LOGWEIGHT_INVALID
+end
+
+@testset "AMIS diagnostics summarize each retrospective retained prefix" begin
+    expected = (
+        Float32=(
+            ess=Float32[2.0, 3.472985029220581],
+            lognormalizers=Float32[0.0, -0.22794675827026367],
+        ),
+        Float64=(
+            ess=Float64[2.0, 3.473043499457537],
+            lognormalizers=Float64[0.0, -0.2279354492780643],
+        ),
+    )
+    for T in (Float32, Float64)
+        batches = [
+            T[-2, 2],
+            T[0, 1],
+            T[-1, 1],
+            T[-0.5, 0.5],
+        ]
+        sampler = @inferred prepare_sampler(
+            AMISPrefilledRNG(batches),
+            AMISProposalTarget{T}(),
+            AMIS(SphericalGaussian(zero(T), one(T)); rounds=2, round_size=2);
+            threaded=false,
+        )
+
+        first = @inferred importance_sample!(sampler)
+        expected_type = getproperty(expected, nameof(T))
+        first_ess = copy(first.diagnostics.round_ess)
+        first_lognormalizers = copy(first.diagnostics.round_lognormalizers)
+
+        @test first.diagnostics.method === :amis
+        @test first.diagnostics.round_ess ≈ expected_type.ess rtol = 16eps(T)
+        @test first.diagnostics.round_lognormalizers ≈
+              expected_type.lognormalizers rtol = 16eps(T)
+        @test eltype(first.diagnostics.round_ess) === T
+        @test eltype(first.diagnostics.round_lognormalizers) === T
+
+        second = @inferred importance_sample!(sampler)
+
+        @test second.diagnostics.method === :amis
+        @test eltype(second.diagnostics.round_ess) === T
+        @test eltype(second.diagnostics.round_lognormalizers) === T
+        @test first.diagnostics.round_ess == first_ess
+        @test first.diagnostics.round_lognormalizers == first_lognormalizers
+        @test first.diagnostics.round_ess !== second.diagnostics.round_ess
+        @test first.diagnostics.round_lognormalizers !==
+              second.diagnostics.round_lognormalizers
+    end
 end
 
 @testset "complete CPU AMIS is retrospective, transactional, and reusable" begin

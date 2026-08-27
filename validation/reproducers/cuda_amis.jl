@@ -50,28 +50,39 @@ end
 
 function assert_amis_transfers(transfers, rounds, ::Type{T}) where {T}
     record = reported_transfer_record(transfers)
-    @test record.count == 3rounds
-    @test record.bytes == rounds * (3sizeof(UInt64) + 2sizeof(T))
+    @test record.count == 6rounds
+    @test record.bytes == rounds * (3sizeof(UInt64) + 5sizeof(T))
     @test record.reasons.failure_snapshot == (
         count=rounds,
         bytes=rounds * 3sizeof(UInt64),
     )
     @test record.reasons.summary_maximum == (
-        count=rounds,
-        bytes=rounds * sizeof(T),
+        count=2rounds,
+        bytes=2rounds * sizeof(T),
     )
     @test record.reasons.summary_scaled_sum == (
+        count=2rounds,
+        bytes=2rounds * sizeof(T),
+    )
+    @test record.reasons.summary_scaled_square_sum == (
         count=rounds,
         bytes=rounds * sizeof(T),
     )
-    for reason in (
-        :cdf_maximum,
-        :cdf_sum,
-        :summary_scaled_square_sum,
-    )
+    for reason in (:cdf_maximum, :cdf_sum)
         @test getfield(record.reasons, reason) == (count=0, bytes=0)
     end
     return record
+end
+
+function literal_weight_summary(logweights)
+    T = eltype(logweights)
+    maximum_logweight = maximum(logweights)
+    scaled = exp.(logweights .- maximum_logweight)
+    scaled_sum = sum(scaled)
+    return (
+        ess=abs2(scaled_sum) / sum(abs2, scaled),
+        lognormalizer=maximum_logweight + log(scaled_sum) - log(T(length(logweights))),
+    )
 end
 
 function assert_amis_residence(prepared, result)
@@ -142,6 +153,15 @@ function public_execution_case(
     @test length(first_result) == sum(schedule)
     @test first_rounds == expected_rounds
     @test all(isfinite, first_logweights)
+    final_summary = literal_weight_summary(first_logweights)
+    @test first_result.diagnostics.method === :amis
+    @test first_result.diagnostics.round_ess isa Vector{T}
+    @test first_result.diagnostics.round_lognormalizers isa Vector{T}
+    @test length(first_result.diagnostics.round_ess) == length(schedule)
+    @test length(first_result.diagnostics.round_lognormalizers) == length(schedule)
+    @test first_result.diagnostics.round_ess[end] ≈ final_summary.ess rtol = 64eps(T)
+    @test first_result.diagnostics.round_lognormalizers[end] ≈
+          final_summary.lognormalizer rtol = 64eps(T)
     first_transfers = assert_amis_transfers(
         first_result.diagnostics.transfers,
         length(schedule),
@@ -160,6 +180,8 @@ function public_execution_case(
     repeated_persistence = nothing
     if repeated
         first_learned_location = deepcopy(learned.location)
+        first_round_ess = copy(first_result.diagnostics.round_ess)
+        first_round_lognormalizers = copy(first_result.diagnostics.round_lognormalizers)
         second_result = importance_sample!(prepared)
         CUDA.synchronize()
         assert_amis_residence(prepared, second_result)
@@ -169,6 +191,11 @@ function public_execution_case(
         @test first_result.samples !== second_result.samples
         @test first_result.logweights !== second_result.logweights
         @test first_result.provenance.round !== second_result.provenance.round
+        @test first_result.diagnostics.round_ess == first_round_ess
+        @test first_result.diagnostics.round_lognormalizers == first_round_lognormalizers
+        @test first_result.diagnostics.round_ess !== second_result.diagnostics.round_ess
+        @test first_result.diagnostics.round_lognormalizers !==
+              second_result.diagnostics.round_lognormalizers
         second_learned = current_proposal(MLDataDevices.cpu_device(), prepared)
         @test second_learned.location != first_learned_location
         second_transfers = assert_amis_transfers(
@@ -218,8 +245,8 @@ function transfer_shape_case(device, ::Type{T}) where {T}
     factor = run(:factor, [9, 13])
     three_rounds = run(:factor, [4, 7, 10])
     @test scalar == factor
-    @test three_rounds.count == 9
-    @test three_rounds.bytes == 3 * (3sizeof(UInt64) + 2sizeof(T))
+    @test three_rounds.count == 18
+    @test three_rounds.bytes == 3 * (3sizeof(UInt64) + 5sizeof(T))
     return (; scalar, factor, three_rounds)
 end
 

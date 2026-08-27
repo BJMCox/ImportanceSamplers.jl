@@ -9,6 +9,12 @@ Configure adaptive multiple importance sampling with a fixed round schedule.
 or a vector spherical, diagonal, or factor Gaussian. `round_size` is either one
 positive `Int` repeated for every round or a positive `Vector{Int}` with one
 entry per round.
+
+Each successful result reports `diagnostics.method == :amis`.
+`diagnostics.round_ess[t]` and `diagnostics.round_lognormalizers[t]` summarize
+all samples retained through round `t` using their retrospective weights after
+that round. Each round log normalizer is a numerical estimate; no finite-sample
+unbiasedness or generic consistency guarantee is claimed.
 """
 struct AMIS{P,S} <: AbstractImportanceSampler
     proposal::P
