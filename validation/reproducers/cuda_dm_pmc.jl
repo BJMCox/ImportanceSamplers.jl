@@ -113,8 +113,7 @@ function prefilled_trajectory!(sampler, normal_batches, uniform_batches)
         copyto!(buffers.normals, normal_batches[round])
         IS._launch_mis_round!(
             round_samples,
-            round_logweights,
-            round_proposal_ids,
+            IS._MISRoundOutput(round_logweights, round_proposal_ids),
             buffers.failure_scratch.record.storage,
             buffers.normals,
             target_evaluator,
