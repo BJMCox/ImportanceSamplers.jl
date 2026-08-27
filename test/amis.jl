@@ -1,6 +1,7 @@
 using Test
 using ImportanceSamplers
 using LinearAlgebra: I
+import LinearAlgebra
 import Random
 
 const AMISIS = ImportanceSamplers
@@ -205,4 +206,95 @@ end
 
 @testset "AMIS positional construction remains private" begin
     @test_throws MethodError AMIS(TestScalarProposal(0.0), 0, [0])
+end
+
+function literal_amis_moments(samples, logweights, previous_covariance)
+    T = eltype(samples)
+    shifted = exp.(T.(logweights .- maximum(logweights)))
+    weights = shifted ./ sum(shifted)
+    if samples isa AbstractVector
+        mean = sum(weights[index] * samples[index] for index in eachindex(weights))
+        variance = sum(
+            weights[index] * abs2(samples[index] - mean) for
+            index in eachindex(weights)
+        )
+        ridge = sqrt(eps(T)) * previous_covariance
+        return mean, variance + ridge, weights
+    end
+
+    dimension = size(samples, 1)
+    mean = zeros(T, dimension)
+    for sample_index in axes(samples, 2), coordinate in axes(samples, 1)
+        mean[coordinate] +=
+            weights[sample_index] * samples[coordinate, sample_index]
+    end
+    covariance = zeros(T, dimension, dimension)
+    for sample_index in axes(samples, 2), column in 1:dimension, row in 1:dimension
+        covariance[row, column] += weights[sample_index] *
+                                   (samples[row, sample_index] - mean[row]) *
+                                   (samples[column, sample_index] - mean[column])
+    end
+    ridge = sqrt(eps(T)) * LinearAlgebra.tr(previous_covariance) / T(dimension)
+    covariance += ridge * I
+    return mean, covariance, weights
+end
+
+@testset "AMIS fitting reproduces literal two-pass weighted moments" begin
+    for T in (Float32, Float64)
+        scalar_proposal = SphericalGaussian(T(-0.5), T(1.75))
+        scalar_state = AMISIS._prepare_method_state(
+            AMIS(scalar_proposal; rounds=1, round_size=4),
+        )
+        scalar_samples = T[-3, -0.25, 1.5, 4]
+        scalar_logs = T[-1000, -3, -1, -2]
+        copyto!(scalar_state.workspace.samples, scalar_samples)
+        copyto!(scalar_state.workspace.logweights, scalar_logs)
+        scalar_mean, scalar_variance, scalar_weights = literal_amis_moments(
+            scalar_samples,
+            scalar_logs,
+            abs2(scalar_proposal.scale.scale),
+        )
+
+        scalar_fitted = @inferred AMISIS._fit_amis_proposal!(
+            scalar_state.workspace,
+            scalar_state.history,
+            1,
+            4,
+        )
+
+        @test scalar_fitted.location ≈ scalar_mean rtol = 8eps(T)
+        @test abs2(scalar_fitted.scale.scale) ≈ scalar_variance rtol = 16eps(T)
+        @test scalar_state.workspace.normalized_weights ≈ scalar_weights rtol = 8eps(T)
+
+        vector_proposal = FactorGaussian(
+            T[-1, 2],
+            T[2 0; -0.5 1.25],
+        )
+        vector_state = AMISIS._prepare_method_state(
+            AMIS(vector_proposal; rounds=1, round_size=4),
+        )
+        vector_samples = T[-2 0 3 5; 4 -1 2 7]
+        vector_logs = T[-900, -2, -0.5, -4]
+        copyto!(vector_state.workspace.samples, vector_samples)
+        copyto!(vector_state.workspace.logweights, vector_logs)
+        previous_covariance = vector_proposal.scale.factor *
+                              vector_proposal.scale.factor'
+        vector_mean, vector_covariance, vector_weights = literal_amis_moments(
+            vector_samples,
+            vector_logs,
+            previous_covariance,
+        )
+
+        vector_fitted = @inferred AMISIS._fit_amis_proposal!(
+            vector_state.workspace,
+            vector_state.history,
+            1,
+            4,
+        )
+        fitted_factor = vector_fitted.scale.factor
+
+        @test vector_fitted.location ≈ vector_mean rtol = 16eps(T)
+        @test fitted_factor * fitted_factor' ≈ vector_covariance rtol = 32eps(T)
+        @test vector_state.workspace.normalized_weights ≈ vector_weights rtol = 8eps(T)
+    end
 end

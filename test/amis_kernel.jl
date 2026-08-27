@@ -1,6 +1,7 @@
 using Test
 using ImportanceSamplers
 import LogExpFunctions
+import Random
 
 const AMISKernelIS = ImportanceSamplers
 
@@ -8,11 +9,43 @@ mutable struct AMISKernelCountingTarget{T}
     calls::Vector{Int}
 end
 
+mutable struct AMISPrefilledRNG{T} <: Random.AbstractRNG
+    batches::Vector{Vector{T}}
+    index::Int
+end
+
+AMISPrefilledRNG(batches::Vector{Vector{T}}) where {T} =
+    AMISPrefilledRNG{T}(batches, 1)
+
+function Random.randn!(rng::AMISPrefilledRNG, destination::AbstractArray)
+    batch = rng.batches[rng.index]
+    length(batch) >= length(destination) || throw(
+        DimensionMismatch("prefilled AMIS normal batch is too short"),
+    )
+    copyto!(destination, 1, batch, 1, length(destination))
+    rng.index += 1
+    return destination
+end
+
+mutable struct AMISCountingTarget{T}
+    calls::Int
+end
+
+function (target::AMISCountingTarget{T})(sample)::T where {T}
+    target.calls += 1
+    return -abs2(T(sample) - T(0.75)) / T(3)
+end
+
 struct AMISKernelTarget{T} end
+struct AMISKernelVectorTarget{T} end
 
 function (::AMISKernelTarget{T})(sample)::T where {T}
     value = sample isa Real ? sample : only(sample)
     return -abs2(value) / T(3)
+end
+
+function (::AMISKernelVectorTarget{T})(sample)::T where {T}
+    return -sum(abs2, sample) / T(2)
 end
 
 function (target::AMISKernelCountingTarget{T})(sample)::T where {T}
@@ -267,4 +300,109 @@ end
     @test logweights == [-123.0, 0.0]
     @test AMISKernelIS._logweight_from_logmixture(0.0, -Inf, 0.0)[2] ==
           AMISKernelIS._NATIVE_LOGWEIGHT_INVALID
+end
+
+@testset "complete CPU AMIS is retrospective, transactional, and reusable" begin
+    for T in (Float32, Float64)
+        schedule = [3, 3]
+        batches = [
+            T[-1, 0.25, 1.5],
+            T[-0.75, 1.25, 9],
+            T[0.5, -1, 2],
+            T[-1.5, 0.75, 8],
+        ]
+        proposal = SphericalGaussian(T(-0.5), T(1.25))
+        target = AMISCountingTarget{T}(0)
+        rng = AMISPrefilledRNG(deepcopy(batches))
+        sampler = @inferred prepare_sampler(
+            rng,
+            target,
+            AMIS(proposal; rounds=2, round_size=schedule);
+            threaded=false,
+        )
+
+        first = @inferred importance_sample!(sampler)
+        first_snapshot = (
+            samples=copy(first.samples),
+            logweights=copy(first.logweights),
+            rounds=copy(first.provenance.round),
+        )
+        learned_after_first = @inferred current_proposal(sampler)
+        q2_mean = sampler.method_state.history.means[2]
+        q2_scale = sampler.method_state.history.scales[2]
+        q1_logs = [
+            amis_kernel_logdensity(sample, proposal.location, proposal.scale.scale) for
+            sample in first.samples
+        ]
+        q2_logs = [
+            amis_kernel_logdensity(sample, q2_mean, q2_scale) for
+            sample in first.samples
+        ]
+        final_denominators = [
+            LogExpFunctions.logaddexp(log(T(3)) + q1, log(T(3)) + q2) -
+            log(T(6)) for (q1, q2) in zip(q1_logs, q2_logs)
+        ]
+        expected_final = [
+            -abs2(T(sample) - T(0.75)) / T(3) - denominator for
+            (sample, denominator) in zip(first.samples, final_denominators)
+        ]
+        provisional_old = [
+            -abs2(T(sample) - T(0.75)) / T(3) - q1_logs[index] for
+            (index, sample) in pairs(first.samples[1:3])
+        ]
+
+        @test length(first) == sum(schedule)
+        @test first.provenance.round == repeat(1:2; inner=3)
+        @test first.logweights ≈ expected_final rtol = 64eps(T)
+        @test all(
+            index -> first.logweights[index] != provisional_old[index],
+            eachindex(provisional_old),
+        )
+        @test first.diagnostics.target_evaluations == sum(schedule)
+        @test first.diagnostics.proposal_evaluations == 2 * sum(schedule)
+        @test target.calls == sum(schedule)
+        @test learned_after_first !== proposal
+        @test learned_after_first.location isa T
+        @test learned_after_first.scale.scale isa T
+
+        first_second_sample = learned_after_first.location +
+                              learned_after_first.scale.scale * batches[3][1]
+        second = @inferred importance_sample!(sampler)
+
+        @test second.samples[1] ≈ first_second_sample rtol = 8eps(T)
+        @test first.samples == first_snapshot.samples
+        @test first.logweights == first_snapshot.logweights
+        @test first.provenance.round == first_snapshot.rounds
+        @test first.samples !== second.samples
+        @test first.logweights !== second.logweights
+        @test first.provenance.round !== second.provenance.round
+        @test first.samples !== sampler.method_state.workspace.samples
+        @test first.logweights !== sampler.method_state.workspace.logweights
+    end
+end
+
+@testset "CPU AMIS factor proposal snapshots are independent and exact" begin
+    T = Float32
+    proposal = FactorGaussian(T[-1, 0.5], T[1 0; 0.25 1.5])
+    sampler = @inferred prepare_sampler(
+        AMISPrefilledRNG([T[-1, 0, 1, 0.5, -0.5, 1.5]]),
+        AMISKernelVectorTarget{T}(),
+        AMIS(proposal; rounds=1, round_size=3);
+        threaded=false,
+    )
+    @inferred importance_sample!(sampler)
+    first_snapshot = @inferred current_proposal(sampler)
+    second_snapshot = @inferred current_proposal(sampler)
+    committed_mean = copy(sampler.method_state.history.means[:, 1])
+    committed_factor = copy(sampler.method_state.history.factors[:, :, 1])
+
+    @test eltype(first_snapshot.location) === T
+    @test eltype(first_snapshot.scale.factor) === T
+    @test first_snapshot !== second_snapshot
+    @test first_snapshot.location !== second_snapshot.location
+    @test first_snapshot.scale.factor !== second_snapshot.scale.factor
+    first_snapshot.location[1] = T(100)
+    first_snapshot.scale.factor[1, 1] = T(100)
+    @test sampler.method_state.history.means[:, 1] == committed_mean
+    @test sampler.method_state.history.factors[:, :, 1] == committed_factor
 end

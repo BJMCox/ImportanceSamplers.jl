@@ -76,6 +76,27 @@ _algorithm_proposal(algorithm::AMIS) = algorithm.proposal
 _algorithm_sample_budget(algorithm::AMIS) =
     sum(_resolve_adaptive_schedule(algorithm.rounds, algorithm.round_size))
 
+"""
+    AMISRoundError
+
+Exception thrown when an AMIS call fails before its learned proposal can be
+committed. `round` and `phase` locate the failure, `cause` stores the
+underlying exception, and `diagnostics` reports the round size and number of
+completed rounds. The prepared sampler retains the proposal committed by its
+previous successful call.
+"""
+struct AMISRoundError{E,D<:NamedTuple} <: Exception
+    round::Int
+    phase::Symbol
+    cause::E
+    diagnostics::D
+end
+
+function Base.showerror(io::IO, error::AMISRoundError)
+    print(io, "AMIS failed in round ", error.round, " during ", error.phase, ": ")
+    showerror(io, error.cause)
+end
+
 struct _AMISScalarHistory{M,S,N}
     means::M
     scales::S
@@ -338,4 +359,31 @@ function _preflight_accelerator_method(
     random_buffers::_RandomBuffers,
 )
     throw(SamplerDeviceError(device, :accelerator_factorization_unavailable))
+end
+
+"""
+    current_proposal(sampler)
+
+Return an independent native Gaussian snapshot of the proposal committed by a
+CPU-prepared [`AMIS`](@ref) sampler. A successful call commits its final fitted
+proposal for the next call; a failed call leaves this snapshot unchanged.
+"""
+function current_proposal(
+    sampler::_PreparedImportanceSampler{R,B,T,A,M,D},
+) where {R,B,T,A<:AMIS,M<:_PreparedAMIS,D}
+    sampler.device isa MLDataDevices.AbstractCPUDevice || throw(
+        ArgumentError("current_proposal for AMIS is available only on CPU"),
+    )
+    return _amis_proposal_snapshot(sampler.method_state.history)
+end
+
+function _amis_proposal_snapshot(history::_AMISScalarHistory)
+    return SphericalGaussian(history.means[1], history.scales[1])
+end
+
+function _amis_proposal_snapshot(history::_AMISFactorHistory)
+    return FactorGaussian(
+        copy(view(history.means, :, 1)),
+        copy(view(history.factors, :, :, 1)),
+    )
 end

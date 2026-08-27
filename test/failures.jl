@@ -1,6 +1,7 @@
 using Test
 using ImportanceSamplers
 import DensityInterface
+import LinearAlgebra
 import MLDataDevices
 import Random
 import Random: rand
@@ -8,6 +9,83 @@ import Random: rand
 struct TestOffsetArray{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
     parent::A
     offsets::NTuple{N,Int}
+end
+
+mutable struct AMISFailureRNG{T} <: Random.AbstractRNG
+    batches::Vector{Vector{T}}
+    index::Int
+end
+
+AMISFailureRNG(batches::Vector{Vector{T}}) where {T} =
+    AMISFailureRNG{T}(batches, 1)
+
+function Random.randn!(rng::AMISFailureRNG, destination::AbstractArray)
+    batch = rng.batches[rng.index]
+    copyto!(destination, 1, batch, 1, length(destination))
+    rng.index += 1
+    return destination
+end
+
+mutable struct AMISFailingTarget{T}
+    calls::Int
+    fail_at::Int
+end
+
+function (target::AMISFailingTarget{T})(sample)::T where {T}
+    target.calls += 1
+    target.calls == target.fail_at && error("intentional AMIS target failure")
+    return -abs2(T(sample)) / T(2)
+end
+
+struct AMISResultFailureTarget{T} end
+
+function (::AMISResultFailureTarget{T})(sample)::T where {T}
+    return -abs2(T(sample)) / T(2)
+end
+
+@eval ImportanceSamplers function _build_amis_result(
+    target::_ContextFreePreparedTarget{<:Main.AMISResultFailureTarget},
+    samples,
+    logweights,
+    round_ids,
+    diagnostics,
+)
+    error("intentional AMIS result-construction failure")
+end
+
+function amis_proposal_bits(proposal)
+    location = proposal.location isa Number ?
+               bitstring(proposal.location) : map(bitstring, proposal.location)
+    scale = if proposal.scale isa ImportanceSamplers._SphericalGaussianScale
+        bitstring(proposal.scale.scale)
+    else
+        map(bitstring, proposal.scale.factor)
+    end
+    return location, scale, bitstring(proposal.lognormalizer)
+end
+
+function assert_amis_transaction_failure(
+    sampler,
+    expected_phase,
+    expected_cause,
+    expected_round,
+    expected_rng_index,
+)
+    before = amis_proposal_bits(current_proposal(sampler))
+    rng_index = sampler.rng.index
+    failure = caught_exception(() -> importance_sample!(sampler))
+
+    @test failure isa AMISRoundError
+    @test failure.round == expected_round
+    @test failure.phase === expected_phase
+    @test failure.cause isa expected_cause
+    @test failure.diagnostics.round_size == sampler.method_state.schedule[expected_round]
+    @test failure.diagnostics.completed_rounds == expected_round - 1 ||
+          expected_phase === :result_construction
+    @test amis_proposal_bits(current_proposal(sampler)) == before
+    @test sampler.rng.index == expected_rng_index > rng_index
+    @test !sampler.running
+    return failure
 end
 
 struct ThreadedTargetFailure <: Exception
@@ -539,4 +617,88 @@ end
         @test length(unique(recorded_target_tasks)) > 1
         @test length(unique(recorded_proposal_tasks)) > 1
     end
+end
+
+@testset "AMIS whole-call transaction failures preserve the committed proposal" begin
+    T = Float64
+    algorithm = AMIS(SphericalGaussian(T(0), T(1)); rounds=2, round_size=[3, 3])
+    batches = [T[-1, 0, 1], T[-0.5, 0.5, 1.5]]
+
+    target_sampler = prepare_sampler(
+        AMISFailureRNG(deepcopy(batches)),
+        AMISFailingTarget{T}(0, 4),
+        algorithm;
+        threaded=false,
+    )
+    target_failure = assert_amis_transaction_failure(
+        target_sampler,
+        :sample_and_weight,
+        SamplerExecutionError,
+        2,
+        3,
+    )
+    @test target_failure.cause.captured.ex isa ErrorException
+
+    zero_sampler = prepare_sampler(
+        AMISFailureRNG(deepcopy(batches)),
+        _ -> T(-Inf),
+        algorithm;
+        threaded=false,
+    )
+    assert_amis_transaction_failure(
+        zero_sampler,
+        :fit_proposal,
+        AllZeroWeightsError,
+        1,
+        2,
+    )
+
+    invalid_sampler = prepare_sampler(
+        AMISFailureRNG(deepcopy(batches)),
+        _ -> T(NaN),
+        algorithm;
+        threaded=false,
+    )
+    invalid_failure = assert_amis_transaction_failure(
+        invalid_sampler,
+        :sample_and_weight,
+        SamplerExecutionError,
+        1,
+        2,
+    )
+    @test invalid_failure.cause.captured.ex isa DomainError
+
+    tiny = T(1.0e-200)
+    covariance_sampler = prepare_sampler(
+        AMISFailureRNG([zeros(T, 6)]),
+        _ -> zero(T),
+        AMIS(
+            FactorGaussian(zeros(T, 2), T[tiny 0; 0 tiny]);
+            rounds=1,
+            round_size=3,
+        );
+        threaded=false,
+    )
+    assert_amis_transaction_failure(
+        covariance_sampler,
+        :fit_proposal,
+        LinearAlgebra.PosDefException,
+        1,
+        2,
+    )
+
+    result_sampler = prepare_sampler(
+        AMISFailureRNG(deepcopy(batches)),
+        AMISResultFailureTarget{T}(),
+        algorithm;
+        threaded=false,
+    )
+    result_failure = assert_amis_transaction_failure(
+        result_sampler,
+        :result_construction,
+        ErrorException,
+        2,
+        3,
+    )
+    @test result_failure.diagnostics.completed_rounds == 2
 end
