@@ -575,11 +575,14 @@ function environment_record()
 end
 
 function main()
-    cases = (
-        (Float32, :scalar, [257, 257, 257]),
-        (Float64, :scalar, [257, 370, 483]),
-        (Float32, :factor, [257, 370, 483]),
-        (Float64, :factor, [257, 257, 257]),
+    schedules = (
+        [257, 257, 257],
+        [257, 370, 483],
+    )
+    cases = Tuple(
+        (T, geometry, schedule) for
+        T in (Float32, Float64) for
+        geometry in (:scalar, :factor) for schedule in schedules
     )
     rows = map(case -> validate_oracle_case(case...), cases)
     scaling = Tuple(
