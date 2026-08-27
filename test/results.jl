@@ -5,6 +5,10 @@ struct TestMutableBackedNumber <: Number
     payload::Vector{Int}
 end
 
+@testset "reported transfer storage" begin
+    @test isbitstype(ImportanceSamplers._ReportedTransfer)
+end
+
 @testset "validated result adoption" begin
     samples = [1.0, 2.0]
     logweights = [-2.0, -1.0]
@@ -50,8 +54,6 @@ end
     @test reported_copy.count == reported.count == 1
     @test reported_copy.bytes == reported.bytes == 3sizeof(UInt64)
     @test reported_copy.reasons !== reported.reasons
-    @test reported_copy.reasons.failure_snapshot !==
-          reported.reasons.failure_snapshot
     @test reported_copy.reasons.failure_snapshot.count == 1
     @test reported_copy.reasons.failure_snapshot.bytes == 3sizeof(UInt64)
 

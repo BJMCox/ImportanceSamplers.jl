@@ -1,7 +1,7 @@
 struct _SerialCPUExecution end
 struct _ThreadedCPUExecution end
 
-mutable struct _ReportedTransfer
+struct _ReportedTransfer
     count::Int
     bytes::Int
 end
@@ -46,8 +46,11 @@ function _record_reported_transfer!(
     reason = getfield(counter.reasons, R)
     counter.count += count
     counter.bytes += bytes
-    reason.count += count
-    reason.bytes += bytes
+    setfield!(
+        counter.reasons,
+        R,
+        _ReportedTransfer(reason.count + count, reason.bytes + bytes),
+    )
     return nothing
 end
 

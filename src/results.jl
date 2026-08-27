@@ -266,9 +266,7 @@ function _transfer_result_storage(device, counter::_ResultTransferCounter)
     copy = _ResultTransferCounter(counter.count, counter.bytes)
     for reason in fieldnames(_ReportedTransferReasons)
         source = getfield(counter.reasons, reason)
-        destination = getfield(copy.reasons, reason)
-        destination.count = source.count
-        destination.bytes = source.bytes
+        setfield!(copy.reasons, reason, source)
     end
     return copy
 end
