@@ -113,9 +113,9 @@ function assert_factor_amis_storage(proposal, expected_factor, ::Type{L}) where 
     @test state.schedule == [4, 5, 6]
     @test state.offsets == [1, 5, 10, 16]
     @test state.logcounts ≈ log.(T[4, 5, 6])
-    @test size(history.means) == (d, 3)
-    @test size(history.factors) == (d, d, 3)
-    @test size(history.lognormalizers) == (3,)
+    @test size(history.means) == (d, 4)
+    @test size(history.factors) == (d, d, 4)
+    @test size(history.lognormalizers) == (4,)
     @test history.means[:, 1] == proposal.location
     @test history.factors[:, :, 1] == expected_factor
     @test history.lognormalizers[1] == proposal.lognormalizer

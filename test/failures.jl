@@ -44,6 +44,43 @@ struct AMISMomentFailureMatrix{T,A<:AbstractMatrix{T}} <: AbstractMatrix{T}
     storage::A
 end
 
+mutable struct AMISPublicationFailure
+    writes::Int
+    fail_at::Int
+    visited::UInt8
+end
+
+struct AMISPublicationFailureArray{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
+    storage::A
+    failure::AMISPublicationFailure
+    write::Int
+end
+
+Base.size(array::AMISPublicationFailureArray) = size(array.storage)
+Base.IndexStyle(::Type{<:AMISPublicationFailureArray}) = IndexLinear()
+Base.getindex(array::AMISPublicationFailureArray, indices...) =
+    getindex(array.storage, indices...)
+
+function fail_amis_publication!(array::AMISPublicationFailureArray)
+    failure = array.failure
+    visited = UInt8(1) << (array.write - 1)
+    iszero(failure.visited & visited) || return nothing
+    failure.visited |= visited
+    failure.writes += 1
+    array.write == failure.fail_at &&
+        error("intentional AMIS publication failure $(failure.fail_at)")
+    return nothing
+end
+
+function Base.setindex!(
+    array::AMISPublicationFailureArray,
+    value,
+    indices...,
+)
+    fail_amis_publication!(array)
+    return setindex!(array.storage, value, indices...)
+end
+
 Base.size(matrix::AMISMomentFailureMatrix) = size(matrix.storage)
 Base.IndexStyle(::Type{<:AMISMomentFailureMatrix}) = IndexCartesian()
 Base.getindex(matrix::AMISMomentFailureMatrix, i::Int, j::Int) = matrix.storage[i, j]
@@ -124,6 +161,44 @@ function assert_amis_transaction_failure(
     @test sampler.rng.index == expected_rng_index > rng_index
     @test !sampler.running
     return failure
+end
+
+function amis_publication_failure_sampler(fail_at)
+    T = Float64
+    base = prepare_sampler(
+        AMISFailureRNG([T[-1, 0, 1, 0, -1, 1]]),
+        AMISZeroTarget{T}(),
+        AMIS(FactorGaussian(zeros(T, 2), T[1 0; 0 1]); rounds=1, round_size=3);
+        threaded=false,
+    )
+    old_state = base.method_state
+    failure = AMISPublicationFailure(0, fail_at, 0x00)
+    old_history = old_state.history
+    history = ImportanceSamplers._AMISFactorHistory(
+        AMISPublicationFailureArray(old_history.means, failure, 1),
+        AMISPublicationFailureArray(old_history.factors, failure, 2),
+        AMISPublicationFailureArray(old_history.lognormalizers, failure, 3),
+    )
+    state = ImportanceSamplers._PreparedAMIS(
+        old_state.schedule,
+        old_state.offsets,
+        old_state.logcounts,
+        history,
+        old_state.workspace,
+        old_state.committed_slot,
+    )
+    sampler = ImportanceSamplers._PreparedImportanceSampler(
+        base.rng,
+        base.random_buffers,
+        base.target,
+        base.algorithm,
+        state,
+        base.device,
+        base.threaded,
+        false,
+        false,
+    )
+    return sampler, failure
 end
 
 function captured_sampler_execution_error(phase)
@@ -854,6 +929,7 @@ end
         moment_base.method_state.logcounts,
         moment_base.method_state.history,
         moment_workspace,
+        moment_base.method_state.committed_slot,
     )
     moment_sampler = ImportanceSamplers._PreparedImportanceSampler(
         moment_base.rng,
@@ -915,6 +991,29 @@ end
     @test covariance_sampler.running === false
 end
 
+@testset "AMIS final proposal publication is atomic" begin
+    for fail_at in (2, 3)
+        sampler, injected = amis_publication_failure_sampler(fail_at)
+        before = amis_proposal_bits(current_proposal(sampler))
+        committed_slot = sampler.method_state.committed_slot
+
+        failure = caught_exception(() -> importance_sample!(sampler))
+
+        @test failure isa AMISRoundError
+        if failure isa AMISRoundError
+            @test failure.round == 1
+            @test failure.phase === :result_construction
+            @test failure.cause isa ErrorException
+            @test failure.cause.msg ==
+                  "intentional AMIS publication failure $fail_at"
+        end
+        @test amis_proposal_bits(current_proposal(sampler)) == before
+        @test injected.writes == fail_at
+        @test !sampler.running
+        @test sampler.method_state.committed_slot == committed_slot
+    end
+end
+
 @testset "CPU factor AMIS stages, carries over, and rolls back" begin
     for T in (Float32, Float64)
         batches = [
@@ -941,8 +1040,9 @@ end
         @test history.lognormalizers[2] ≈
               -log(T(2pi)) / T(2) - log(staged_factor) rtol = 8eps(T)
 
-        committed_mean = history.means[1, 1]
-        committed_factor = history.factors[1, 1, 1]
+        committed_slot = sampler.method_state.committed_slot
+        committed_mean = history.means[1, committed_slot]
+        committed_factor = history.factors[1, 1, committed_slot]
         second = importance_sample!(sampler)
         @test second.samples[1, 1] ≈
               committed_mean + committed_factor * batches[3][1] rtol = 8eps(T)

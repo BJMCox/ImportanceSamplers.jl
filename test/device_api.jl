@@ -162,6 +162,23 @@ struct AMISExecutionTestAccelerator <: MLDataDevices.AbstractAcceleratorDevice e
 MLDataDevices.functional(::AMISExecutionTestAccelerator) = true
 const AMIS_EXECUTION_TEST_CURRENT = Ref(:caller)
 
+struct AMISPublicationSyncBackend <: KernelAbstractions.GPU end
+
+struct AMISPublicationSyncArray{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
+    storage::A
+end
+
+Base.size(array::AMISPublicationSyncArray) = size(array.storage)
+Base.IndexStyle(::Type{<:AMISPublicationSyncArray}) = IndexLinear()
+Base.getindex(array::AMISPublicationSyncArray, indices...) =
+    getindex(array.storage, indices...)
+Base.setindex!(array::AMISPublicationSyncArray, value, indices...) =
+    setindex!(array.storage, value, indices...)
+KernelAbstractions.get_backend(::AMISPublicationSyncArray) =
+    AMISPublicationSyncBackend()
+KernelAbstractions.synchronize(::AMISPublicationSyncBackend) =
+    error("intentional AMIS publication synchronization failure")
+
 mutable struct AMISExecutionTestRNG <: Random.AbstractRNG
     draws::Int
 end
@@ -1455,6 +1472,65 @@ end
     @test after == before
     @test AMIS_EXECUTION_TEST_CURRENT[] === :caller
     @test !prepared.running
+end
+
+@testset "AMIS accelerator publication synchronization is transactional" begin
+    T = Float64
+    algorithm = AMIS(
+        SphericalGaussian(zero(T), one(T));
+        rounds=1,
+        round_size=3,
+    )
+    device = AMISExecutionTestAccelerator()
+    base = device(prepare_sampler(
+        Random.Xoshiro(0x2231),
+        AMISZeroFloat32Target(),
+        algorithm;
+        threaded=true,
+    ))
+    old_state = base.method_state
+    old_history = old_state.history
+    history = IS._AMISScalarHistory(
+        AMISPublicationSyncArray(old_history.means),
+        old_history.scales,
+        old_history.lognormalizers,
+    )
+    state = IS._PreparedAMIS(
+        old_state.schedule,
+        old_state.offsets,
+        old_state.logcounts,
+        history,
+        old_state.workspace,
+        old_state.committed_slot,
+    )
+    prepared = IS._PreparedImportanceSampler(
+        AMISExecutionPrefilledRNG([T[-1, 0, 1]], 1),
+        base.random_buffers,
+        base.target,
+        base.algorithm,
+        state,
+        base.device,
+        base.threaded,
+        false,
+        false,
+    )
+    before = current_proposal(MLDataDevices.cpu_device(), prepared)
+
+    failure = caught_device_error(() -> importance_sample!(prepared))
+
+    @test failure isa AMISRoundError
+    if failure isa AMISRoundError
+        @test failure.round == 1
+        @test failure.phase === :result_construction
+        @test failure.cause isa ErrorException
+        @test failure.cause.msg ==
+              "intentional AMIS publication synchronization failure"
+        @test failure.diagnostics.completed_rounds == 1
+    end
+    @test current_proposal(MLDataDevices.cpu_device(), prepared) == before
+    @test prepared.method_state.committed_slot == 1
+    @test !prepared.running
+    @test AMIS_EXECUTION_TEST_CURRENT[] === :caller
 end
 
 @testset "AMIS packed sample failure precedes the later fit sentinel" begin

@@ -850,29 +850,85 @@ function _store_amis_proposal!(
     return nothing
 end
 
-function _reset_amis_history!(history::_AMISScalarHistory)
-    length(history.means) == 1 && return nothing
-    fill!(view(history.means, 2:lastindex(history.means)), zero(eltype(history.means)))
-    fill!(view(history.scales, 2:lastindex(history.scales)), zero(eltype(history.scales)))
+function _reset_amis_history!(
+    history::_AMISScalarHistory,
+    rounds,
+    committed_slot,
+)
+    slots = committed_slot == 1 ? (2:rounds) : (1:rounds)
+    isempty(slots) && return nothing
+    fill!(view(history.means, slots), zero(eltype(history.means)))
+    fill!(view(history.scales, slots), zero(eltype(history.scales)))
     fill!(
-        view(history.lognormalizers, 2:lastindex(history.lognormalizers)),
+        view(history.lognormalizers, slots),
         zero(eltype(history.lognormalizers)),
     )
     return nothing
 end
 
-function _reset_amis_history!(history::_AMISFactorHistory)
-    size(history.means, 2) == 1 && return nothing
-    fill!(view(history.means, :, 2:size(history.means, 2)), zero(eltype(history.means)))
+function _reset_amis_history!(
+    history::_AMISFactorHistory,
+    rounds,
+    committed_slot,
+)
+    slots = committed_slot == 1 ? (2:rounds) : (1:rounds)
+    isempty(slots) && return nothing
+    fill!(view(history.means, :, slots), zero(eltype(history.means)))
     fill!(
-        view(history.factors, :, :, 2:size(history.factors, 3)),
+        view(history.factors, :, :, slots),
         zero(eltype(history.factors)),
     )
     fill!(
-        view(history.lognormalizers, 2:lastindex(history.lognormalizers)),
+        view(history.lognormalizers, slots),
         zero(eltype(history.lognormalizers)),
     )
     return nothing
+end
+
+function _copy_amis_history_slot!(history::_AMISScalarHistory, destination, source)
+    copyto!(
+        view(history.means, destination:destination),
+        view(history.means, source:source),
+    )
+    copyto!(
+        view(history.scales, destination:destination),
+        view(history.scales, source:source),
+    )
+    copyto!(
+        view(history.lognormalizers, destination:destination),
+        view(history.lognormalizers, source:source),
+    )
+    return nothing
+end
+
+function _copy_amis_history_slot!(history::_AMISFactorHistory, destination, source)
+    copyto!(view(history.means, :, destination), view(history.means, :, source))
+    copyto!(
+        view(history.factors, :, :, destination),
+        view(history.factors, :, :, source),
+    )
+    copyto!(
+        view(history.lognormalizers, destination:destination),
+        view(history.lognormalizers, source:source),
+    )
+    return nothing
+end
+
+function _prepare_amis_run_history!(history, rounds, committed_slot)
+    _reset_amis_history!(history, rounds, committed_slot)
+    committed_slot == 1 || _copy_amis_history_slot!(history, 1, committed_slot)
+    return nothing
+end
+
+function _with_committed_amis_slot(method_state::_PreparedAMIS, committed_slot)
+    return _PreparedAMIS(
+        method_state.schedule,
+        method_state.offsets,
+        method_state.logcounts,
+        method_state.history,
+        method_state.workspace,
+        committed_slot,
+    )
 end
 
 function _amis_round_phase(cause::SamplerExecutionError, default)
@@ -1007,7 +1063,7 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
     transfers = _ResultTransferCounter(0, 0)
     accelerator = sampler.device isa MLDataDevices.AbstractAcceleratorDevice
     workspace_candidate = accelerator || history isa _AMISFactorHistory
-    _reset_amis_history!(history)
+    _prepare_amis_run_history!(history, rounds, method_state.committed_slot)
 
     target = _capture_amis_round(method_state, transfers, 1, :target, 0) do
         binding_sample = history isa _AMISScalarHistory ?
@@ -1162,6 +1218,20 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
         failures=0,
         transfers=transfers,
     )
+    committed_slot = method_state.committed_slot == 1 ? rounds + 1 : 1
+    _capture_amis_round(
+        method_state, transfers, rounds, :result_construction, rounds,
+    ) do
+        if workspace_candidate
+            _store_amis_candidate!(history, committed_slot, workspace)
+        else
+            _store_amis_proposal!(history, committed_slot, final_proposal)
+        end
+        KernelAbstractions.synchronize(
+            KernelAbstractions.get_backend(history.means),
+        )
+        nothing
+    end
     result = _capture_amis_round(
         method_state, transfers, rounds, :result_construction, rounds,
     ) do
@@ -1173,10 +1243,6 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
             diagnostics,
         )
     end
-    if workspace_candidate
-        _store_amis_candidate!(history, 1, workspace)
-    else
-        _store_amis_proposal!(history, 1, final_proposal)
-    end
+    sampler.method_state = _with_committed_amis_slot(method_state, committed_slot)
     return result
 end

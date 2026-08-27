@@ -680,6 +680,7 @@ end
             rounds=copy(first.provenance.round),
         )
         learned_after_first = @inferred current_proposal(sampler)
+        @test sampler.method_state.committed_slot == 3
         q2_mean = sampler.method_state.history.means[2]
         q2_scale = sampler.method_state.history.scales[2]
         q1_logs = [
@@ -721,6 +722,7 @@ end
                               learned_after_first.scale.scale * batches[3][1]
         second = @inferred importance_sample!(sampler)
 
+        @test sampler.method_state.committed_slot == 1
         @test second.samples[1] ≈ first_second_sample rtol = 8eps(T)
         @test first.samples == first_snapshot.samples
         @test first.logweights == first_snapshot.logweights
@@ -745,8 +747,11 @@ end
     @inferred importance_sample!(sampler)
     first_snapshot = @inferred current_proposal(sampler)
     second_snapshot = @inferred current_proposal(sampler)
-    committed_mean = copy(sampler.method_state.history.means[:, 1])
-    committed_factor = copy(sampler.method_state.history.factors[:, :, 1])
+    committed_slot = sampler.method_state.committed_slot
+    committed_mean = copy(sampler.method_state.history.means[:, committed_slot])
+    committed_factor = copy(
+        sampler.method_state.history.factors[:, :, committed_slot],
+    )
 
     @test eltype(first_snapshot.location) === T
     @test eltype(first_snapshot.scale.factor) === T
@@ -755,6 +760,7 @@ end
     @test first_snapshot.scale.factor !== second_snapshot.scale.factor
     first_snapshot.location[1] = T(100)
     first_snapshot.scale.factor[1, 1] = T(100)
-    @test sampler.method_state.history.means[:, 1] == committed_mean
-    @test sampler.method_state.history.factors[:, :, 1] == committed_factor
+    @test sampler.method_state.history.means[:, committed_slot] == committed_mean
+    @test sampler.method_state.history.factors[:, :, committed_slot] ==
+          committed_factor
 end
