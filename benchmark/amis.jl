@@ -11,11 +11,17 @@ include(joinpath(@__DIR__, "..", "validation", "amis_capabilities.jl"))
 const AMIS_BENCHMARK_SEED = 0x616d697362656e63
 const AMIS_BENCHMARK_REPLICATES = 5
 const AMIS_BENCHMARK_SMOKE = "--smoke" in ARGS
+const AMIS_BENCHMARK_LONG = "--long" in ARGS
 const AMIS_BENCHMARK_CPU = !("--cuda-only" in ARGS)
 const AMIS_BENCHMARK_CUDA = !("--cpu-only" in ARGS)
 const AMIS_BENCHMARK_GUARDS_ONLY = "--guards-only" in ARGS
+const AMIS_BENCHMARK_FACTOR_ONLY = "--factor-only" in ARGS
+AMIS_BENCHMARK_SMOKE && AMIS_BENCHMARK_LONG && error(
+    "--smoke and --long are mutually exclusive",
+)
 const AMIS_BENCHMARK_ROUNDS = AMIS_BENCHMARK_SMOKE ? 2 : 5
-const AMIS_BENCHMARK_ROUND_SIZE = AMIS_BENCHMARK_SMOKE ? 256 : 4_096
+const AMIS_BENCHMARK_ROUND_SIZE = AMIS_BENCHMARK_SMOKE ? 256 :
+                                  AMIS_BENCHMARK_LONG ? 262_144 : 4_096
 const AMIS_GUARD_SAMPLE_COUNT = AMIS_BENCHMARK_SMOKE ? 32_768 : 65_536
 
 struct AMISBenchmarkTarget{T<:AbstractFloat} end
@@ -365,7 +371,8 @@ function main()
     AMIS_BENCHMARK_CUDA && CUDA.functional() && push!(devices, :cuda)
     rows = AMIS_BENCHMARK_GUARDS_ONLY ? () : Tuple(
         benchmark_amis_row(device, T, geometry) for
-        (device, T, geometry) in AMIS_BENCHMARK_ROWS if device in devices
+        (device, T, geometry) in AMIS_BENCHMARK_ROWS if
+        device in devices && (!AMIS_BENCHMARK_FACTOR_ONLY || geometry === :factor)
     )
     guards = Tuple(
         benchmark_guard(method, device) for device in devices for
@@ -374,6 +381,8 @@ function main()
     return (;
         command="include(\"amis.jl\") in the benchmark project",
         smoke=AMIS_BENCHMARK_SMOKE,
+        long=AMIS_BENCHMARK_LONG,
+        factor_only=AMIS_BENCHMARK_FACTOR_ONLY,
         warmup=false,
         benchmarktools_evaluations_per_sampler=1,
         environment=benchmark_environment(),

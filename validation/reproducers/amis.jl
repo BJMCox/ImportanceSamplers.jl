@@ -484,6 +484,7 @@ function validate_capability_rows()
     )
     @test AMIS_BENCHMARK_ROWS == (
         (:cpu, Float32, :scalar),
+        (:cpu, Float32, :factor),
         (:cpu, Float64, :factor),
         (:cuda, Float32, :factor),
         (:cuda, Float64, :factor),
