@@ -388,8 +388,11 @@ function _preflight_amis_kernels(
         end
         finish_kernel = _finish_amis_factor_candidate_kernel!(backend)
         for argument in (
+            workspace.candidate_mean,
             workspace.candidate_scale,
             workspace.candidate_lognormalizer,
+            buffers.failure_scratch.record.storage,
+            last_sample + 1,
         )
             _preflight_kernel_argument(device, finish_kernel, argument)
         end
@@ -446,6 +449,25 @@ function _normalize_amis_weights!(
     isfinite(total) && total > zero(T) || throw(AllZeroWeightsError())
     active_weights ./= total
     return nothing
+end
+
+@inline function _amis_factor_candidate_valid(
+    candidate_mean,
+    candidate_factor,
+    candidate_lognormalizer,
+)
+    valid = isfinite(candidate_lognormalizer)
+    @inbounds for coordinate in eachindex(candidate_mean)
+        valid &= isfinite(candidate_mean[coordinate])
+    end
+    T = eltype(candidate_factor)
+    dimension = size(candidate_factor, 1)
+    @inbounds for column in 1:dimension, row in column:dimension
+        factor_entry = candidate_factor[row, column]
+        valid &= isfinite(factor_entry)
+        valid &= row != column || factor_entry > zero(T)
+    end
+    return valid
 end
 
 function _fit_amis_proposal!(
@@ -529,28 +551,21 @@ function _fit_amis_proposal!(
         candidate_factor[row, column] = zero(T)
     end
 
-    @inbounds for coordinate in 1:dimension
-        isfinite(candidate_mean[coordinate]) || throw(
-            ArgumentError("location must contain only finite values"),
-        )
-    end
     logabsdet = zero(T)
-    @inbounds for column in 1:dimension, row in column:dimension
-        factor_entry = candidate_factor[row, column]
-        isfinite(factor_entry) || throw(
-            ArgumentError("factor must contain only finite values"),
-        )
-        if row == column
-            factor_entry > zero(T) || throw(
-                ArgumentError("factor diagonal must be positive"),
-            )
-            logabsdet += log(factor_entry)
-        end
+    @inbounds for coordinate in 1:dimension
+        logabsdet += log(abs(candidate_factor[coordinate, coordinate]))
     end
     candidate_lognormalizer =
         _gaussian_lognormalizer(T, dimension, logabsdet)
-    isfinite(candidate_lognormalizer) || throw(
-        ArgumentError("lognormalizer must be finite"),
+    _amis_factor_candidate_valid(
+        candidate_mean,
+        candidate_factor,
+        candidate_lognormalizer,
+    ) || throw(
+        ArgumentError(
+            "fitted factor candidate must have a finite mean, finite lower " *
+            "factor, positive diagonal, and finite lognormalizer",
+        ),
     )
     workspace.candidate_lognormalizer[1] = candidate_lognormalizer
     return nothing
@@ -610,8 +625,11 @@ end
 end
 
 @kernel function _finish_amis_factor_candidate_kernel!(
+    candidate_mean,
     candidate_factor,
     candidate_lognormalizer,
+    failure_storage,
+    failure_index,
 )
     index = @index(Global, Linear)
     dimension = size(candidate_factor, 1)
@@ -622,10 +640,21 @@ end
         T = eltype(candidate_factor)
         logabsdet = zero(T)
         for coordinate in 1:dimension
-            logabsdet += log(candidate_factor[coordinate, coordinate])
+            logabsdet += log(abs(candidate_factor[coordinate, coordinate]))
         end
-        candidate_lognormalizer[1] =
+        lognormalizer =
             _gaussian_lognormalizer(T, dimension, logabsdet)
+        candidate_lognormalizer[1] = lognormalizer
+        _amis_factor_candidate_valid(
+            candidate_mean,
+            candidate_factor,
+            lognormalizer,
+        ) || _record_native_failure!(
+            failure_storage,
+            failure_index,
+            0,
+            _AMIS_COVARIANCE_INVALID,
+        )
     end
 end
 
@@ -685,6 +714,7 @@ function _fit_amis_proposal!(
     previous_slot,
     sample_count,
     transfers,
+    failure_storage,
 )
     samples = view(workspace.samples, :, 1:sample_count)
     weights = view(workspace.normalized_weights, 1:sample_count)
@@ -713,8 +743,11 @@ function _fit_amis_proposal!(
     _amis_potrf!(device, workspace.candidate_scale)
     finish_kernel = _finish_amis_factor_candidate_kernel!(backend)
     finish_kernel(
+        workspace.candidate_mean,
         workspace.candidate_scale,
-        workspace.candidate_lognormalizer;
+        workspace.candidate_lognormalizer,
+        failure_storage,
+        sample_count + 1;
         ndrange=length(workspace.candidate_scale),
     )
     KernelAbstractions.synchronize(backend)
@@ -870,7 +903,7 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
     final_proposal = nothing
     for round in eachindex(schedule)
         round_size = schedule[round]
-        deferred_scalar_snapshot = accelerator && history isa _AMISScalarHistory
+        deferred_accelerator_snapshot = accelerator
         _capture_amis_round(round, :normal_buffer, round_size, round - 1) do
             Random.randn!(sampler.rng, buffers.normal)
         end
@@ -891,7 +924,7 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
                 workspace.centered_scaled,
                 execution,
             )
-            if !deferred_scalar_snapshot
+            if !deferred_accelerator_snapshot
                 snapshot = _amis_failure_snapshot!(
                     transfers,
                     buffers.failure_scratch.record,
@@ -904,7 +937,7 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
                 )
             end
         end
-        fit_failure = if deferred_scalar_snapshot
+        fit_failure = if deferred_accelerator_snapshot
             try
                 _fit_amis_proposal!(
                     sampler.device,
@@ -926,27 +959,16 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
                 round_size,
                 round - 1,
             ) do
-                if accelerator
-                    _fit_amis_proposal!(
-                        sampler.device,
-                        workspace,
-                        history,
-                        round,
-                        method_state.offsets[round + 1] - 1,
-                        transfers,
-                    )
-                else
-                    _fit_amis_proposal!(
-                        workspace,
-                        history,
-                        round,
-                        method_state.offsets[round + 1] - 1,
-                    )
-                end
+                _fit_amis_proposal!(
+                    workspace,
+                    history,
+                    round,
+                    method_state.offsets[round + 1] - 1,
+                )
             end
             nothing
         end
-        if deferred_scalar_snapshot
+        if deferred_accelerator_snapshot
             snapshot = _amis_failure_snapshot!(
                 transfers,
                 buffers.failure_scratch.record,

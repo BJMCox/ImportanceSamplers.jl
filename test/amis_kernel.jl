@@ -1,5 +1,6 @@
 using Test
 using ImportanceSamplers
+import KernelAbstractions
 import LogExpFunctions
 import Random
 
@@ -305,6 +306,36 @@ end
     @test logweights == [-123.0, 0.0]
     @test AMISKernelIS._logweight_from_logmixture(0.0, -Inf, 0.0)[2] ==
           AMISKernelIS._NATIVE_LOGWEIGHT_INVALID
+end
+
+@testset "AMIS factor candidate failure stays in device storage" begin
+    for T in (Float32, Float64)
+        mean = T[0]
+        factor = reshape(T[Inf], 1, 1)
+        lognormalizer = zeros(T, 1)
+        failures = zeros(UInt64, 3)
+        backend = KernelAbstractions.get_backend(factor)
+        kernel = AMISKernelIS._finish_amis_factor_candidate_kernel!(backend)
+        kernel(
+            mean,
+            factor,
+            lognormalizer,
+            failures,
+            4;
+            ndrange=1,
+        )
+        KernelAbstractions.synchronize(backend)
+        decoded = AMISKernelIS._decode_native_failure(
+            failures[1],
+            failures[2],
+        )
+
+        @test decoded.count == 1
+        @test decoded.first_logical_index == 4
+        @test decoded.reason_bits == AMISKernelIS._AMIS_COVARIANCE_INVALID
+        @test !isfinite(only(lognormalizer))
+        @test iszero(failures[3])
+    end
 end
 
 @testset "AMIS diagnostics summarize each retrospective retained prefix" begin

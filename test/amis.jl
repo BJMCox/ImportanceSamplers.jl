@@ -248,6 +248,53 @@ function amis_factor_fit_allocated!(workspace, history, sample_count)
     )
 end
 
+function amis_factor_candidate_valid_allocated(mean, factor, lognormalizer)
+    return @allocated AMISIS._amis_factor_candidate_valid(
+        mean,
+        factor,
+        lognormalizer,
+    )
+end
+
+@testset "AMIS factor candidate publication contract" begin
+    for T in (Float32, Float64)
+        mean = T[1, -2]
+        factor = T[2 0; -1 3]
+        lognormalizer = T(-1)
+
+        @test AMISIS._amis_factor_candidate_valid(mean, factor, lognormalizer)
+        @test amis_factor_candidate_valid_allocated(mean, factor, lognormalizer) == 0
+
+        invalid_mean = copy(mean)
+        invalid_mean[1] = T(Inf)
+        @test !AMISIS._amis_factor_candidate_valid(
+            invalid_mean,
+            factor,
+            lognormalizer,
+        )
+
+        invalid_lower = copy(factor)
+        invalid_lower[2, 1] = T(NaN)
+        @test !AMISIS._amis_factor_candidate_valid(
+            mean,
+            invalid_lower,
+            lognormalizer,
+        )
+
+        for diagonal in (zero(T), -one(T), T(Inf))
+            invalid_diagonal = copy(factor)
+            invalid_diagonal[1, 1] = diagonal
+            @test !AMISIS._amis_factor_candidate_valid(
+                mean,
+                invalid_diagonal,
+                lognormalizer,
+            )
+        end
+
+        @test !AMISIS._amis_factor_candidate_valid(mean, factor, T(Inf))
+    end
+end
+
 @testset "AMIS fitting reproduces literal two-pass weighted moments" begin
     for T in (Float32, Float64)
         scalar_proposal = SphericalGaussian(T(-0.5), T(1.75))

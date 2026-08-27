@@ -1261,8 +1261,11 @@ end
             expect_preflight!(
                 finish_kernel,
                 (
+                    workspace.candidate_mean,
                     workspace.candidate_scale,
                     workspace.candidate_lognormalizer,
+                    buffers.failure_scratch.record.storage,
+                    last_sample + 1,
                 ),
             )
         end
