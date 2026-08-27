@@ -264,11 +264,14 @@ end
         :summary_maximum,
         :summary_scaled_sum,
         :summary_scaled_square_sum,
+        :covariance_diagnostic,
     )
     @test transfers.reasons.failure_snapshot.count == 1
     @test transfers.reasons.failure_snapshot.bytes == 3sizeof(UInt64)
-    for reason in fieldnames(typeof(transfers.reasons))[2:end]
+    for reason in fieldnames(typeof(transfers.reasons))[2:(end - 1)]
         @test getfield(transfers.reasons, reason).count == 1
         @test getfield(transfers.reasons, reason).bytes == sizeof(Float32)
     end
+    @test iszero(transfers.reasons.covariance_diagnostic.count)
+    @test iszero(transfers.reasons.covariance_diagnostic.bytes)
 end

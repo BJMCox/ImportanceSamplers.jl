@@ -494,10 +494,10 @@ function _fit_amis_proposal!(
     end
     previous_variance = abs2(@inbounds(history.scales[previous_slot]))
     variance += sqrt(eps(T)) * previous_variance
+    workspace.covariance[1] = variance
     isfinite(variance) && variance > zero(T) || throw(
         LinearAlgebra.PosDefException(1),
     )
-    workspace.covariance[1] = variance
     return SphericalGaussian(mean, sqrt(variance))
 end
 
@@ -829,20 +829,98 @@ function _reset_amis_history!(history::_AMISFactorHistory)
     return nothing
 end
 
-function _capture_amis_round(f, round, phase, round_size, completed_rounds)
+function _amis_round_phase(cause::SamplerExecutionError, default)
+    phase = cause.phase
+    phase === :proposal_draw && return :sampling
+    phase === :target && return :target
+    phase === :proposal_logdensity && return :denominator
+    phase === :logweight && return :weight
+    return default
+end
+
+function _amis_round_phase(cause, default)
+    cause isa AllZeroWeightsError && default === :factorization && return :moment
+    return default
+end
+
+function _amis_covariance_diagnostics(covariance, transfers)
+    diagonal = covariance isa AbstractVector ? covariance :
+               view(covariance, LinearAlgebra.diagind(covariance))
+    minimum_diagonal = minimum(diagonal)
+    maximum_absolute_entry = maximum(abs, covariance)
+    T = eltype(covariance)
+    _record_device_scalar_transfer!(
+        transfers,
+        covariance,
+        T,
+        Val(:covariance_diagnostic),
+    )
+    _record_device_scalar_transfer!(
+        transfers,
+        covariance,
+        T,
+        Val(:covariance_diagnostic),
+    )
+    return (; minimum_diagonal, maximum_absolute_entry)
+end
+
+function _capture_amis_round(
+    f,
+    round,
+    phase,
+    round_size,
+    completed_rounds,
+    cumulative_sample_count,
+    covariance,
+    transfers,
+)
     try
         return f()
     catch cause
         cause isa AMISRoundError && rethrow()
+        failure_phase = _amis_round_phase(cause, phase)
+        covariance_diagnostics = failure_phase === :factorization ?
+                                 _amis_covariance_diagnostics(
+            covariance,
+            transfers,
+        ) : nothing
         throw(
             AMISRoundError(
                 round,
-                phase,
+                failure_phase,
                 cause,
-                (round_size=round_size, completed_rounds=completed_rounds),
+                (
+                    round_size=round_size,
+                    completed_rounds=completed_rounds,
+                    cumulative_sample_count=cumulative_sample_count,
+                    covariance=covariance_diagnostics,
+                    transfers=transfers,
+                ),
             ),
         )
     end
+end
+
+function _capture_amis_round(
+    f,
+    state::_PreparedAMIS,
+    transfers,
+    round,
+    phase,
+    completed_rounds,
+    covariance=nothing,
+)
+    cumulative_sample_count = state.offsets[completed_rounds + 1] - 1
+    return _capture_amis_round(
+        f,
+        round,
+        phase,
+        state.schedule[round],
+        completed_rounds,
+        cumulative_sample_count,
+        covariance,
+        transfers,
+    )
 end
 
 function _amis_failure_snapshot!(transfers, failure_record)
@@ -881,16 +959,13 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
     workspace_candidate = accelerator || history isa _AMISFactorHistory
     _reset_amis_history!(history)
 
-    target = _capture_amis_round(1, :sample_and_weight, schedule[1], 0) do
+    target = _capture_amis_round(method_state, transfers, 1, :target, 0) do
         binding_sample = history isa _AMISScalarHistory ?
                          zero(eltype(history.means)) : view(history.means, :, 1)
         _bind_resolved_target(sampler.target, binding_sample)
     end
     target_evaluator, target_failures = _capture_amis_round(
-        1,
-        :sample_and_weight,
-        schedule[1],
-        0,
+        method_state, transfers, 1, :target, 0,
     ) do
         _native_target_evaluator(
             KernelAbstractions.get_backend(buffers.normal),
@@ -904,10 +979,10 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
     for round in eachindex(schedule)
         round_size = schedule[round]
         deferred_accelerator_snapshot = accelerator
-        _capture_amis_round(round, :normal_buffer, round_size, round - 1) do
+        _capture_amis_round(method_state, transfers, round, :sampling, round - 1) do
             Random.randn!(sampler.rng, buffers.normal)
         end
-        _capture_amis_round(round, :sample_and_weight, round_size, round - 1) do
+        _capture_amis_round(method_state, transfers, round, :sampling, round - 1) do
             _launch_prefilled_amis_round!(
                 workspace.samples,
                 workspace.logtargets,
@@ -954,10 +1029,12 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
             end
         else
             final_proposal = _capture_amis_round(
+                method_state,
+                transfers,
                 round,
-                :fit_proposal,
-                round_size,
+                :factorization,
                 round - 1,
+                workspace.covariance,
             ) do
                 _fit_amis_proposal!(
                     workspace,
@@ -974,10 +1051,7 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
                 buffers.failure_scratch.record,
             )
             _capture_amis_round(
-                round,
-                :sample_and_weight,
-                round_size,
-                round - 1,
+                method_state, transfers, round, :sampling, round - 1,
             ) do
                 snapshot.failure.reason_bits == _AMIS_COVARIANCE_INVALID ||
                     _throw_native_failures(
@@ -988,17 +1062,19 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
                     )
             end
             _capture_amis_round(
+                method_state,
+                transfers,
                 round,
-                :fit_proposal,
-                round_size,
+                :factorization,
                 round - 1,
+                workspace.covariance,
             ) do
                 isnothing(fit_failure) || throw(fit_failure)
                 snapshot.failure.reason_bits == _AMIS_COVARIANCE_INVALID &&
                     throw(LinearAlgebra.PosDefException(1))
             end
         end
-        _capture_amis_round(round, :diagnostics, round_size, round) do
+        _capture_amis_round(method_state, transfers, round, :moment, round - 1) do
             summary = _logweight_summary(
                 view(
                     workspace.logweights,
@@ -1032,10 +1108,7 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedAMIS, threaded)
         transfers=transfers,
     )
     result = _capture_amis_round(
-        rounds,
-        :result_construction,
-        schedule[end],
-        rounds,
+        method_state, transfers, rounds, :result_construction, rounds,
     ) do
         _build_amis_result(
             sampler.target,

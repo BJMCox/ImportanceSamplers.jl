@@ -87,9 +87,13 @@ _algorithm_sample_budget(algorithm::AMIS) =
 
 Exception thrown when an AMIS call fails before its learned proposal can be
 committed. `round` and `phase` locate the failure, `cause` stores the
-underlying exception, and `diagnostics` reports the round size and number of
-completed rounds. The prepared sampler retains the proposal committed by its
-previous successful call.
+underlying exception, and `diagnostics` reports the requested `round_size`,
+`completed_rounds`, and `cumulative_sample_count` retained through those
+completed rounds. Factorization failures additionally report the smallest
+stable covariance summary: its `minimum_diagonal` and
+`maximum_absolute_entry`. `diagnostics.transfers` counts any explicit
+failure-only device scalar transfers. The prepared sampler retains the proposal
+committed by its previous successful call.
 """
 struct AMISRoundError{E,D<:NamedTuple} <: Exception
     round::Int

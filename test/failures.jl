@@ -88,10 +88,36 @@ function assert_amis_transaction_failure(
     @test failure.diagnostics.round_size == sampler.method_state.schedule[expected_round]
     @test failure.diagnostics.completed_rounds == expected_round - 1 ||
           expected_phase === :result_construction
+    completed_rounds = failure.diagnostics.completed_rounds
+    @test failure.diagnostics.cumulative_sample_count ==
+          sum(view(sampler.method_state.schedule, 1:completed_rounds); init=0)
+    @test hasproperty(failure.diagnostics, :covariance)
+    @test hasproperty(failure.diagnostics, :transfers)
+    if expected_phase === :factorization
+        @test failure.diagnostics.covariance isa NamedTuple
+        @test keys(failure.diagnostics.covariance) == (
+            :minimum_diagonal,
+            :maximum_absolute_entry,
+        )
+    else
+        @test isnothing(failure.diagnostics.covariance)
+    end
     @test amis_proposal_bits(current_proposal(sampler)) == before
     @test sampler.rng.index == expected_rng_index > rng_index
     @test !sampler.running
     return failure
+end
+
+function captured_sampler_execution_error(phase)
+    try
+        error("intentional AMIS $(phase) failure")
+    catch cause
+        return SamplerExecutionError(
+            phase,
+            1,
+            CapturedException(cause, catch_backtrace()),
+        )
+    end
 end
 
 struct ThreadedTargetFailure <: Exception
@@ -625,6 +651,62 @@ end
     end
 end
 
+@testset "AMIS round errors expose the binding phase table" begin
+    cases = (
+        (cause=captured_sampler_execution_error(:proposal_draw), phase=:sampling),
+        (cause=captured_sampler_execution_error(:target), phase=:target),
+        (
+            cause=captured_sampler_execution_error(:proposal_logdensity),
+            phase=:denominator,
+        ),
+        (cause=captured_sampler_execution_error(:logweight), phase=:weight),
+        (cause=AllZeroWeightsError(), phase=:moment),
+        (cause=LinearAlgebra.PosDefException(1), phase=:factorization),
+        (cause=ErrorException("result"), phase=:result_construction),
+    )
+    for case in cases
+        covariance = case.phase === :factorization ? reshape([2.0], 1, 1) : nothing
+        transfers = ImportanceSamplers._ResultTransferCounter(0, 0)
+        failure = caught_exception() do
+            ImportanceSamplers._capture_amis_round(
+                2,
+                case.phase,
+                5,
+                1,
+                3,
+                covariance,
+                transfers,
+            ) do
+                throw(case.cause)
+            end
+        end
+
+        @test failure isa AMISRoundError
+        @test failure.round == 2
+        @test failure.phase === case.phase
+        @test failure.cause === case.cause
+        @test keys(failure.diagnostics) == (
+            :round_size,
+            :completed_rounds,
+            :cumulative_sample_count,
+            :covariance,
+            :transfers,
+        )
+        @test failure.diagnostics.round_size == 5
+        @test failure.diagnostics.completed_rounds == 1
+        @test failure.diagnostics.cumulative_sample_count == 3
+        @test failure.diagnostics.transfers === transfers
+        if case.phase === :factorization
+            @test failure.diagnostics.covariance == (
+                minimum_diagonal=2.0,
+                maximum_absolute_entry=2.0,
+            )
+        else
+            @test isnothing(failure.diagnostics.covariance)
+        end
+    end
+end
+
 @testset "AMIS whole-call transaction failures preserve the committed proposal" begin
     T = Float64
     algorithm = AMIS(SphericalGaussian(T(0), T(1)); rounds=2, round_size=[3, 3])
@@ -638,12 +720,26 @@ end
     )
     target_failure = assert_amis_transaction_failure(
         target_sampler,
-        :sample_and_weight,
+        :target,
         SamplerExecutionError,
         2,
         3,
     )
     @test target_failure.cause.captured.ex isa ErrorException
+
+    sampling_sampler = prepare_sampler(
+        AMISFailureRNG(deepcopy(batches[1:1])),
+        AMISZeroTarget{T}(),
+        algorithm;
+        threaded=false,
+    )
+    assert_amis_transaction_failure(
+        sampling_sampler,
+        :sampling,
+        BoundsError,
+        2,
+        2,
+    )
 
     zero_sampler = prepare_sampler(
         AMISFailureRNG(deepcopy(batches)),
@@ -653,7 +749,7 @@ end
     )
     assert_amis_transaction_failure(
         zero_sampler,
-        :fit_proposal,
+        :moment,
         AllZeroWeightsError,
         1,
         2,
@@ -667,7 +763,7 @@ end
     )
     invalid_failure = assert_amis_transaction_failure(
         invalid_sampler,
-        :sample_and_weight,
+        :target,
         SamplerExecutionError,
         1,
         2,
@@ -687,7 +783,7 @@ end
     )
     assert_amis_transaction_failure(
         covariance_sampler,
-        :fit_proposal,
+        :factorization,
         LinearAlgebra.PosDefException,
         1,
         2,
@@ -707,7 +803,7 @@ end
         )
         assert_amis_transaction_failure(
             overflow_sampler,
-            :fit_proposal,
+            :factorization,
             ArgumentError,
             1,
             2,
@@ -728,6 +824,8 @@ end
         3,
     )
     @test result_failure.diagnostics.completed_rounds == 2
+    @test covariance_sampler.method_state.workspace.covariance == zeros(T, 2, 2)
+    @test covariance_sampler.running === false
 end
 
 @testset "CPU factor AMIS stages, carries over, and rolls back" begin

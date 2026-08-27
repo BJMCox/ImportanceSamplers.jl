@@ -308,6 +308,65 @@ end
           AMISKernelIS._NATIVE_LOGWEIGHT_INVALID
 end
 
+@testset "AMIS native failures map to binding phases" begin
+    empty = (
+        count=UInt64(0),
+        first_logical_index=0,
+        first_block=0,
+        reason_bits=UInt16(0),
+    )
+    cases = (
+        (reason=AMISKernelIS._NATIVE_GENERATED_NONFINITE, phase=:sampling),
+        (reason=AMISKernelIS._NATIVE_TARGET_NAN, phase=:target),
+        (reason=AMISKernelIS._NATIVE_PROPOSAL_INVALID, phase=:denominator),
+        (reason=AMISKernelIS._NATIVE_LOGWEIGHT_INVALID, phase=:weight),
+    )
+    for case in cases
+        snapshot = (
+            count=UInt64(1),
+            first_logical_index=2,
+            first_block=0,
+            reason_bits=case.reason,
+        )
+        failure = try
+            AMISKernelIS._throw_native_failures(
+                snapshot,
+                empty,
+                AMISKernelIS._NoNativeTargetFailures(),
+                AMISKernelIS._NoSampleTransform(),
+            )
+            nothing
+        catch cause
+            cause
+        end
+
+        @test failure isa SamplerExecutionError
+        @test AMISKernelIS._amis_round_phase(failure, :sampling) === case.phase
+    end
+
+    combined = (
+        count=UInt64(1),
+        first_logical_index=2,
+        first_block=0,
+        reason_bits=AMISKernelIS._NATIVE_TARGET_NAN |
+                    AMISKernelIS._AMIS_COVARIANCE_INVALID,
+    )
+    combined_failure = try
+        AMISKernelIS._throw_native_failures(
+            combined,
+            empty,
+            AMISKernelIS._NoNativeTargetFailures(),
+            AMISKernelIS._NoSampleTransform(),
+        )
+        nothing
+    catch cause
+        cause
+    end
+    @test combined_failure isa SamplerExecutionError
+    @test combined_failure.phase === :target
+    @test AMISKernelIS._amis_round_phase(combined_failure, :factorization) === :target
+end
+
 @testset "AMIS factor candidate failure stays in device storage" begin
     for T in (Float32, Float64)
         mean = T[0]

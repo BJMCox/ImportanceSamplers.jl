@@ -1338,6 +1338,26 @@ end
     end
 end
 
+@testset "AMIS covariance failure diagnostics transfer only two device scalars" begin
+    covariance = KernelArgumentTestArray([2.0 -4.0; -4.0 3.0])
+    transfers = IS._ResultTransferCounter(0, 0)
+    KERNEL_ARGUMENT_TEST_CPU_COPIES[] = 0
+    KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] = 0
+
+    diagnostics = IS._amis_covariance_diagnostics(covariance, transfers)
+
+    @test diagnostics == (
+        minimum_diagonal=2.0,
+        maximum_absolute_entry=4.0,
+    )
+    @test transfers.count == 2
+    @test transfers.bytes == 2sizeof(Float64)
+    @test transfers.reasons.covariance_diagnostic.count == 2
+    @test transfers.reasons.covariance_diagnostic.bytes == 2sizeof(Float64)
+    @test iszero(KERNEL_ARGUMENT_TEST_CPU_COPIES[])
+    @test iszero(KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[])
+end
+
 @testset "AMIS accelerator scalar covariance failure is transactional" begin
     T = Float32
     scale = nextfloat(zero(T))
@@ -1357,9 +1377,14 @@ end
     cpu_before = current_proposal(cpu)
     cpu_failure = caught_device_error(() -> importance_sample!(cpu))
     @test cpu_failure isa AMISRoundError
-    @test cpu_failure.phase === :fit_proposal
+    @test cpu_failure.phase === :factorization
     @test cpu_failure.cause isa LinearAlgebra.PosDefException
     @test cpu_failure.cause.info == 1
+    @test cpu_failure.diagnostics.covariance == (
+        minimum_diagonal=zero(T),
+        maximum_absolute_entry=zero(T),
+    )
+    @test iszero(cpu_failure.diagnostics.transfers.count)
     @test cpu.rng.draws == 1
     @test current_proposal(cpu) == cpu_before
 
@@ -1376,8 +1401,11 @@ end
     @test failure isa AMISRoundError
     if failure isa AMISRoundError
         @test failure.round == 1
-        @test failure.phase === :fit_proposal
+        @test failure.phase === :factorization
         @test failure.cause isa LinearAlgebra.PosDefException
+        @test failure.diagnostics.covariance ==
+              cpu_failure.diagnostics.covariance
+        @test iszero(failure.diagnostics.transfers.count)
         if failure.cause isa LinearAlgebra.PosDefException
             @test failure.cause.info == cpu_failure.cause.info == 1
         end

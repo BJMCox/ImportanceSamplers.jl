@@ -13,10 +13,12 @@ mutable struct _ReportedTransferReasons
     summary_maximum::_ReportedTransfer
     summary_scaled_sum::_ReportedTransfer
     summary_scaled_square_sum::_ReportedTransfer
+    covariance_diagnostic::_ReportedTransfer
 end
 
 function _ReportedTransferReasons()
     return _ReportedTransferReasons(
+        _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),

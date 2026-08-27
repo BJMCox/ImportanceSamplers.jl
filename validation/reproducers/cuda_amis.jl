@@ -84,7 +84,21 @@ function assert_amis_transfers(transfers, rounds, ::Type{T}) where {T}
         count=rounds,
         bytes=rounds * sizeof(T),
     )
-    for reason in (:cdf_maximum, :cdf_sum)
+    for reason in (:cdf_maximum, :cdf_sum, :covariance_diagnostic)
+        @test getfield(record.reasons, reason) == (count=0, bytes=0)
+    end
+    return record
+end
+
+function assert_amis_factorization_failure_transfers(failure, ::Type{T}) where {T}
+    record = reported_transfer_record(failure.diagnostics.transfers)
+    @test record.count == 5
+    @test record.bytes == 3sizeof(UInt64) + 4sizeof(T)
+    @test record.reasons.failure_snapshot == (count=1, bytes=3sizeof(UInt64))
+    @test record.reasons.summary_maximum == (count=1, bytes=sizeof(T))
+    @test record.reasons.summary_scaled_sum == (count=1, bytes=sizeof(T))
+    @test record.reasons.covariance_diagnostic == (count=2, bytes=2sizeof(T))
+    for reason in (:cdf_maximum, :cdf_sum, :summary_scaled_square_sum)
         @test getfield(record.reasons, reason) == (count=0, bytes=0)
     end
     return record
@@ -474,9 +488,14 @@ function degenerate_scalar_covariance_case(device)
     end
     @test cpu_failure isa AMISRoundError
     @test cpu_failure.round == 1
-    @test cpu_failure.phase === :fit_proposal
+    @test cpu_failure.phase === :factorization
     @test cpu_failure.cause isa LinearAlgebra.PosDefException
     @test cpu_failure.cause.info == 1
+    @test cpu_failure.diagnostics.covariance == (
+        minimum_diagonal=zero(T),
+        maximum_absolute_entry=zero(T),
+    )
+    @test iszero(cpu_failure.diagnostics.transfers.count)
     @test current_proposal(cpu) == cpu_before
 
     caller = CUDA.device()
@@ -491,9 +510,15 @@ function degenerate_scalar_covariance_case(device)
     @test CUDA.device() == caller
     @test first_failure isa AMISRoundError
     @test first_failure.round == cpu_failure.round == 1
-    @test first_failure.phase === cpu_failure.phase === :fit_proposal
+    @test first_failure.phase === cpu_failure.phase === :factorization
     @test first_failure.cause isa LinearAlgebra.PosDefException
     @test first_failure.cause.info == cpu_failure.cause.info == 1
+    @test first_failure.diagnostics.covariance ==
+          cpu_failure.diagnostics.covariance
+    first_failure_transfers = assert_amis_factorization_failure_transfers(
+        first_failure,
+        T,
+    )
     @test current_proposal(MLDataDevices.cpu_device(), prepared) == before
     @test !prepared.running
     first_normals = Array(prepared.random_buffers.normal)
@@ -514,9 +539,15 @@ function degenerate_scalar_covariance_case(device)
     end
     @test CUDA.device() == caller
     @test second_failure isa AMISRoundError
-    @test second_failure.phase === :fit_proposal
+    @test second_failure.phase === :factorization
     @test second_failure.cause isa LinearAlgebra.PosDefException
     @test second_failure.cause.info == 1
+    @test second_failure.diagnostics.covariance ==
+          first_failure.diagnostics.covariance
+    second_failure_transfers = assert_amis_factorization_failure_transfers(
+        second_failure,
+        T,
+    )
     @test current_proposal(MLDataDevices.cpu_device(), prepared) == before
     @test Array(prepared.random_buffers.normal) != first_normals
     @test !prepared.running
@@ -530,6 +561,9 @@ function degenerate_scalar_covariance_case(device)
         caller_device_restored=true,
         failure_reason=:finite_positive_covariance,
         failure_snapshot=true,
+        covariance_diagnostics=first_failure.diagnostics.covariance,
+        first_failure_transfers,
+        second_failure_transfers,
     )
 end
 
@@ -589,9 +623,14 @@ function factor_overflow_transaction_case(device, ::Type{T}) where {T}
 
     @test failure isa AMISRoundError
     @test failure.round == 1
-    @test failure.phase === :fit_proposal
+    @test failure.phase === :factorization
     @test failure.cause isa LinearAlgebra.PosDefException
     @test failure.cause.info == 1
+    @test failure.diagnostics.covariance == (
+        minimum_diagonal=T(Inf),
+        maximum_absolute_entry=T(Inf),
+    )
+    failure_transfers = assert_amis_factorization_failure_transfers(failure, T)
     @test proposal_bits(after_failure) == before_bits
     @test rng.index == 2
     @test !running_after_failure
@@ -635,13 +674,15 @@ function factor_overflow_transaction_case(device, ::Type{T}) where {T}
         round_size,
         finite_input=true,
         covariance_overflow=true,
-        phase=:fit_proposal,
+        phase=:factorization,
         unchanged_committed_bits=true,
         rng_advanced=true,
         running_cleared=true,
         caller_device_restored=true,
         sample_and_covariance_resident=true,
         failure_snapshot=(count=1, bytes=3sizeof(UInt64)),
+        covariance_diagnostics=failure.diagnostics.covariance,
+        failure_transfers,
         recovery_transfers,
         successful_reuse=true,
     )
