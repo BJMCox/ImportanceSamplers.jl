@@ -1,6 +1,7 @@
 using Test
 using ImportanceSamplers
 import KernelAbstractions
+import LinearAlgebra
 import LogExpFunctions
 import Random
 
@@ -422,6 +423,53 @@ end
           AMISKernelIS._NATIVE_LOGWEIGHT_INVALID
 end
 
+@testset "AMIS batch target clears invalid round IDs" begin
+    for T in (Float32, Float64)
+        cases = (
+            (
+                sample=zero(T),
+                target=AMISKernelIS._NativeDeviceTarget{T,Base.Returns{T}}(
+                    Returns(T(NaN)),
+                ),
+                reason=AMISKernelIS._NATIVE_TARGET_NAN,
+            ),
+            (
+                sample=T(Inf),
+                target=AMISKernelIS._NativeDeviceTarget{T,Base.Returns{T}}(
+                    Returns(zero(T)),
+                ),
+                reason=AMISKernelIS._NATIVE_GENERATED_NONFINITE,
+            ),
+        )
+        for case in cases
+            logtargets = fill(T(-Inf), 1)
+            lognumerators = fill(T(-Inf), 1)
+            logweights = fill(T(-Inf), 1)
+            round_ids = fill(typemax(Int), 1)
+            failures = zeros(UInt64, 3)
+            backend = KernelAbstractions.get_backend(logweights)
+            kernel = AMISKernelIS._amis_batch_target_kernel!(backend)
+            kernel(
+                logtargets,
+                lognumerators,
+                logweights,
+                round_ids,
+                reshape(T[case.sample], 1, 1),
+                case.target,
+                2,
+                failures;
+                ndrange=1,
+            )
+            KernelAbstractions.synchronize(backend)
+            decoded = AMISKernelIS._decode_native_failure(failures[1], failures[2])
+
+            @test only(round_ids) == 0
+            @test decoded.count == 1
+            @test decoded.reason_bits == case.reason
+        end
+    end
+end
+
 @testset "AMIS native failures map to binding phases" begin
     empty = (
         count=UInt64(0),
@@ -604,6 +652,132 @@ end
     end
 end
 
+@testset "factor batches match triangular Gaussian equations" begin
+    for T in (Float32, Float64)
+        location = T[0.5, -1, 2]
+        factor = T[1.5 0 0; 0.25 0.75 0; -0.1 0.2 1.25]
+        history = AMISKernelIS._AMISFactorHistory(
+            reshape(copy(location), 3, 1),
+            reshape(copy(factor), 3, 3, 1),
+            T[-T(1.5) * log(T(2pi)) - sum(log, LinearAlgebra.diag(factor))],
+        )
+        normals = T[1 -2 0.5 3; -1 0.25 2 -0.5; 0.5 1 -1 0.75]
+        samples = zeros(T, size(normals))
+        scratch = similar(samples)
+        lognumerators = fill(T(-Inf), size(samples, 2))
+        logcounts = T[log(T(3))]
+        failures = zeros(UInt64, 3)
+
+        AMISKernelIS._factor_batch_draw!(samples, normals, history, 1)
+        AMISKernelIS._launch_factor_batch_logmixture!(
+            lognumerators,
+            scratch,
+            samples,
+            history,
+            1,
+            logcounts,
+            failures,
+            AMISKernelIS._SerialCPUExecution(),
+        )
+        KernelAbstractions.synchronize(KernelAbstractions.CPU())
+
+        expected_samples = location .+ factor * normals
+        expected_lognumerators = map(eachcol(expected_samples)) do sample
+            standardized = LinearAlgebra.LowerTriangular(factor) \ (sample - location)
+            logcounts[1] + history.lognormalizers[1] -
+            T(0.5) * sum(abs2, standardized)
+        end
+        @test samples ≈ expected_samples rtol = 8eps(T)
+        @test lognumerators ≈ expected_lognumerators rtol = 16eps(T)
+        @test iszero(failures[1])
+
+        fill!(lognumerators, zero(T))
+        fill!(samples, floatmax(T))
+        fill!(failures, zero(UInt64))
+        AMISKernelIS._launch_factor_batch_logmixture!(
+            lognumerators,
+            scratch,
+            samples,
+            history,
+            1,
+            logcounts,
+            failures,
+            AMISKernelIS._SerialCPUExecution(),
+        )
+        KernelAbstractions.synchronize(KernelAbstractions.CPU())
+        @test all(iszero, lognumerators)
+        @test iszero(failures[1])
+    end
+end
+
+@testset "AMIS factor batch rejects an invalid generating density" begin
+    for T in (Float32, Float64)
+        wide_factor = sqrt(floatmax(T))
+        overflow_normal = T(2) * wide_factor
+        history = AMISKernelIS._AMISFactorHistory(
+            zeros(T, 1, 2),
+            reshape(T[wide_factor, one(T)], 1, 1, 2),
+            T[-T(0.5) * log(T(2pi)) - log(wide_factor), -T(0.5) * log(T(2pi))],
+        )
+        samples = zeros(T, 1, 2)
+        logtargets = T[zero(T), T(-Inf)]
+        lognumerators = T[history.lognormalizers[1], T(-Inf)]
+        logweights = fill(T(-Inf), 2)
+        round_ids = [1, 0]
+        failures = zeros(UInt64, 3)
+
+        AMISKernelIS._launch_prefilled_amis_round!(
+            samples,
+            logtargets,
+            lognumerators,
+            logweights,
+            round_ids,
+            failures,
+            T[overflow_normal],
+            AMISKernelIS._NativeDeviceTarget{T,Base.Returns{T}}(Returns(zero(T))),
+            history,
+            zeros(T, 2),
+            [1, 2, 3],
+            2,
+            zeros(T, 1, 2),
+            AMISKernelIS._SerialCPUExecution(),
+            AMISKernelIS.MLDataDevices.CPUDevice(),
+            BatchedFactorExecution(),
+        )
+        decoded = AMISKernelIS._decode_native_failure(failures[1], failures[2])
+
+        @test decoded.count == 1
+        @test decoded.first_logical_index == 2
+        @test decoded.reason_bits == AMISKernelIS._NATIVE_PROPOSAL_INVALID
+    end
+end
+
+@testset "factor batch execution is explicit" begin
+    factor_history(dimension) = AMISKernelIS._prepare_method_state(
+        AMIS(
+            FactorGaussian(
+                zeros(dimension),
+                Matrix{Float64}(LinearAlgebra.I, dimension, dimension),
+            );
+            rounds=1,
+            round_size=4096,
+        ),
+    ).history
+
+    device = AMISKernelIS.MLDataDevices.CPUDevice()
+    history = factor_history(32)
+    @test !AMISKernelIS._use_factor_batch_path(
+        device,
+        history,
+        FusedFactorExecution(),
+    )
+    @test AMISKernelIS._use_factor_batch_path(
+        device,
+        history,
+        BatchedFactorExecution(),
+    )
+end
+
 @testset "AMIS diagnostics summarize each retrospective retained prefix" begin
     expected = (
         Float32=(
@@ -635,6 +809,7 @@ end
         first_lognormalizers = copy(first.diagnostics.round_lognormalizers)
 
         @test first.diagnostics.method === :amis
+        @test first.diagnostics.factor_execution_policy === :fused
         @test first.diagnostics.round_ess ≈ expected_type.ess rtol = 16eps(T)
         @test first.diagnostics.round_lognormalizers ≈
               expected_type.lognormalizers rtol = 16eps(T)

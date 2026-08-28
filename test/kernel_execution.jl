@@ -1,5 +1,6 @@
 import KernelAbstractions
 import KernelAbstractions: @index, @kernel
+import LinearAlgebra
 import MLDataDevices
 import Random
 
@@ -152,6 +153,7 @@ MLDataDevices.functional(::OwnedBufferAccelerator) = true
 @eval ImportanceSamplers begin
     _owned_backend_rng(::Main.OwnedBufferAccelerator, seed::UInt64) =
         Random.Xoshiro(seed)
+    _factor_batch_supported(::Main.OwnedBufferAccelerator) = true
 end
 
 struct SharedRNGAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
@@ -182,15 +184,43 @@ end
 end
 
 function _run_native_fused(
-    target, proposal, normal_buffer, threaded, nsamples=length(normal_buffer)
+    target,
+    proposal,
+    normal_buffer,
+    threaded,
+    nsamples=length(normal_buffer);
+    factor_execution=FusedFactorExecution(),
 )
     sampler = prepare_sampler(
         PrefilledNormalRNG(copy(normal_buffer), 0),
         target,
         ImportanceSampling(proposal; nsamples=nsamples);
+        factor_execution,
         threaded=threaded,
     )
     return @inferred importance_sample!(sampler)
+end
+
+function _run_native_factor_batch(target, proposal, normal_buffer)
+    dimension = ImportanceSamplers._proposal_dimension(proposal)
+    nsamples = length(normal_buffer) ÷ dimension
+    samples = Matrix{eltype(normal_buffer)}(undef, dimension, nsamples)
+    logweights = Vector{eltype(normal_buffer)}(undef, nsamples)
+    failure_record = ImportanceSamplers._DeviceFailureRecord(zeros(UInt64, 3))
+    target_evaluator = ImportanceSamplers._NativeDeviceTarget{
+        eltype(logweights),
+        typeof(target),
+    }(target)
+    ImportanceSamplers._launch_native_factor_batch!(
+        samples,
+        logweights,
+        failure_record,
+        copy(normal_buffer),
+        target_evaluator,
+        proposal,
+        ImportanceSamplers._SerialCPUExecution(),
+    )
+    return (; samples, logweights, failures=failure_record.storage)
 end
 
 function _native_unfused_reference(
@@ -219,6 +249,108 @@ function _check_vector_native_equivalence(::Type{T}, proposal, normals, target) 
     @test fused.samples == reference.samples
     @test fused.logweights ≈ reference.logweights rtol = tolerance atol = tolerance
     return fused
+end
+
+@testset "native factor batch matches fused factor execution" begin
+    for T in (Float32, Float64)
+        proposal = FactorGaussian(T[0.25, -0.5], T[1.25 0; -0.4 0.75])
+        normals = T[1, -2, -1, 2, 0.5, -0.5, -0.5, 0.5]
+        target = FusedVectorTarget(zero(T))
+        fused = _run_native_fused(target, proposal, normals, false, 4)
+        batch = _run_native_factor_batch(target, proposal, normals)
+        selected = _run_native_fused(
+            target,
+            proposal,
+            normals,
+            false,
+            4;
+            factor_execution=BatchedFactorExecution(),
+        )
+        @test batch.samples ≈ fused.samples rtol = 8eps(T)
+        @test batch.logweights ≈ fused.logweights rtol = 32eps(T)
+        @test selected.samples ≈ fused.samples rtol = 8eps(T)
+        @test selected.logweights ≈ fused.logweights rtol = 32eps(T)
+        @test iszero(batch.failures)
+    end
+end
+
+@testset "native factor batch preserves target failure priority" begin
+    samples = zeros(1, 1)
+    logweights = [-Inf]
+    failures = zeros(UInt64, 3)
+    target_function = sample -> NaN
+    target = ImportanceSamplers._NativeDeviceTarget{
+        Float64,
+        typeof(target_function),
+    }(target_function)
+    backend = KernelAbstractions.CPU()
+    kernel = ImportanceSamplers._native_factor_batch_finish_kernel!(backend)
+    kernel(
+        samples,
+        logweights,
+        failures,
+        target;
+        ndrange=1,
+        workgroupsize=1,
+    )
+    KernelAbstractions.synchronize(backend)
+    decoded = ImportanceSamplers._decode_native_failure(failures[1], failures[2])
+    @test decoded.reason_bits == ImportanceSamplers._NATIVE_TARGET_NAN
+end
+
+@testset "prepared sampler selects explicit factor execution" begin
+    dimension = 32
+    nsamples = 4096
+    proposal = FactorGaussian(
+        zeros(dimension),
+        Matrix{Float64}(LinearAlgebra.I, dimension, dimension),
+    )
+    sampler = prepare_sampler(
+        Random.Xoshiro(0x5010),
+        FusedVectorTarget(0.0),
+        ImportanceSampling(proposal; nsamples);
+        factor_execution=BatchedFactorExecution(),
+        threaded=true,
+    ) |> OwnedBufferAccelerator()
+    @test ImportanceSamplers._use_native_factor_batch_path(
+        sampler.device,
+        sampler.algorithm.proposal,
+        ImportanceSamplers._NoSampleTransform(),
+        sampler.factor_execution,
+    )
+    result = importance_sample!(sampler)
+    @test size(result.samples) == (dimension, nsamples)
+    @test all(isfinite, result.logweights)
+
+    factor32 = FactorGaussian(
+        zeros(Float32, dimension),
+        Matrix{Float32}(LinearAlgebra.I, dimension, dimension),
+    )
+    bank = ImportanceSamplers._pack_native_gaussian_bank(
+        ProposalBank([factor32, factor32], Float32[0.5, 0.5]),
+    )
+    denominator = ImportanceSamplers._FullMixtureDenominator()
+    @test ImportanceSamplers._use_factor_batch_mis_path(
+        sampler.device,
+        bank,
+        denominator,
+        Float32,
+        BatchedFactorExecution(),
+    )
+    @test !ImportanceSamplers._use_factor_batch_mis_path(
+        sampler.device,
+        bank,
+        denominator,
+        Float64,
+        BatchedFactorExecution(),
+    )
+    @test !ImportanceSamplers._use_factor_batch_mis_path(
+        sampler.device,
+        bank,
+        denominator,
+        Float32,
+        FusedFactorExecution(),
+    )
 end
 
 _view_backed_scale(scale::ImportanceSamplers._SphericalGaussianScale) = scale

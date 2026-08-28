@@ -42,6 +42,9 @@ struct _DMPMCRoundDenominator{L}
 end
 Adapt.@adapt_structure _DMPMCRoundDenominator
 
+_factor_batch_logcoefficients(bank, denominator::_DMPMCRoundDenominator) =
+    view(denominator.logcoefficients, :, denominator.round)
+
 @inline _mis_term_bounds(bank, ::_DMPMCRoundDenominator, generating_slot) =
     (1, _active_proposal_count(bank))
 
@@ -276,7 +279,15 @@ function _importance_sample_cpu!(
             Random.randn!(sampler.rng, buffers.normals)
         end
         _capture_dm_pmc_round(round, :sample_and_weight, round_size, round - 1) do
-            _launch_mis_round!(
+            denominator = _DMPMCRoundDenominator(plan.logcoefficients, round)
+            launch = _use_factor_batch_mis_path(
+                sampler.device,
+                bank,
+                denominator,
+                eltype(round_logweights),
+                sampler.factor_execution,
+            ) ? _launch_factor_batch_mis_round! : _launch_mis_round!
+            launch(
                 round_samples,
                 _MISRoundOutput(round_logweights, round_proposal_ids),
                 buffers.failure_scratch.record.storage,
@@ -284,7 +295,7 @@ function _importance_sample_cpu!(
                 target_evaluator,
                 bank,
                 assignments,
-                _DMPMCRoundDenominator(plan.logcoefficients, round),
+                denominator,
                 workspace.solve_scratch,
                 execution,
             )
@@ -339,6 +350,7 @@ function _importance_sample_cpu!(
         method=:deterministic_mixture_pmc,
         execution=_execution_name(execution),
         threaded=sampler.threaded,
+        factor_execution_policy=_factor_execution_name(sampler.factor_execution),
         rounds=sampler.algorithm.rounds,
         round_sizes=collect(plan.schedule),
         round_ess=round_ess,

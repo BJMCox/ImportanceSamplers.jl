@@ -8,6 +8,8 @@ import MLDataDevices
 ImportanceSamplers._backend_functional(::MLDataDevices.CUDADevice) =
     CUDA.functional()
 
+ImportanceSamplers._factor_batch_supported(::MLDataDevices.CUDADevice) = true
+
 function ImportanceSamplers._with_backend_device(
     f,
     device::MLDataDevices.CUDADevice,

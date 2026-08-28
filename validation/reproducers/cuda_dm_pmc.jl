@@ -1,5 +1,6 @@
 using CUDA
 using ImportanceSamplers
+using LinearAlgebra
 using MLDataDevices
 using Pkg
 using Random
@@ -508,6 +509,72 @@ function strict_resampling_and_ess_case(::Type{T}) where {T}
     return (; selected, ess=summary.ess, transfers=reason_record)
 end
 
+function factor_batch_case(device, ::Type{T}) where {T}
+    dimension = 32
+    round_size = 4096
+    proposal_count = 4
+    locations = Matrix{T}(undef, dimension, proposal_count)
+    factors = Array{T}(undef, dimension, dimension, proposal_count)
+    proposals = map(1:proposal_count) do proposal
+        location = T.(range(-0.3, 0.3; length=dimension)) .+
+                   T(0.2proposal)
+        factor = Matrix{T}(I, dimension, dimension)
+        for index in 1:dimension
+            factor[index, index] = T(0.7) + T(0.04proposal) + T(0.004index)
+            index > 1 && (factor[index, index - 1] = T(0.015proposal))
+        end
+        locations[:, proposal] = location
+        factors[:, :, proposal] = factor
+        FactorGaussian(location, factor)
+    end
+    masses = T[1, 2, 3, 4]
+    prepared = prepare_sampler(
+        Xoshiro(DM_PMC_CUDA_SEED + 0x500),
+        DMPMCQuadraticTarget{T}(),
+        DeterministicMixturePMC(
+            ProposalBank(proposals, masses);
+            rounds=2,
+            round_size,
+        );
+        factor_execution=BatchedFactorExecution(),
+        threaded=true,
+    ) |> device
+    state = prepared.method_state
+    denominator = IS._DMPMCRoundDenominator(state.plan.logcoefficients, 1)
+    first_logcoefficients = Array(view(state.plan.logcoefficients, :, 1))
+    @test IS._use_factor_batch_mis_path(
+        prepared.device,
+        state.bank,
+        denominator,
+        T,
+        prepared.factor_execution,
+    )
+    result = importance_sample!(prepared)
+    CUDA.synchronize()
+    assert_dm_pmc_residence(prepared, result)
+    @test length(result) == 2round_size
+    samples = Array(result.samples)[:, 1:round_size]
+    observed = Array(result.logweights)[1:round_size]
+    expected = map(eachcol(samples)) do sample
+        logdenominator = T(-Inf)
+        for proposal in 1:proposal_count
+            standardized = LowerTriangular(view(factors, :, :, proposal)) \
+                           (sample - view(locations, :, proposal))
+            logdensity = -T(0.5dimension) * log(T(2pi)) -
+                         sum(log, diag(view(factors, :, :, proposal))) -
+                         T(0.5) * sum(abs2, standardized)
+            term = first_logcoefficients[proposal] + logdensity
+            largest = max(logdenominator, term)
+            logdenominator = largest == -Inf ? largest :
+                             largest + log1p(exp(min(logdenominator, term) - largest))
+        end
+        DMPMCQuadraticTarget{T}()(sample) - logdenominator
+    end
+    tolerance = T(8192) * eps(T)
+    @test observed ≈ expected rtol = tolerance atol = tolerance
+    return (scalar_type=T, dimension, round_size)
+end
+
 function environment_record()
     root = normpath(joinpath(@__DIR__, "..", ".."))
     gpu = CUDA.device()
@@ -568,6 +635,7 @@ function main()
         Float32 => strict_resampling_and_ess_case(Float32),
         Float64 => strict_resampling_and_ess_case(Float64),
     )
+    factor_batches = [factor_batch_case(device, T) for T in (Float32, Float64)]
     @test Tuple(row.label for row in DM_PMC_CUDA_CAPABILITY_ROWS) == (
         :float32_diagonal,
         :float64_diagonal,
@@ -613,6 +681,7 @@ function main()
         static_factor,
         private_prefilled_parity,
         public_execution,
+        factor_batches,
         rows,
     )
 end

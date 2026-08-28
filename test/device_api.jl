@@ -264,6 +264,7 @@ end
         algorithm::AMIS,
         method_state::_PreparedAMIS,
         random_buffers::_RandomBuffers,
+        factor_execution,
     ) = nothing
 
     function _amis_potrf!(
@@ -369,6 +370,7 @@ end
 
 function make_transfer_sampler(
     rng::Random.AbstractRNG;
+    factor_execution=FusedFactorExecution(),
     threaded=true,
     target=TransferTarget([0.25]),
 )
@@ -380,6 +382,7 @@ function make_transfer_sampler(
         target,
         context,
         algorithm;
+        factor_execution,
         threaded=threaded,
     )
 end
@@ -423,7 +426,11 @@ end
 @testset "explicit prepared device transfer" begin
     cpu = MLDataDevices.cpu_device()
     cpu32 = MLDataDevices.cpu_device(Float32)
-    source = make_transfer_sampler(2101; threaded=false)
+    source = make_transfer_sampler(
+        2101;
+        factor_execution=BatchedFactorExecution(),
+        threaded=false,
+    )
     source_parts = prepared_parts(source)
 
     @test source_parts.device isa MLDataDevices.CPUDevice
@@ -448,6 +455,8 @@ end
     @test destination_parts.device === cpu32
     @test destination_parts.algorithm.nsamples == source_parts.algorithm.nsamples
     @test getfield(destination, :threaded) === getfield(source, :threaded)
+    @test getfield(destination, :factor_execution) ===
+          getfield(source, :factor_execution)
     @test getfield(destination, :executed) === false
     @test destination_parts.callable isa TransferTarget
     @test destination_parts.callable.offset == source_parts.callable.offset
@@ -1372,20 +1381,25 @@ end
     @test rand(unsupported.rng, UInt64) == rand(expected_unsupported_rng, UInt64)
 end
 
-@testset "AMIS round diagnostics transfer only three device scalars" begin
+@testset "AMIS normalization returns the reusable round summary" begin
     for T in (Float32, Float64)
-        logweights = KernelArgumentTestArray(T[log(T(1)), log(T(3)), log(T(2)), T(100)])
+        logweights = T[log(T(1)), log(T(3)), log(T(2)), T(100)]
+        normalized = zeros(T, 4)
         transfers = IS._ResultTransferCounter(0, 0)
 
-        summary = @inferred IS._logweight_summary(view(logweights, 1:3), transfers)
+        summary = @inferred IS._normalize_amis_weights!(
+            normalized,
+            logweights,
+            3,
+            transfers,
+        )
 
+        @test normalized[1:3] ≈ T[1 / 6, 1 / 2, 1 / 3] rtol = 8eps(T)
+        @test normalized[4] == zero(T)
         @test summary.ess ≈ T(18 / 7) rtol = 8eps(T)
         @test summary.lognormalizer ≈ log(T(2)) rtol = 8eps(T)
-        @test transfers.count == 3
-        @test transfers.bytes == 3sizeof(T)
-        @test transfers.reasons.logweight_maximum.count == 1
-        @test transfers.reasons.logweight_scaled_sum.count == 1
-        @test transfers.reasons.logweight_scaled_square_sum.count == 1
+        @test iszero(transfers.count)
+        @test iszero(transfers.bytes)
     end
 end
 
@@ -1516,6 +1530,7 @@ end
         base.algorithm,
         state,
         base.device,
+        base.factor_execution,
         base.threaded,
         false,
         false,
@@ -1587,6 +1602,7 @@ end
         prepared.algorithm,
         state,
         prepared.device,
+        prepared.factor_execution,
         prepared.threaded,
         false,
         false,
@@ -1646,6 +1662,7 @@ end
         base.algorithm,
         base.method_state,
         base.device,
+        base.factor_execution,
         base.threaded,
         false,
         false,

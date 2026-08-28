@@ -110,10 +110,24 @@ function _logweight_summary(
         eltype(logweights),
         Val(:logweight_scaled_square_sum),
     )
-    T = eltype(logweights)
+    return _logweight_summary(
+        maximum_logweight,
+        scaled_sum,
+        scaled_square_sum,
+        length(logweights),
+    )
+end
+
+@inline function _logweight_summary(
+    maximum_logweight,
+    scaled_sum,
+    scaled_square_sum,
+    sample_count,
+)
+    T = typeof(maximum_logweight)
     return (
         ess=abs2(scaled_sum) / scaled_square_sum,
-        lognormalizer=maximum_logweight + log(scaled_sum) - log(T(length(logweights))),
+        lognormalizer=maximum_logweight + log(scaled_sum) - log(T(sample_count)),
     )
 end
 
@@ -318,16 +332,33 @@ function _importance_sample!(sampler, execution::_KernelExecution)
         log_type,
         target_failures,
     )
-    _launch_native_fused!(
-        samples,
-        logweights,
-        failure_record,
-        normal_buffer,
-        target_evaluator,
+    if _use_native_factor_batch_path(
+        sampler.device,
         base,
         transform,
-        execution.cpu_execution,
+        sampler.factor_execution,
     )
+        _launch_native_factor_batch!(
+            samples,
+            logweights,
+            failure_record,
+            normal_buffer,
+            target_evaluator,
+            base,
+            execution.cpu_execution,
+        )
+    else
+        _launch_native_fused!(
+            samples,
+            logweights,
+            failure_record,
+            normal_buffer,
+            target_evaluator,
+            base,
+            transform,
+            execution.cpu_execution,
+        )
+    end
     snapshot = _device_failure_snapshot(failure_record)
     _throw_native_failures(
         snapshot.failure,
@@ -361,6 +392,7 @@ function _preflight_native_kernel_target(
     target,
     proposal,
     buffers::_RandomBuffers,
+    factor_execution,
 )
     samples = _allocate_native_samples(buffers.normal, proposal, 1)
     binding_sample = _native_binding_sample(samples)
@@ -375,7 +407,17 @@ function _preflight_native_kernel_target(
         _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
     backend = KernelAbstractions.get_backend(buffers.normal)
     kernel = _native_gaussian_fused_kernel!(backend)
-    return _preflight_kernel_argument(device, kernel, target_argument)
+    _preflight_kernel_argument(device, kernel, target_argument)
+    if _use_native_factor_batch_path(
+        device,
+        base,
+        _native_fused_components(proposal)[2],
+        factor_execution,
+    )
+        batch_kernel = _native_factor_batch_finish_kernel!(backend)
+        _preflight_kernel_argument(device, batch_kernel, target_argument)
+    end
+    return nothing
 end
 
 function _preflight_kernel_argument(device, kernel, argument)

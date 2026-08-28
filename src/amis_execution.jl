@@ -15,6 +15,10 @@ struct _AMISStageError{E} <: Exception
     cause::E
 end
 
+struct _AMISFitFailure{E}
+    cause::E
+end
+
 @noinline function _throw_amis_stage(phase, cause)
     cause isa _AMISStageError && throw(cause)
     throw(_AMISStageError(phase, cause))
@@ -228,7 +232,53 @@ function _launch_form_amis_logweights!(
     return nothing
 end
 
-function _launch_prefilled_amis_round!(
+@inline function _amis_batch_sample_finite(samples, sample_index)
+    valid = true
+    @inbounds for coordinate in axes(samples, 1)
+        valid &= isfinite(samples[coordinate, sample_index])
+    end
+    return valid
+end
+
+@kernel function _amis_batch_target_kernel!(
+    logtargets,
+    lognumerators,
+    logweights,
+    round_ids,
+    samples,
+    target,
+    round,
+    failure_storage,
+)
+    sample_index = @index(Global, Linear)
+    T = eltype(logweights)
+    @inbounds logtargets[sample_index] = T(-Inf)
+    @inbounds lognumerators[sample_index] = T(-Inf)
+    @inbounds logweights[sample_index] = T(-Inf)
+    @inbounds round_ids[sample_index] = 0
+    if !_amis_batch_sample_finite(samples, sample_index)
+        _record_native_failure!(
+            failure_storage,
+            sample_index,
+            0,
+            _NATIVE_GENERATED_NONFINITE,
+        )
+    else
+        target_log, reason, failed = target(
+            _native_sample_at(samples, sample_index),
+            sample_index,
+        )
+        if failed
+            iszero(reason) ||
+                _record_native_failure!(failure_storage, sample_index, 0, reason)
+        else
+            @inbounds logtargets[sample_index] = target_log
+            @inbounds round_ids[sample_index] = round
+        end
+    end
+end
+
+function _launch_prefilled_amis_factor_batch!(
     samples,
     logtargets,
     lognumerators,
@@ -247,57 +297,175 @@ function _launch_prefilled_amis_round!(
     first_sample = offsets[round]
     last_sample = offsets[round + 1] - 1
     old_sample_count = first_sample - 1
-    phase = :sampling
+    new_indices = first_sample:last_sample
+    new_sample_count = length(new_indices)
+    dimension = _mis_dimension(history)
+    backend = KernelAbstractions.get_backend(normal_buffer)
+    phase = :denominator
     try
-    if !iszero(old_sample_count)
-        phase = :denominator
-        old_indices = 1:old_sample_count
-        _launch_append_logmixture!(
-            view(lognumerators, old_indices),
-            _sample_view(samples, old_indices),
+        phase = :sampling
+        new_samples = _sample_view(samples, new_indices)
+        normals = reshape(
+            view(normal_buffer, 1:(dimension * new_sample_count)),
+            dimension,
+            new_sample_count,
+        )
+        _factor_batch_draw!(new_samples, normals, history, round)
+
+        target_kernel = _amis_batch_target_kernel!(backend)
+        target_kernel(
+            view(logtargets, new_indices),
+            view(lognumerators, new_indices),
+            view(logweights, new_indices),
+            view(round_ids, new_indices),
+            new_samples,
+            target,
+            round,
+            failure_storage;
+            ndrange=new_sample_count,
+            workgroupsize=_native_workgroupsize(execution, new_sample_count),
+        )
+
+        new_round_ids = view(round_ids, new_indices)
+        for proposal_slot in 1:(round - 1)
+            _launch_factor_batch_logmixture!(
+                view(lognumerators, new_indices),
+                view(solve_scratch, :, new_indices),
+                new_samples,
+                history,
+                proposal_slot,
+                logcounts,
+                failure_storage,
+                execution,
+                new_round_ids,
+                new_round_ids,
+            )
+        end
+
+        iszero(old_sample_count) || KernelAbstractions.synchronize(backend)
+        phase = iszero(old_sample_count) ? :sampling : :denominator
+        current_indices = 1:last_sample
+        current_round_ids = view(round_ids, current_indices)
+        _launch_factor_batch_logmixture!(
+            view(lognumerators, current_indices),
+            view(solve_scratch, :, current_indices),
+            _sample_view(samples, current_indices),
             history,
             round,
             logcounts,
             failure_storage,
+            execution,
+            current_round_ids,
+            current_round_ids,
+        )
+
+        KernelAbstractions.synchronize(backend)
+        phase = :weight
+        logtotal = log(eltype(logcounts)(last_sample))
+        _launch_form_amis_logweights!(
+            view(logweights, current_indices),
+            view(logtargets, current_indices),
+            view(lognumerators, current_indices),
+            logtotal,
+            failure_storage,
+            execution,
+        )
+    catch cause
+        _throw_amis_stage(phase, cause)
+    end
+    return nothing
+end
+
+function _launch_prefilled_amis_round!(
+    samples,
+    logtargets,
+    lognumerators,
+    logweights,
+    round_ids,
+    failure_storage,
+    normal_buffer,
+    target,
+    history,
+    logcounts,
+    offsets,
+    round,
+    solve_scratch,
+    execution,
+    device=nothing,
+    factor_execution=FusedFactorExecution(),
+)
+    first_sample = offsets[round]
+    last_sample = offsets[round + 1] - 1
+    old_sample_count = first_sample - 1
+    phase = :sampling
+    try
+        if _use_factor_batch_path(device, history, factor_execution)
+            return _launch_prefilled_amis_factor_batch!(
+                samples,
+                logtargets,
+                lognumerators,
+                logweights,
+                round_ids,
+                failure_storage,
+                normal_buffer,
+                target,
+                history,
+                logcounts,
+                offsets,
+                round,
+                solve_scratch,
+                execution,
+            )
+        end
+        if !iszero(old_sample_count)
+            phase = :denominator
+            old_indices = 1:old_sample_count
+            _launch_append_logmixture!(
+                view(lognumerators, old_indices),
+                _sample_view(samples, old_indices),
+                history,
+                round,
+                logcounts,
+                failure_storage,
+                solve_scratch,
+                execution,
+            )
+        end
+
+        phase = :sampling
+        new_indices = first_sample:last_sample
+        logtotal = log(eltype(logcounts)(last_sample))
+        output = _AMISRoundOutput(
+            view(logtargets, new_indices),
+            view(lognumerators, new_indices),
+            view(logweights, new_indices),
+            view(round_ids, new_indices),
+            logtotal,
+            round,
+        )
+        _launch_mis_round!(
+            _sample_view(samples, new_indices),
+            output,
+            failure_storage,
+            normal_buffer,
+            target,
+            history,
+            _FixedMISAssignments(round, length(new_indices)),
+            _AMISMixtureDenominator(logcounts, round),
             solve_scratch,
             execution,
         )
-    end
 
-    phase = :sampling
-    new_indices = first_sample:last_sample
-    logtotal = log(eltype(logcounts)(last_sample))
-    output = _AMISRoundOutput(
-        view(logtargets, new_indices),
-        view(lognumerators, new_indices),
-        view(logweights, new_indices),
-        view(round_ids, new_indices),
-        logtotal,
-        round,
-    )
-    _launch_mis_round!(
-        _sample_view(samples, new_indices),
-        output,
-        failure_storage,
-        normal_buffer,
-        target,
-        history,
-        _FixedMISAssignments(round, length(new_indices)),
-        _AMISMixtureDenominator(logcounts, round),
-        solve_scratch,
-        execution,
-    )
-
-    phase = :weight
-    current_indices = 1:last_sample
-    _launch_form_amis_logweights!(
-        view(logweights, current_indices),
-        view(logtargets, current_indices),
-        view(lognumerators, current_indices),
-        logtotal,
-        failure_storage,
-        execution,
-    )
+        phase = :weight
+        current_indices = 1:last_sample
+        _launch_form_amis_logweights!(
+            view(logweights, current_indices),
+            view(logtargets, current_indices),
+            view(lognumerators, current_indices),
+            logtotal,
+            failure_storage,
+            execution,
+        )
     catch cause
         _throw_amis_stage(phase, cause)
     end
@@ -309,6 +477,7 @@ function _preflight_amis_kernels(
     target,
     method_state::_PreparedAMIS,
     buffers::_RandomBuffers,
+    factor_execution,
 )
     history = method_state.history
     workspace = method_state.workspace
@@ -378,6 +547,34 @@ function _preflight_amis_kernels(
         buffers.failure_scratch.record.storage,
     )
         _preflight_kernel_argument(device, weight_kernel, argument)
+    end
+
+    if _use_factor_batch_path(device, history, factor_execution)
+        target_kernel = _amis_batch_target_kernel!(backend)
+        for argument in (
+            view(workspace.logtargets, new_indices),
+            view(workspace.lognumerators, new_indices),
+            view(workspace.logweights, new_indices),
+            round_ids,
+            samples,
+            target_argument,
+            representative_round,
+            buffers.failure_scratch.record.storage,
+        )
+            _preflight_kernel_argument(device, target_kernel, argument)
+        end
+
+        append_batch_kernel = _append_factor_batch_logmixture_kernel!(backend)
+        for argument in (
+            view(workspace.lognumerators, new_indices),
+            view(workspace.centered_scaled, :, new_indices),
+            history.lognormalizers,
+            method_state.logcounts,
+            representative_round,
+            buffers.failure_scratch.record.storage,
+        )
+            _preflight_kernel_argument(device, append_batch_kernel, argument)
+        end
     end
 
     if history isa _AMISScalarHistory
@@ -465,8 +662,20 @@ function _normalize_amis_weights!(
         Val(:logweight_scaled_sum),
     )
     isfinite(total) && total > zero(T) || throw(AllZeroWeightsError())
+    scaled_square_sum = sum(abs2, active_weights)
+    _record_device_scalar_transfer!(
+        transfers,
+        normalized_weights,
+        T,
+        Val(:logweight_scaled_square_sum),
+    )
     active_weights ./= total
-    return nothing
+    return _logweight_summary(
+        maximum_logweight,
+        total,
+        scaled_square_sum,
+        sample_count,
+    )
 end
 
 @inline function _amis_factor_candidate_valid(
@@ -708,7 +917,7 @@ function _fit_amis_proposal!(
     backend = KernelAbstractions.get_backend(workspace.covariance)
     phase = :moment
     try
-    _normalize_amis_weights!(
+    summary = _normalize_amis_weights!(
         workspace.normalized_weights,
         workspace.logweights,
         sample_count,
@@ -740,7 +949,7 @@ function _fit_amis_proposal!(
         ndrange=1,
     )
     KernelAbstractions.synchronize(backend)
-    return nothing
+    return summary
     catch cause
         _throw_amis_stage(phase, cause)
     end
@@ -761,7 +970,7 @@ function _fit_amis_proposal!(
     backend = KernelAbstractions.get_backend(workspace.covariance)
     phase = :moment
     try
-    _normalize_amis_weights!(
+    summary = _normalize_amis_weights!(
         workspace.normalized_weights,
         workspace.logweights,
         sample_count,
@@ -794,7 +1003,7 @@ function _fit_amis_proposal!(
         ndrange=length(workspace.candidate_scale),
     )
     KernelAbstractions.synchronize(backend)
-    return nothing
+    return summary
     catch cause
         _throw_amis_stage(phase, cause)
     end
@@ -1016,10 +1225,10 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAMIS, thread
     rounds = length(schedule)
     total_samples = last(committed_state.offsets) - 1
     round_ids = similar(workspace.logweights, Int, total_samples)
-    round_ess = Vector{eltype(workspace.logweights)}(undef, rounds)
-    round_lognormalizers = similar(round_ess)
     transfers = _ResultTransferCounter(0, 0)
     accelerator = sampler.device isa MLDataDevices.AbstractAcceleratorDevice
+    round_ess = Vector{eltype(workspace.logweights)}(undef, rounds)
+    round_lognormalizers = similar(round_ess)
     workspace_candidate = accelerator || history isa _AMISFactorHistory
     _reset_amis_history!(history, rounds)
     method_state = if committed_state.committed_in_workspace
@@ -1076,6 +1285,8 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAMIS, thread
                 round,
                 workspace.centered_scaled,
                 execution,
+                sampler.device,
+                sampler.factor_execution,
             )
             if !deferred_accelerator_snapshot
                 snapshot = _amis_failure_snapshot!(
@@ -1090,7 +1301,7 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAMIS, thread
                 )
             end
         end
-        fit_failure = if deferred_accelerator_snapshot
+        fit_result = if deferred_accelerator_snapshot
             try
                 _fit_amis_proposal!(
                     sampler.device,
@@ -1101,9 +1312,8 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAMIS, thread
                     transfers,
                     buffers.failure_scratch.record.storage,
                 )
-                nothing
             catch cause
-                cause
+                _AMISFitFailure(cause)
             end
         else
             final_proposal = _capture_amis_round(
@@ -1147,9 +1357,10 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAMIS, thread
                 round - 1,
                 workspace.covariance,
             ) do
-                isnothing(fit_failure) || throw(fit_failure)
-                snapshot.failure.reason_bits == _AMIS_COVARIANCE_INVALID &&
+                fit_result isa _AMISFitFailure && throw(fit_result.cause)
+                if snapshot.failure.reason_bits == _AMIS_COVARIANCE_INVALID
                     throw(LinearAlgebra.PosDefException(1))
+                end
             end
         end
         _capture_amis_round(
@@ -1159,15 +1370,20 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAMIS, thread
             :result_construction,
             round - 1,
         ) do
-            summary = _logweight_summary(
-                view(
-                    workspace.logweights,
-                    1:(method_state.offsets[round + 1] - 1),
-                ),
-                transfers,
-            )
-            round_ess[round] = summary.ess
-            round_lognormalizers[round] = summary.lognormalizer
+            if accelerator
+                round_ess[round] = fit_result.ess
+                round_lognormalizers[round] = fit_result.lognormalizer
+            else
+                summary = _logweight_summary(
+                    view(
+                        workspace.logweights,
+                        1:(method_state.offsets[round + 1] - 1),
+                    ),
+                    transfers,
+                )
+                round_ess[round] = summary.ess
+                round_lognormalizers[round] = summary.lognormalizer
+            end
         end
         if round < rounds
             if workspace_candidate
@@ -1182,6 +1398,7 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAMIS, thread
         method=:amis,
         execution=_execution_name(execution),
         threaded=sampler.threaded,
+        factor_execution_policy=_factor_execution_name(sampler.factor_execution),
         rounds=rounds,
         round_sizes=collect(schedule),
         round_ess=round_ess,

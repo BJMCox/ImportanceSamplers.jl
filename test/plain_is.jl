@@ -262,6 +262,8 @@ function DensityInterface.logdensityof(
     return proposal.logdensities[sample_index]
 end
 
+struct UnsupportedFactorExecution <: ImportanceSamplers._AbstractFactorExecution end
+
 @testset "prepared serial importance sampling" begin
     identity_proposal = TestScalarProposal(0.0)
     identity_algorithm = ImportanceSampling(identity_proposal; nsamples=8)
@@ -275,6 +277,7 @@ end
 
     @test getfield(identity_sampler, :rng) === identity_rng
     @test getfield(identity_sampler, :device) isa MLDataDevices.CPUDevice
+    @test getfield(identity_sampler, :factor_execution) isa FusedFactorExecution
     @test getfield(identity_sampler, :threaded) === false
     @test nameof(typeof(identity_sampler)) ∉ names(ImportanceSamplers)
 
@@ -285,10 +288,36 @@ end
     @test identity_result.diagnostics.method === :importance_sampling
     @test identity_result.diagnostics.execution === :serial
     @test identity_result.diagnostics.threaded === false
+    @test identity_result.diagnostics.factor_execution_policy === :fused
     @test identity_result.diagnostics.nsamples == 8
     @test identity_result.diagnostics.failures == 0
     @test identity_result.diagnostics.transfers.count == 0
     @test identity_result.diagnostics.transfers.bytes == 0
+
+    batched_sampler = @inferred prepare_sampler(
+        Random.Xoshiro(101),
+        sample -> DensityInterface.logdensityof(identity_proposal, sample),
+        identity_algorithm;
+        factor_execution=BatchedFactorExecution(),
+        threaded=false,
+    )
+    @test getfield(batched_sampler, :factor_execution) isa BatchedFactorExecution
+    @test importance_sample!(batched_sampler).diagnostics.factor_execution_policy ===
+          :batched
+    @test_throws ArgumentError prepare_sampler(
+        Random.Xoshiro(101),
+        sample -> DensityInterface.logdensityof(identity_proposal, sample),
+        identity_algorithm;
+        factor_execution=UnsupportedFactorExecution(),
+        threaded=false,
+    )
+    @test_throws ArgumentError prepare_sampler(
+        Random.Xoshiro(101),
+        sample -> DensityInterface.logdensityof(identity_proposal, sample),
+        identity_algorithm;
+        factor_execution=:batched,
+        threaded=false,
+    )
 
     @testset "preparation resolves known targets once" begin
         mismatched_proposal = TestVectorProposal(zeros(2))

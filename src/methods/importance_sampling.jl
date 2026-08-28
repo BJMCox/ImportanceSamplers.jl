@@ -196,21 +196,56 @@ struct _ContextualPreparedTarget{T,P}
     context::P
 end
 
-mutable struct _PreparedImportanceSampler{R,B,T,A,M,D}
+abstract type _AbstractFactorExecution end
+
+"""
+    FusedFactorExecution()
+
+Evaluate each factor-Gaussian draw and density in fused sample kernels. This is
+the default and gives stable performance across sample counts and devices.
+"""
+struct FusedFactorExecution <: _AbstractFactorExecution end
+
+"""
+    BatchedFactorExecution()
+
+Use batched matrix multiplication and triangular solves for factor-Gaussian
+draws and densities when the sampler and device support them. Other cases use
+the fused path. Benchmark this explicit request on the target device.
+"""
+struct BatchedFactorExecution <: _AbstractFactorExecution end
+
+_factor_execution_name(::FusedFactorExecution) = :fused
+_factor_execution_name(::BatchedFactorExecution) = :batched
+
+function _validate_factor_execution(factor_execution)
+    factor_execution isa Union{FusedFactorExecution,BatchedFactorExecution} || throw(
+        ArgumentError(
+            "factor_execution must be FusedFactorExecution() or " *
+            "BatchedFactorExecution()",
+        ),
+    )
+    return factor_execution
+end
+
+mutable struct _PreparedImportanceSampler{R,B,T,A,M,D,F}
     rng::R
     random_buffers::B
     target::T
     algorithm::A
     method_state::M
     device::D
+    factor_execution::F
     threaded::Bool
     running::Bool
     executed::Bool
 end
 
 """
-    prepare_sampler(rng, logtarget, algorithm; threaded=true)
-    prepare_sampler(rng, logtarget, p, algorithm; threaded=true)
+    prepare_sampler(rng, logtarget, algorithm;
+                    factor_execution=FusedFactorExecution(), threaded=true)
+    prepare_sampler(rng, logtarget, p, algorithm;
+                    factor_execution=FusedFactorExecution(), threaded=true)
 
 Bind a target, optional context `p`, algorithm, CPU execution policy, and RNG
 into a reusable prepared sampler.
@@ -238,15 +273,26 @@ Native CUDA execution requires `threaded=true` and keeps returned arrays on the
 device. Set `threaded=false` for serial CPU evaluation. On CPU,
 `threaded=true` falls back to serial execution when Julia has one default
 thread; accelerator launch policy does not depend on host thread count.
+`factor_execution=FusedFactorExecution()` selects the stable default factor
+path. Use `BatchedFactorExecution()` to request batched factor-Gaussian matrix
+operations when supported; other cases use the fused path. Benchmark that
+explicit choice locally.
 """
 function prepare_sampler(
     rng::Random.AbstractRNG,
     logtarget,
     algorithm::AbstractImportanceSampler;
+    factor_execution=FusedFactorExecution(),
     threaded=true,
 )
     target = _ContextFreePreparedTarget(logtarget)
-    return _prepare_importance_sampler(rng, target, algorithm, threaded)
+    return _prepare_importance_sampler(
+        rng,
+        target,
+        algorithm,
+        factor_execution,
+        threaded,
+    )
 end
 
 function prepare_sampler(
@@ -254,14 +300,28 @@ function prepare_sampler(
     logtarget,
     context,
     algorithm::AbstractImportanceSampler;
+    factor_execution=FusedFactorExecution(),
     threaded=true,
 )
     target = _ContextualPreparedTarget(logtarget, context)
-    return _prepare_importance_sampler(rng, target, algorithm, threaded)
+    return _prepare_importance_sampler(
+        rng,
+        target,
+        algorithm,
+        factor_execution,
+        threaded,
+    )
 end
 
-function _prepare_importance_sampler(rng, target, algorithm, threaded)
+function _prepare_importance_sampler(
+    rng,
+    target,
+    algorithm,
+    factor_execution,
+    threaded,
+)
     threaded isa Bool || throw(ArgumentError("threaded must be Bool"))
+    factor_execution = _validate_factor_execution(factor_execution)
     proposal = _algorithm_proposal(algorithm)
     sample_budget = _algorithm_sample_budget(algorithm)
     prepared_target = _resolve_prepared_target(target, proposal)
@@ -280,6 +340,7 @@ function _prepare_importance_sampler(rng, target, algorithm, threaded)
         algorithm,
         method_state,
         device,
+        factor_execution,
         threaded,
         false,
         false,
@@ -355,12 +416,14 @@ function _preflight_accelerator_method(
     algorithm,
     ::_SingleProposalMethodState,
     random_buffers,
+    factor_execution,
 )
     return _preflight_native_kernel_target(
         device,
         target,
         algorithm.proposal,
         random_buffers,
+        factor_execution,
     )
 end
 
@@ -395,6 +458,7 @@ function _transfer_prepared_sampler(
         algorithm,
         method_state,
         device,
+        sampler.factor_execution,
         sampler.threaded,
         false,
         false,
@@ -467,6 +531,7 @@ function _transfer_prepared_sampler(
             algorithm,
             method_state,
             random_buffers,
+            sampler.factor_execution,
         )
         source_rng = _clone_rng(device, sampler.rng)
         seed = try
@@ -486,6 +551,7 @@ function _transfer_prepared_sampler(
             algorithm,
             method_state,
             device,
+            sampler.factor_execution,
             sampler.threaded,
             false,
             false,
@@ -511,8 +577,10 @@ function (device::MLDataDevices.AbstractDevice)(sampler::_PreparedImportanceSamp
 end
 
 """
-    importance_sample(rng, logtarget, algorithm; threaded=true)
-    importance_sample(rng, logtarget, p, algorithm; threaded=true)
+    importance_sample(rng, logtarget, algorithm;
+                      factor_execution=FusedFactorExecution(), threaded=true)
+    importance_sample(rng, logtarget, p, algorithm;
+                      factor_execution=FusedFactorExecution(), threaded=true)
 
 Run one complete importance-sampling estimator.
 
@@ -529,12 +597,14 @@ function importance_sample(
     rng::Random.AbstractRNG,
     logtarget,
     algorithm::AbstractImportanceSampler;
+    factor_execution=FusedFactorExecution(),
     threaded=true,
 )
     sampler = prepare_sampler(
         rng,
         logtarget,
         algorithm;
+        factor_execution=factor_execution,
         threaded=threaded,
     )
     return importance_sample!(sampler)
@@ -545,6 +615,7 @@ function importance_sample(
     logtarget,
     context,
     algorithm::AbstractImportanceSampler;
+    factor_execution=FusedFactorExecution(),
     threaded=true,
 )
     sampler = prepare_sampler(
@@ -552,6 +623,7 @@ function importance_sample(
         logtarget,
         context,
         algorithm;
+        factor_execution=factor_execution,
         threaded=threaded,
     )
     return importance_sample!(sampler)
@@ -606,6 +678,7 @@ function _importance_sample_cpu!(sampler, ::_SingleProposalMethodState, threaded
         method=:importance_sampling,
         execution=_execution_name(execution),
         threaded=sampler.threaded,
+        factor_execution_policy=_factor_execution_name(sampler.factor_execution),
         nsamples=sampler.algorithm.nsamples,
         failures=0,
         transfers=transfers,

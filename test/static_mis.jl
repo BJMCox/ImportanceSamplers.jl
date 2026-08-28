@@ -204,6 +204,7 @@ end
     @test zero_mass_proposal.density_count[] == 0
     @test result.diagnostics.method === :importance_sampling
     @test result.diagnostics.mis_scheme === :stratified_mixture
+    @test result.diagnostics.factor_execution_policy === :fused
     @test sampler.method_state isa IS._PreparedStaticMIS
     @test sampler.method_state.design.assignment isa IS._StratifiedAssignment
     @test sampler.method_state.design.denominator isa IS._FullMixtureDenominator

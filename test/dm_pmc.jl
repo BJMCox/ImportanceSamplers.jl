@@ -692,6 +692,7 @@ dm_pmc_context_target(sample, context) = context.shift - abs2(sample) / 2
     @test length(context_free) == 8
     @test length(contextual) == 8
     @test contextual.diagnostics.method === :deterministic_mixture_pmc
+    @test contextual.diagnostics.factor_execution_policy === :fused
 
     importance_algorithm = ImportanceSampling(
         SphericalGaussian(0.0, 1.0);

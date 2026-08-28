@@ -517,6 +517,7 @@ function _preflight_accelerator_method(
     algorithm::DeterministicMixturePMC,
     method_state::_PreparedDMPMC,
     buffers::_DMPMCRandomBuffers,
+    factor_execution,
 )
     bank = method_state.bank
     plan = method_state.plan
@@ -549,6 +550,16 @@ function _preflight_accelerator_method(
         workspace.solve_scratch,
     )
         _preflight_kernel_argument(device, round_kernel, argument)
+    end
+    if _use_factor_batch_mis_path(
+        device,
+        bank,
+        denominator,
+        log_type,
+        factor_execution,
+    )
+        batch_kernel = _factor_batch_mis_draw_target_kernel!(backend)
+        _preflight_kernel_argument(device, batch_kernel, target_argument)
     end
 
     finalize_kernel = _dm_pmc_finalize_cdf_kernel!(backend)

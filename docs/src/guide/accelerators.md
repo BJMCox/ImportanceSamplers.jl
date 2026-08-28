@@ -14,6 +14,7 @@ in the explicit target context `p`:
 ```julia
 using CUDA
 using ImportanceSamplers
+using LinearAlgebra
 using MLDataDevices
 using Random
 
@@ -48,6 +49,44 @@ prepared = device(prepared)
 result = importance_sample!(prepared)
 host_result = result |> cpu_device()
 ```
+
+## Factor execution policy
+
+Factor Gaussians use fused sample kernels by default. This path behaves
+consistently across CPU and accelerator workloads and does not guess from a
+machine-specific sample-count threshold.
+
+Request batched matrix multiplication and triangular solves explicitly for
+high-dimensional, high-throughput work:
+
+```julia
+dimension = 32
+factor_context = (location=zeros(dimension), scale=ones(dimension))
+factor_proposal = FactorGaussian(factor_context.location, Matrix(I, dimension, dimension))
+prepared = prepare_sampler(
+    Xoshiro(42),
+    gaussian_target,
+    factor_context,
+    ImportanceSampling(factor_proposal; nsamples=5_000_000);
+    factor_execution=BatchedFactorExecution(),
+    threaded=true,
+)
+prepared = prepared |> device
+```
+
+The same policy request applies to Base IS, static MIS, DM-PMC, and AMIS. It
+remains part of the prepared sampler during device transfer. Use
+`FusedFactorExecution()` to state the default explicitly.
+
+The batch path requires a factor Gaussian, matching scalar storage, and CPU or
+CUDA support. Base IS also requires no sample transform. Static MIS requires a
+full-mixture denominator, as used by stratified and random-mixture MIS. Other
+cases use the fused path without changing the estimator.
+
+Benchmark both policies on the target device because the crossover depends on
+the factor dimension, backend, scalar type, and hardware. The result records
+the requested policy as `:fused` or `:batched` in
+`diagnostics.factor_execution_policy`.
 
 The explicit `CUDADevice` construction avoids MLDataDevices backend
 auto-selection and needs no cuDNN dependency. The `Nothing` scalar policy

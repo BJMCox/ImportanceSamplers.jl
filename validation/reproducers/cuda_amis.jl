@@ -64,25 +64,29 @@ end
 
 function assert_amis_transfers(transfers, rounds, ::Type{T}) where {T}
     record = reported_transfer_record(transfers)
-    @test record.count == 6rounds
-    @test record.bytes == rounds * (3sizeof(UInt64) + 5sizeof(T))
+    @test record.count == 4rounds
+    @test record.bytes == rounds * (3sizeof(UInt64) + 3sizeof(T))
     @test record.reasons.failure_snapshot == (
         count=rounds,
         bytes=rounds * 3sizeof(UInt64),
     )
     @test record.reasons.logweight_maximum == (
-        count=2rounds,
-        bytes=2rounds * sizeof(T),
+        count=rounds,
+        bytes=rounds * sizeof(T),
     )
     @test record.reasons.logweight_scaled_sum == (
-        count=2rounds,
-        bytes=2rounds * sizeof(T),
+        count=rounds,
+        bytes=rounds * sizeof(T),
     )
     @test record.reasons.logweight_scaled_square_sum == (
         count=rounds,
         bytes=rounds * sizeof(T),
     )
-    for reason in (:cdf_maximum, :cdf_sum, :covariance_diagnostic)
+    for reason in (
+        :cdf_maximum,
+        :cdf_sum,
+        :covariance_diagnostic,
+    )
         @test getfield(record.reasons, reason) == (count=0, bytes=0)
     end
     return record
@@ -90,13 +94,17 @@ end
 
 function assert_amis_factorization_failure_transfers(failure, ::Type{T}) where {T}
     record = reported_transfer_record(failure.diagnostics.transfers)
-    @test record.count == 5
-    @test record.bytes == 3sizeof(UInt64) + 4sizeof(T)
+    @test record.count == 6
+    @test record.bytes == 3sizeof(UInt64) + 5sizeof(T)
     @test record.reasons.failure_snapshot == (count=1, bytes=3sizeof(UInt64))
     @test record.reasons.logweight_maximum == (count=1, bytes=sizeof(T))
     @test record.reasons.logweight_scaled_sum == (count=1, bytes=sizeof(T))
+    @test record.reasons.logweight_scaled_square_sum == (count=1, bytes=sizeof(T))
     @test record.reasons.covariance_diagnostic == (count=2, bytes=2sizeof(T))
-    for reason in (:cdf_maximum, :cdf_sum, :logweight_scaled_square_sum)
+    for reason in (
+        :cdf_maximum,
+        :cdf_sum,
+    )
         @test getfield(record.reasons, reason) == (count=0, bytes=0)
     end
     return record
@@ -104,15 +112,15 @@ end
 
 function assert_amis_sample_fit_failure_transfers(failure, ::Type{T}) where {T}
     record = reported_transfer_record(failure.diagnostics.transfers)
-    @test record.count == 3
-    @test record.bytes == 3sizeof(UInt64) + 2sizeof(T)
+    @test record.count == 4
+    @test record.bytes == 3sizeof(UInt64) + 3sizeof(T)
     @test record.reasons.failure_snapshot == (count=1, bytes=3sizeof(UInt64))
     @test record.reasons.logweight_maximum == (count=1, bytes=sizeof(T))
     @test record.reasons.logweight_scaled_sum == (count=1, bytes=sizeof(T))
+    @test record.reasons.logweight_scaled_square_sum == (count=1, bytes=sizeof(T))
     for reason in (
         :cdf_maximum,
         :cdf_sum,
-        :logweight_scaled_square_sum,
         :covariance_diagnostic,
     )
         @test getfield(record.reasons, reason) == (count=0, bytes=0)
@@ -482,9 +490,83 @@ function transfer_shape_case(device, ::Type{T}) where {T}
     factor = run(:factor, [9, 13])
     three_rounds = run(:factor, [4, 7, 10])
     @test scalar == factor
-    @test three_rounds.count == 18
-    @test three_rounds.bytes == 3 * (3sizeof(UInt64) + 5sizeof(T))
+    @test three_rounds.count == 12
+    @test three_rounds.bytes == 9sizeof(UInt64) + 9sizeof(T)
     return (; scalar, factor, three_rounds)
+end
+
+function factor_batch_case(device)
+    T = Float32
+    dimension = 32
+    schedule = [4096, 4096]
+    proposal = FactorGaussian(
+        fill(T(-0.5), dimension),
+        Matrix{T}(LinearAlgebra.I, dimension, dimension),
+    )
+    source = prepare_sampler(
+        Random.Xoshiro(AMIS_CUDA_SEED + 0x50),
+        AMISQuadraticTarget{T}(),
+        AMIS(proposal; rounds=length(schedule), round_size=schedule);
+        factor_execution=BatchedFactorExecution(),
+        threaded=true,
+    )
+    prepared = device(source)
+    @test IS._use_factor_batch_path(
+        device,
+        prepared.method_state.history,
+        prepared.factor_execution,
+    )
+
+    result = importance_sample!(prepared)
+    CUDA.synchronize()
+    assert_amis_residence(prepared, result)
+    @test length(result) == sum(schedule)
+    @test Array(result.provenance.round) == vcat(
+        fill(1, first(schedule)),
+        fill(2, last(schedule)),
+    )
+    @test all(isfinite, Array(result.samples))
+    @test all(isfinite, Array(result.logweights))
+    @test result.diagnostics.target_evaluations == sum(schedule)
+    @test result.diagnostics.proposal_evaluations ==
+          length(schedule) * sum(schedule)
+    transfers = assert_amis_transfers(
+        result.diagnostics.transfers,
+        length(schedule),
+        T,
+    )
+
+    test_indices = 1:first(schedule)
+    workspace = prepared.method_state.workspace
+    failure_storage = prepared.random_buffers.failure_scratch.record.storage
+    fill!(view(workspace.lognumerators, test_indices), zero(T))
+    fill!(IS._sample_view(workspace.samples, test_indices), floatmax(T))
+    fill!(failure_storage, zero(UInt64))
+    IS._launch_factor_batch_logmixture!(
+        view(workspace.lognumerators, test_indices),
+        view(workspace.centered_scaled, :, test_indices),
+        IS._sample_view(workspace.samples, test_indices),
+        prepared.method_state.history,
+        1,
+        prepared.method_state.logcounts,
+        failure_storage,
+        IS._ThreadedCPUExecution(),
+    )
+    CUDA.synchronize()
+    @test all(iszero, Array(view(workspace.lognumerators, test_indices)))
+    host_failure = Array(failure_storage)
+    @test iszero(
+        IS._decode_native_failure(host_failure[1], host_failure[2]).count,
+    )
+
+    return (;
+        dimension,
+        schedule=Tuple(schedule),
+        transfers,
+        resident=true,
+        finite=true,
+        negative_infinity_zero_contribution=true,
+    )
 end
 
 function wrong_device_pre_rng_case(device, ::Type{T}) where {T}
@@ -655,6 +737,7 @@ function factor_overflow_transaction_case(device, ::Type{T}) where {T}
         base.algorithm,
         base.method_state,
         base.device,
+        base.factor_execution,
         base.threaded,
         false,
         false,
@@ -770,6 +853,7 @@ function combined_sample_fit_failure_case(device, ::Type{T}) where {T}
         base.algorithm,
         base.method_state,
         base.device,
+        base.factor_execution,
         base.threaded,
         false,
         false,
@@ -892,6 +976,7 @@ function main()
     end
     rows = checked_amis_cuda_capability_results(records)
     transfer_shape = transfer_shape_case(device, Float64)
+    factor_batch = factor_batch_case(device)
     wrong_device = wrong_device_pre_rng_case(device, Float64)
     degenerate_scalar_covariance = degenerate_scalar_covariance_case(device)
     factor_overflow = (
@@ -911,6 +996,7 @@ function main()
         environment=environment_record(),
         rows,
         transfer_shape,
+        factor_batch,
         wrong_device,
         degenerate_scalar_covariance,
         factor_overflow,
