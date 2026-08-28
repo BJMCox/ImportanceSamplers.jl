@@ -1372,20 +1372,25 @@ end
     @test rand(unsupported.rng, UInt64) == rand(expected_unsupported_rng, UInt64)
 end
 
-@testset "AMIS round diagnostics transfer only three device scalars" begin
+@testset "AMIS normalization returns the reusable round summary" begin
     for T in (Float32, Float64)
-        logweights = KernelArgumentTestArray(T[log(T(1)), log(T(3)), log(T(2)), T(100)])
+        logweights = T[log(T(1)), log(T(3)), log(T(2)), T(100)]
+        normalized = zeros(T, 4)
         transfers = IS._ResultTransferCounter(0, 0)
 
-        summary = @inferred IS._logweight_summary(view(logweights, 1:3), transfers)
+        summary = @inferred IS._normalize_amis_weights!(
+            normalized,
+            logweights,
+            3,
+            transfers,
+        )
 
+        @test normalized[1:3] ≈ T[1 / 6, 1 / 2, 1 / 3] rtol = 8eps(T)
+        @test normalized[4] == zero(T)
         @test summary.ess ≈ T(18 / 7) rtol = 8eps(T)
         @test summary.lognormalizer ≈ log(T(2)) rtol = 8eps(T)
-        @test transfers.count == 3
-        @test transfers.bytes == 3sizeof(T)
-        @test transfers.reasons.logweight_maximum.count == 1
-        @test transfers.reasons.logweight_scaled_sum.count == 1
-        @test transfers.reasons.logweight_scaled_square_sum.count == 1
+        @test iszero(transfers.count)
+        @test iszero(transfers.bytes)
     end
 end
 

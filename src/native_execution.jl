@@ -161,6 +161,25 @@ end
 @inline _packed_gaussian_lognormalizer(history::_AMISFactorHistory, slot) =
     @inbounds history.lognormalizers[slot]
 
+_factor_batch_locations(bank::_PackedFactorGaussianBank) = bank.locations
+_factor_batch_locations(history::_AMISFactorHistory) = history.means
+_factor_batch_factors(bank::_PackedFactorGaussianBank) = bank.factors
+_factor_batch_factors(history::_AMISFactorHistory) = history.factors
+
+function _factor_batch_draw!(samples, normals, bank, proposal_slot)
+    factor = view(_factor_batch_factors(bank), :, :, proposal_slot)
+    location = view(_factor_batch_locations(bank), :, proposal_slot)
+    LinearAlgebra.mul!(samples, factor, normals)
+    samples .+= reshape(location, :, 1)
+    return samples
+end
+
+_factor_batch_supported(device) = false
+_factor_batch_profitable(bank, sample_count) =
+    _mis_dimension(bank) >= 32 && sample_count >= 4096
+_use_factor_batch_path(device, bank, sample_count) =
+    _factor_batch_supported(device) && _factor_batch_profitable(bank, sample_count)
+
 @inline function _packed_gaussian_logdensity!(
     bank::Union{_PackedFactorGaussianBank,_AMISFactorHistory},
     sample,

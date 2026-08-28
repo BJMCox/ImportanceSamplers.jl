@@ -1,6 +1,7 @@
 using Test
 using ImportanceSamplers
 import KernelAbstractions
+import LinearAlgebra
 import LogExpFunctions
 import Random
 
@@ -602,6 +603,81 @@ end
         @test !isfinite(only(lognormalizer))
         @test iszero(failures[3])
     end
+end
+
+@testset "factor batches match triangular Gaussian equations" begin
+    for T in (Float32, Float64)
+        location = T[0.5, -1, 2]
+        factor = T[1.5 0 0; 0.25 0.75 0; -0.1 0.2 1.25]
+        history = AMISKernelIS._AMISFactorHistory(
+            reshape(copy(location), 3, 1),
+            reshape(copy(factor), 3, 3, 1),
+            T[-T(1.5) * log(T(2pi)) - sum(log, LinearAlgebra.diag(factor))],
+        )
+        normals = T[1 -2 0.5 3; -1 0.25 2 -0.5; 0.5 1 -1 0.75]
+        samples = zeros(T, size(normals))
+        scratch = similar(samples)
+        lognumerators = fill(T(-Inf), size(samples, 2))
+        logcounts = T[log(T(3))]
+        failures = zeros(UInt64, 3)
+
+        AMISKernelIS._factor_batch_draw!(samples, normals, history, 1)
+        AMISKernelIS._launch_factor_batch_logmixture!(
+            lognumerators,
+            scratch,
+            samples,
+            history,
+            1,
+            logcounts,
+            failures,
+            AMISKernelIS._SerialCPUExecution(),
+        )
+        KernelAbstractions.synchronize(KernelAbstractions.CPU())
+
+        expected_samples = location .+ factor * normals
+        expected_lognumerators = map(eachcol(expected_samples)) do sample
+            standardized = LinearAlgebra.LowerTriangular(factor) \ (sample - location)
+            logcounts[1] + history.lognormalizers[1] -
+            T(0.5) * sum(abs2, standardized)
+        end
+        @test samples ≈ expected_samples rtol = 8eps(T)
+        @test lognumerators ≈ expected_lognumerators rtol = 16eps(T)
+        @test iszero(failures[1])
+
+        fill!(lognumerators, zero(T))
+        fill!(samples, floatmax(T))
+        fill!(failures, zero(UInt64))
+        AMISKernelIS._launch_factor_batch_logmixture!(
+            lognumerators,
+            scratch,
+            samples,
+            history,
+            1,
+            logcounts,
+            failures,
+            AMISKernelIS._SerialCPUExecution(),
+        )
+        KernelAbstractions.synchronize(KernelAbstractions.CPU())
+        @test all(iszero, lognumerators)
+        @test iszero(failures[1])
+    end
+end
+
+@testset "factor batch threshold matches the A100 crossover" begin
+    factor_history(dimension) = AMISKernelIS._prepare_method_state(
+        AMIS(
+            FactorGaussian(
+                zeros(dimension),
+                Matrix{Float64}(LinearAlgebra.I, dimension, dimension),
+            );
+            rounds=1,
+            round_size=4096,
+        ),
+    ).history
+
+    @test !AMISKernelIS._factor_batch_profitable(factor_history(31), 4096)
+    @test !AMISKernelIS._factor_batch_profitable(factor_history(32), 4095)
+    @test AMISKernelIS._factor_batch_profitable(factor_history(32), 4096)
 end
 
 @testset "AMIS diagnostics summarize each retrospective retained prefix" begin

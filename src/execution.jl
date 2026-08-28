@@ -110,10 +110,24 @@ function _logweight_summary(
         eltype(logweights),
         Val(:logweight_scaled_square_sum),
     )
-    T = eltype(logweights)
+    return _logweight_summary(
+        maximum_logweight,
+        scaled_sum,
+        scaled_square_sum,
+        length(logweights),
+    )
+end
+
+@inline function _logweight_summary(
+    maximum_logweight,
+    scaled_sum,
+    scaled_square_sum,
+    sample_count,
+)
+    T = typeof(maximum_logweight)
     return (
         ess=abs2(scaled_sum) / scaled_square_sum,
-        lognormalizer=maximum_logweight + log(scaled_sum) - log(T(length(logweights))),
+        lognormalizer=maximum_logweight + log(scaled_sum) - log(T(sample_count)),
     )
 end
 
