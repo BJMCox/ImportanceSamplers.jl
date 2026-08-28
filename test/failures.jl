@@ -37,10 +37,13 @@ function (target::AMISFailingTarget{T})(sample)::T where {T}
     return -abs2(T(sample)) / T(2)
 end
 
-struct AMISResultFailureTarget{T} end
 struct AMISZeroTarget{T} end
 
 struct AMISMomentFailureMatrix{T,A<:AbstractMatrix{T}} <: AbstractMatrix{T}
+    storage::A
+end
+
+struct AMISResultFailureArray{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
     storage::A
 end
 
@@ -87,6 +90,14 @@ Base.getindex(matrix::AMISMomentFailureMatrix, i::Int, j::Int) = matrix.storage[
 Base.setindex!(matrix::AMISMomentFailureMatrix, value, i::Int, j::Int) =
     setindex!(matrix.storage, value, i, j)
 
+Base.size(array::AMISResultFailureArray) = size(array.storage)
+Base.IndexStyle(::Type{<:AMISResultFailureArray}) = IndexLinear()
+Base.getindex(array::AMISResultFailureArray, indices...) =
+    getindex(array.storage, indices...)
+Base.setindex!(array::AMISResultFailureArray, value, indices...) =
+    setindex!(array.storage, value, indices...)
+Base.copy(::AMISResultFailureArray) = error("intentional AMIS result copy failure")
+
 function LinearAlgebra.mul!(
     destination::AMISMomentFailureMatrix,
     left,
@@ -99,19 +110,40 @@ function (::AMISZeroTarget{T})(sample)::T where {T}
     return zero(T)
 end
 
-function (::AMISResultFailureTarget{T})(sample)::T where {T}
-    radius = sample isa Number ? abs2(T(sample)) : sum(abs2, sample)
-    return -radius / T(2)
-end
-
-@eval ImportanceSamplers function _build_amis_result(
-    target::_ContextFreePreparedTarget{<:Main.AMISResultFailureTarget},
-    samples,
-    logweights,
-    round_ids,
-    diagnostics,
-)
-    error("intentional AMIS result-construction failure")
+function amis_result_copy_failure_sampler(sampler)
+    old_state = sampler.method_state
+    old_workspace = old_state.workspace
+    workspace = ImportanceSamplers._AMISWorkspace(
+        AMISResultFailureArray(old_workspace.samples),
+        old_workspace.logtargets,
+        old_workspace.lognumerators,
+        old_workspace.logweights,
+        old_workspace.normalized_weights,
+        old_workspace.centered_scaled,
+        old_workspace.covariance,
+        old_workspace.candidate_mean,
+        old_workspace.candidate_scale,
+        old_workspace.candidate_lognormalizer,
+    )
+    state = ImportanceSamplers._PreparedAMIS(
+        old_state.schedule,
+        old_state.offsets,
+        old_state.logcounts,
+        old_state.history,
+        workspace,
+        old_state.committed_in_workspace,
+    )
+    return ImportanceSamplers._PreparedImportanceSampler(
+        sampler.rng,
+        sampler.random_buffers,
+        sampler.target,
+        sampler.algorithm,
+        state,
+        sampler.device,
+        sampler.threaded,
+        false,
+        false,
+    )
 end
 
 function amis_proposal_bits(proposal)
@@ -973,12 +1005,12 @@ end
         )
     end
 
-    result_sampler = prepare_sampler(
+    result_sampler = amis_result_copy_failure_sampler(prepare_sampler(
         AMISFailureRNG(deepcopy(batches)),
-        AMISResultFailureTarget{T}(),
+        AMISZeroTarget{T}(),
         algorithm;
         threaded=false,
-    )
+    ))
     result_failure = assert_amis_transaction_failure(
         result_sampler,
         :result_construction,
@@ -987,6 +1019,7 @@ end
         3,
     )
     @test result_failure.diagnostics.completed_rounds == 2
+    @test result_failure.cause.msg == "intentional AMIS result copy failure"
     @test covariance_sampler.method_state.workspace.covariance == zeros(T, 2, 2)
     @test covariance_sampler.running === false
 end
@@ -1072,12 +1105,12 @@ end
               committed.scale.factor[1, 1] * batches[3][1] rtol = 8eps(T)
         @test sampler.method_state.committed_in_workspace
 
-        rollback_sampler = prepare_sampler(
+        rollback_sampler = amis_result_copy_failure_sampler(prepare_sampler(
             AMISFailureRNG(deepcopy(batches[1:2])),
-            AMISResultFailureTarget{T}(),
+            AMISZeroTarget{T}(),
             algorithm;
             threaded=false,
-        )
+        ))
         rollback_failure = assert_amis_transaction_failure(
             rollback_sampler,
             :result_construction,
@@ -1086,5 +1119,7 @@ end
             3,
         )
         @test rollback_failure.diagnostics.completed_rounds == 2
+        @test rollback_failure.cause.msg ==
+              "intentional AMIS result copy failure"
     end
 end

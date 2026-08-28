@@ -1007,15 +1007,6 @@ function _amis_failure_snapshot!(transfers, failure_record)
     return snapshot
 end
 
-function _build_amis_result(target, samples, logweights, round_ids, diagnostics)
-    return _adopt_validated_weighted_samples(
-        copy(samples),
-        copy(logweights);
-        provenance=(round=round_ids,),
-        diagnostics=diagnostics,
-    )
-end
-
 function _importance_sample_cpu!(sampler, committed_state::_PreparedAMIS, threaded)
     execution = threaded ? _ThreadedCPUExecution() : _SerialCPUExecution()
     history = committed_state.history
@@ -1203,12 +1194,11 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAMIS, thread
     result = _capture_amis_round(
         method_state, transfers, rounds, :result_construction, rounds,
     ) do
-        _build_amis_result(
-            sampler.target,
-            workspace.samples,
-            workspace.logweights,
-            round_ids,
-            diagnostics,
+        _adopt_validated_weighted_samples(
+            copy(workspace.samples),
+            copy(workspace.logweights);
+            provenance=(round=round_ids,),
+            diagnostics=diagnostics,
         )
     end
     _capture_amis_round(
