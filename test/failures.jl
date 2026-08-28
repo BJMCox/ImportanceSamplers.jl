@@ -1,6 +1,7 @@
 using Test
 using ImportanceSamplers
 import DensityInterface
+import LinearAlgebra
 import MLDataDevices
 import Random
 import Random: rand
@@ -8,6 +9,240 @@ import Random: rand
 struct TestOffsetArray{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
     parent::A
     offsets::NTuple{N,Int}
+end
+
+mutable struct AMISFailureRNG{T} <: Random.AbstractRNG
+    batches::Vector{Vector{T}}
+    index::Int
+end
+
+AMISFailureRNG(batches::Vector{Vector{T}}) where {T} =
+    AMISFailureRNG{T}(batches, 1)
+
+function Random.randn!(rng::AMISFailureRNG, destination::AbstractArray)
+    batch = rng.batches[rng.index]
+    copyto!(destination, 1, batch, 1, length(destination))
+    rng.index += 1
+    return destination
+end
+
+mutable struct AMISFailingTarget{T}
+    calls::Int
+    fail_at::Int
+end
+
+function (target::AMISFailingTarget{T})(sample)::T where {T}
+    target.calls += 1
+    target.calls == target.fail_at && error("intentional AMIS target failure")
+    return -abs2(T(sample)) / T(2)
+end
+
+struct AMISZeroTarget{T} end
+
+struct AMISMomentFailureMatrix{T,A<:AbstractMatrix{T}} <: AbstractMatrix{T}
+    storage::A
+end
+
+struct AMISResultFailureArray{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
+    storage::A
+end
+
+mutable struct AMISPublicationFailure
+    writes::Int
+    fail_at::Int
+    visited::UInt8
+end
+
+struct AMISPublicationFailureArray{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
+    storage::A
+    failure::AMISPublicationFailure
+    write::Int
+end
+
+Base.size(array::AMISPublicationFailureArray) = size(array.storage)
+Base.IndexStyle(::Type{<:AMISPublicationFailureArray}) = IndexLinear()
+Base.getindex(array::AMISPublicationFailureArray, indices...) =
+    getindex(array.storage, indices...)
+
+function fail_amis_publication!(array::AMISPublicationFailureArray)
+    failure = array.failure
+    visited = UInt8(1) << (array.write - 1)
+    iszero(failure.visited & visited) || return nothing
+    failure.visited |= visited
+    failure.writes += 1
+    array.write == failure.fail_at &&
+        error("intentional AMIS publication failure $(failure.fail_at)")
+    return nothing
+end
+
+function Base.setindex!(
+    array::AMISPublicationFailureArray,
+    value,
+    indices...,
+)
+    fail_amis_publication!(array)
+    return setindex!(array.storage, value, indices...)
+end
+
+Base.size(matrix::AMISMomentFailureMatrix) = size(matrix.storage)
+Base.IndexStyle(::Type{<:AMISMomentFailureMatrix}) = IndexCartesian()
+Base.getindex(matrix::AMISMomentFailureMatrix, i::Int, j::Int) = matrix.storage[i, j]
+Base.setindex!(matrix::AMISMomentFailureMatrix, value, i::Int, j::Int) =
+    setindex!(matrix.storage, value, i, j)
+
+Base.size(array::AMISResultFailureArray) = size(array.storage)
+Base.IndexStyle(::Type{<:AMISResultFailureArray}) = IndexLinear()
+Base.getindex(array::AMISResultFailureArray, indices...) =
+    getindex(array.storage, indices...)
+Base.setindex!(array::AMISResultFailureArray, value, indices...) =
+    setindex!(array.storage, value, indices...)
+Base.copy(::AMISResultFailureArray) = error("intentional AMIS result copy failure")
+
+function LinearAlgebra.mul!(
+    destination::AMISMomentFailureMatrix,
+    left,
+    right,
+)
+    error("intentional AMIS moment multiplication failure")
+end
+
+function (::AMISZeroTarget{T})(sample)::T where {T}
+    return zero(T)
+end
+
+function amis_result_copy_failure_sampler(sampler)
+    old_state = sampler.method_state
+    old_workspace = old_state.workspace
+    workspace = ImportanceSamplers._AMISWorkspace(
+        AMISResultFailureArray(old_workspace.samples),
+        old_workspace.logtargets,
+        old_workspace.lognumerators,
+        old_workspace.logweights,
+        old_workspace.normalized_weights,
+        old_workspace.centered_scaled,
+        old_workspace.covariance,
+        old_workspace.candidate_mean,
+        old_workspace.candidate_scale,
+        old_workspace.candidate_lognormalizer,
+    )
+    state = ImportanceSamplers._PreparedAMIS(
+        old_state.schedule,
+        old_state.offsets,
+        old_state.logcounts,
+        old_state.history,
+        workspace,
+        old_state.committed_in_workspace,
+    )
+    return ImportanceSamplers._PreparedImportanceSampler(
+        sampler.rng,
+        sampler.random_buffers,
+        sampler.target,
+        sampler.algorithm,
+        state,
+        sampler.device,
+        sampler.threaded,
+        false,
+        false,
+    )
+end
+
+function amis_proposal_bits(proposal)
+    location = proposal.location isa Number ?
+               bitstring(proposal.location) : map(bitstring, proposal.location)
+    scale = if proposal.scale isa ImportanceSamplers._SphericalGaussianScale
+        bitstring(proposal.scale.scale)
+    else
+        map(bitstring, proposal.scale.factor)
+    end
+    return location, scale, bitstring(proposal.lognormalizer)
+end
+
+function assert_amis_transaction_failure(
+    sampler,
+    expected_phase,
+    expected_cause,
+    expected_round,
+    expected_rng_index,
+)
+    before = amis_proposal_bits(current_proposal(sampler))
+    rng_index = sampler.rng.index
+    failure = caught_exception(() -> importance_sample!(sampler))
+
+    @test failure isa AMISRoundError
+    @test failure.round == expected_round
+    @test failure.phase === expected_phase
+    @test failure.cause isa expected_cause
+    @test failure.diagnostics.round_size == sampler.method_state.schedule[expected_round]
+    @test failure.diagnostics.completed_rounds == expected_round - 1 ||
+          expected_phase === :result_construction
+    completed_rounds = failure.diagnostics.completed_rounds
+    @test failure.diagnostics.cumulative_sample_count ==
+          sum(view(sampler.method_state.schedule, 1:completed_rounds); init=0)
+    @test hasproperty(failure.diagnostics, :covariance)
+    @test hasproperty(failure.diagnostics, :transfers)
+    if expected_phase === :factorization
+        @test failure.diagnostics.covariance isa NamedTuple
+        @test keys(failure.diagnostics.covariance) == (
+            :minimum_diagonal,
+            :maximum_absolute_entry,
+        )
+    else
+        @test isnothing(failure.diagnostics.covariance)
+    end
+    @test amis_proposal_bits(current_proposal(sampler)) == before
+    @test sampler.rng.index == expected_rng_index > rng_index
+    @test !sampler.running
+    return failure
+end
+
+function amis_publication_failure_sampler(fail_at)
+    T = Float64
+    base = prepare_sampler(
+        AMISFailureRNG(fill(T[-1, 0, 1, 0, -1, 1], 2)),
+        AMISZeroTarget{T}(),
+        AMIS(FactorGaussian(zeros(T, 2), T[1 0; 0 1]); rounds=1, round_size=3);
+        threaded=false,
+    )
+    old_state = base.method_state
+    failure = AMISPublicationFailure(0, fail_at, 0x00)
+    old_history = old_state.history
+    history = ImportanceSamplers._AMISFactorHistory(
+        AMISPublicationFailureArray(old_history.means, failure, 1),
+        AMISPublicationFailureArray(old_history.factors, failure, 2),
+        AMISPublicationFailureArray(old_history.lognormalizers, failure, 3),
+    )
+    state = ImportanceSamplers._PreparedAMIS(
+        old_state.schedule,
+        old_state.offsets,
+        old_state.logcounts,
+        history,
+        old_state.workspace,
+        old_state.committed_in_workspace,
+    )
+    sampler = ImportanceSamplers._PreparedImportanceSampler(
+        base.rng,
+        base.random_buffers,
+        base.target,
+        base.algorithm,
+        state,
+        base.device,
+        base.threaded,
+        false,
+        false,
+    )
+    return sampler, failure
+end
+
+function captured_sampler_execution_error(phase)
+    try
+        error("intentional AMIS $(phase) failure")
+    catch cause
+        return SamplerExecutionError(
+            phase,
+            1,
+            CapturedException(cause, catch_backtrace()),
+        )
+    end
 end
 
 struct ThreadedTargetFailure <: Exception
@@ -538,5 +773,353 @@ end
         )
         @test length(unique(recorded_target_tasks)) > 1
         @test length(unique(recorded_proposal_tasks)) > 1
+    end
+end
+
+@testset "AMIS round errors expose the binding phase table" begin
+    cases = (
+        (cause=captured_sampler_execution_error(:proposal_draw), phase=:sampling),
+        (cause=captured_sampler_execution_error(:target), phase=:target),
+        (
+            cause=captured_sampler_execution_error(:proposal_logdensity),
+            phase=:denominator,
+        ),
+        (cause=captured_sampler_execution_error(:logweight), phase=:weight),
+        (cause=AllZeroWeightsError(), phase=:moment),
+        (cause=LinearAlgebra.PosDefException(1), phase=:factorization),
+        (cause=ErrorException("result"), phase=:result_construction),
+    )
+    for case in cases
+        covariance = case.phase === :factorization ? reshape([2.0], 1, 1) : nothing
+        transfers = ImportanceSamplers._ResultTransferCounter(0, 0)
+        failure = caught_exception() do
+            ImportanceSamplers._capture_amis_round(
+                2,
+                case.phase,
+                5,
+                1,
+                3,
+                covariance,
+                transfers,
+            ) do
+                throw(case.cause)
+            end
+        end
+
+        @test failure isa AMISRoundError
+        @test failure.round == 2
+        @test failure.phase === case.phase
+        @test failure.cause === case.cause
+        @test keys(failure.diagnostics) == (
+            :round_size,
+            :completed_rounds,
+            :cumulative_sample_count,
+            :covariance,
+            :transfers,
+        )
+        @test failure.diagnostics.round_size == 5
+        @test failure.diagnostics.completed_rounds == 1
+        @test failure.diagnostics.cumulative_sample_count == 3
+        @test failure.diagnostics.transfers === transfers
+        if case.phase === :factorization
+            @test failure.diagnostics.covariance == (
+                minimum_diagonal=2.0,
+                maximum_absolute_entry=2.0,
+            )
+        else
+            @test isnothing(failure.diagnostics.covariance)
+        end
+    end
+end
+
+@testset "AMIS whole-call transaction failures preserve the committed proposal" begin
+    T = Float64
+    algorithm = AMIS(SphericalGaussian(T(0), T(1)); rounds=2, round_size=[3, 3])
+    batches = [T[-1, 0, 1], T[-0.5, 0.5, 1.5]]
+
+    target_sampler = prepare_sampler(
+        AMISFailureRNG(deepcopy(batches)),
+        AMISFailingTarget{T}(0, 4),
+        algorithm;
+        threaded=false,
+    )
+    target_failure = assert_amis_transaction_failure(
+        target_sampler,
+        :target,
+        SamplerExecutionError,
+        2,
+        3,
+    )
+    @test target_failure.cause.captured.ex isa ErrorException
+
+    denominator_sampler = prepare_sampler(
+        AMISFailureRNG([
+            T[2sqrt(floatmax(T)), 0],
+            T[-1.0e50, 1.0e50],
+        ]),
+        AMISZeroTarget{T}(),
+        AMIS(SphericalGaussian(zero(T), T(1.0e-100)); rounds=1, round_size=2);
+        threaded=false,
+    )
+    denominator_failure = assert_amis_transaction_failure(
+        denominator_sampler,
+        :denominator,
+        SamplerExecutionError,
+        1,
+        2,
+    )
+    @test denominator_failure.cause.phase === :proposal_logdensity
+    @test denominator_failure.cause.sample_index == 1
+    @test denominator_failure.cause.captured.ex isa DomainError
+    @test importance_sample!(denominator_sampler) isa WeightedSamples
+    @test denominator_sampler.rng.index == 3
+
+    sampling_sampler = prepare_sampler(
+        AMISFailureRNG(deepcopy(batches[1:1])),
+        AMISZeroTarget{T}(),
+        algorithm;
+        threaded=false,
+    )
+    assert_amis_transaction_failure(
+        sampling_sampler,
+        :sampling,
+        BoundsError,
+        2,
+        2,
+    )
+
+    zero_sampler = prepare_sampler(
+        AMISFailureRNG(deepcopy(batches)),
+        _ -> T(-Inf),
+        algorithm;
+        threaded=false,
+    )
+    assert_amis_transaction_failure(
+        zero_sampler,
+        :moment,
+        AllZeroWeightsError,
+        1,
+        2,
+    )
+
+    invalid_sampler = prepare_sampler(
+        AMISFailureRNG(deepcopy(batches)),
+        _ -> T(NaN),
+        algorithm;
+        threaded=false,
+    )
+    invalid_failure = assert_amis_transaction_failure(
+        invalid_sampler,
+        :target,
+        SamplerExecutionError,
+        1,
+        2,
+    )
+    @test invalid_failure.cause.captured.ex isa DomainError
+
+    tiny = T(1.0e-200)
+    covariance_sampler = prepare_sampler(
+        AMISFailureRNG([zeros(T, 6)]),
+        _ -> zero(T),
+        AMIS(
+            FactorGaussian(zeros(T, 2), T[tiny 0; 0 tiny]);
+            rounds=1,
+            round_size=3,
+        );
+        threaded=false,
+    )
+    assert_amis_transaction_failure(
+        covariance_sampler,
+        :factorization,
+        LinearAlgebra.PosDefException,
+        1,
+        2,
+    )
+
+    moment_base = prepare_sampler(
+        AMISFailureRNG([T[-1, 0, 1, 0, -1, 1]]),
+        AMISZeroTarget{T}(),
+        AMIS(FactorGaussian(zeros(T, 2), T[1 0; 0 1]); rounds=1, round_size=3);
+        threaded=false,
+    )
+    old_workspace = moment_base.method_state.workspace
+    moment_workspace = ImportanceSamplers._AMISWorkspace(
+        old_workspace.samples,
+        old_workspace.logtargets,
+        old_workspace.lognumerators,
+        old_workspace.logweights,
+        old_workspace.normalized_weights,
+        old_workspace.centered_scaled,
+        AMISMomentFailureMatrix(old_workspace.covariance),
+        old_workspace.candidate_mean,
+        old_workspace.candidate_scale,
+        old_workspace.candidate_lognormalizer,
+    )
+    moment_state = ImportanceSamplers._PreparedAMIS(
+        moment_base.method_state.schedule,
+        moment_base.method_state.offsets,
+        moment_base.method_state.logcounts,
+        moment_base.method_state.history,
+        moment_workspace,
+        moment_base.method_state.committed_in_workspace,
+    )
+    moment_sampler = ImportanceSamplers._PreparedImportanceSampler(
+        moment_base.rng,
+        moment_base.random_buffers,
+        moment_base.target,
+        moment_base.algorithm,
+        moment_state,
+        moment_base.device,
+        moment_base.threaded,
+        false,
+        false,
+    )
+    moment_failure = assert_amis_transaction_failure(
+        moment_sampler,
+        :moment,
+        ErrorException,
+        1,
+        2,
+    )
+    @test moment_failure.cause.msg ==
+          "intentional AMIS moment multiplication failure"
+
+    for F in (Float32, Float64)
+        huge_factor = F(2) * sqrt(floatmax(F))
+        overflow_sampler = prepare_sampler(
+            AMISFailureRNG([F[-1, 0, 1]]),
+            AMISZeroTarget{F}(),
+            AMIS(
+                FactorGaussian(F[0], reshape(F[huge_factor], 1, 1));
+                rounds=1,
+                round_size=3,
+            );
+            threaded=false,
+        )
+        assert_amis_transaction_failure(
+            overflow_sampler,
+            :factorization,
+            ArgumentError,
+            1,
+            2,
+        )
+    end
+
+    result_sampler = amis_result_copy_failure_sampler(prepare_sampler(
+        AMISFailureRNG(deepcopy(batches)),
+        AMISZeroTarget{T}(),
+        algorithm;
+        threaded=false,
+    ))
+    result_failure = assert_amis_transaction_failure(
+        result_sampler,
+        :result_construction,
+        ErrorException,
+        2,
+        3,
+    )
+    @test result_failure.diagnostics.completed_rounds == 2
+    @test result_failure.cause.msg == "intentional AMIS result copy failure"
+    @test covariance_sampler.method_state.workspace.covariance == zeros(T, 2, 2)
+    @test covariance_sampler.running === false
+end
+
+@testset "AMIS run-start proposal authority copy is atomic" begin
+    for fail_at in (2, 3)
+        sampler, injected = amis_publication_failure_sampler(fail_at)
+        @test importance_sample!(sampler) isa WeightedSamples
+        @test sampler.method_state.committed_in_workspace
+        before = amis_proposal_bits(current_proposal(sampler))
+
+        failure = caught_exception(() -> importance_sample!(sampler))
+
+        @test failure isa AMISRoundError
+        if failure isa AMISRoundError
+            @test failure.round == 1
+            @test failure.phase === :result_construction
+            @test failure.cause isa ErrorException
+            @test failure.cause.msg ==
+                  "intentional AMIS publication failure $fail_at"
+        end
+        @test amis_proposal_bits(current_proposal(sampler)) == before
+        @test injected.writes == fail_at
+        @test !sampler.running
+        @test sampler.method_state.committed_in_workspace
+    end
+end
+
+@testset "AMIS later run failure preserves the workspace proposal" begin
+    T = Float64
+    target = AMISFailingTarget{T}(0, typemax(Int))
+    sampler = prepare_sampler(
+        AMISFailureRNG(fill(T[-1, 0, 1], 2)),
+        target,
+        AMIS(SphericalGaussian(zero(T), one(T)); rounds=1, round_size=3);
+        threaded=false,
+    )
+    @test importance_sample!(sampler) isa WeightedSamples
+    @test sampler.method_state.committed_in_workspace
+    before = amis_proposal_bits(current_proposal(sampler))
+    target.fail_at = target.calls + 1
+
+    failure = caught_exception(() -> importance_sample!(sampler))
+
+    @test failure isa AMISRoundError
+    @test failure.phase === :target
+    @test amis_proposal_bits(current_proposal(sampler)) == before
+    @test !sampler.method_state.committed_in_workspace
+    @test !sampler.running
+end
+
+@testset "CPU factor AMIS stages, carries over, and rolls back" begin
+    for T in (Float32, Float64)
+        batches = [
+            T[-1, 1],
+            T[-0.5, 0.5],
+            T[0.25, -0.75],
+            T[0.5, -0.25],
+        ]
+        proposal = FactorGaussian(T[0.5], reshape(T[1.25], 1, 1))
+        algorithm = AMIS(proposal; rounds=2, round_size=[2, 2])
+        sampler = prepare_sampler(
+            AMISFailureRNG(deepcopy(batches)),
+            AMISZeroTarget{T}(),
+            algorithm;
+            threaded=false,
+        )
+
+        first = importance_sample!(sampler)
+        history = sampler.method_state.history
+        staged_mean = history.means[1, 2]
+        staged_factor = history.factors[1, 1, 2]
+        @test first.samples[1, 3] ≈
+              staged_mean + staged_factor * batches[2][1] rtol = 8eps(T)
+        @test history.lognormalizers[2] ≈
+              -log(T(2pi)) / T(2) - log(staged_factor) rtol = 8eps(T)
+
+        committed = current_proposal(sampler)
+        @test sampler.method_state.committed_in_workspace
+        second = importance_sample!(sampler)
+        @test second.samples[1, 1] ≈
+              committed.location[1] +
+              committed.scale.factor[1, 1] * batches[3][1] rtol = 8eps(T)
+        @test sampler.method_state.committed_in_workspace
+
+        rollback_sampler = amis_result_copy_failure_sampler(prepare_sampler(
+            AMISFailureRNG(deepcopy(batches[1:2])),
+            AMISZeroTarget{T}(),
+            algorithm;
+            threaded=false,
+        ))
+        rollback_failure = assert_amis_transaction_failure(
+            rollback_sampler,
+            :result_construction,
+            ErrorException,
+            2,
+            3,
+        )
+        @test rollback_failure.diagnostics.completed_rounds == 2
+        @test rollback_failure.cause.msg ==
+              "intentional AMIS result copy failure"
     end
 end

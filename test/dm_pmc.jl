@@ -30,12 +30,17 @@ const DMPMCIS = ImportanceSamplers
 
     input_schedule[1] = 1
     @test varied.round_size == [50, 100, 200]
-    resolved = @inferred DMPMCIS._resolve_round_schedule(varied)
+    resolved = @inferred DMPMCIS._resolve_adaptive_schedule(
+        varied.rounds,
+        varied.round_size,
+    )
     @test resolved == [50, 100, 200]
     @test resolved !== varied.round_size
     resolved[1] = 2
     @test varied.round_size == [50, 100, 200]
-    @test @inferred(DMPMCIS._resolve_round_schedule(fixed)) == [100, 100, 100]
+    @test @inferred(
+        DMPMCIS._resolve_adaptive_schedule(fixed.rounds, fixed.round_size)
+    ) == [100, 100, 100]
 
     @test_throws ArgumentError DeterministicMixturePMC(bank; rounds=0, round_size=100)
     @test_throws ArgumentError DeterministicMixturePMC(bank; rounds=-1, round_size=100)

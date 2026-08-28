@@ -113,8 +113,7 @@ function prefilled_trajectory!(sampler, normal_batches, uniform_batches)
         copyto!(buffers.normals, normal_batches[round])
         IS._launch_mis_round!(
             round_samples,
-            round_logweights,
-            round_proposal_ids,
+            IS._MISRoundOutput(round_logweights, round_proposal_ids),
             buffers.failure_scratch.record.storage,
             buffers.normals,
             target_evaluator,
@@ -274,9 +273,9 @@ function assert_dm_pmc_reported_transfers(transfers, rounds, ::Type{T}) where {T
     for reason in (
         :cdf_maximum,
         :cdf_sum,
-        :summary_maximum,
-        :summary_scaled_sum,
-        :summary_scaled_square_sum,
+        :logweight_maximum,
+        :logweight_scaled_sum,
+        :logweight_scaled_square_sum,
     )
         @test getfield(record.reasons, reason) == (
             count=rounds,
@@ -491,7 +490,7 @@ function strict_resampling_and_ess_case(::Type{T}) where {T}
     selected = Array(ancestors)
     @test selected == [2, 4, 4, 4]
     transfers = IS._ResultTransferCounter(0, 0)
-    summary = IS._dm_pmc_round_summary(
+    summary = IS._logweight_summary(
         CuArray(T[floatmax(T), floatmax(T)]),
         transfers,
     )
@@ -500,11 +499,11 @@ function strict_resampling_and_ess_case(::Type{T}) where {T}
     @test transfers.count == 3
     @test transfers.bytes == 3sizeof(T)
     reason_record = reported_transfer_record(transfers)
-    @test reason_record.reasons.summary_maximum ==
+    @test reason_record.reasons.logweight_maximum ==
           (count=1, bytes=sizeof(T))
-    @test reason_record.reasons.summary_scaled_sum ==
+    @test reason_record.reasons.logweight_scaled_sum ==
           (count=1, bytes=sizeof(T))
-    @test reason_record.reasons.summary_scaled_square_sum ==
+    @test reason_record.reasons.logweight_scaled_square_sum ==
           (count=1, bytes=sizeof(T))
     return (; selected, ess=summary.ess, transfers=reason_record)
 end

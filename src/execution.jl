@@ -1,7 +1,7 @@
 struct _SerialCPUExecution end
 struct _ThreadedCPUExecution end
 
-mutable struct _ReportedTransfer
+struct _ReportedTransfer
     count::Int
     bytes::Int
 end
@@ -10,13 +10,15 @@ mutable struct _ReportedTransferReasons
     failure_snapshot::_ReportedTransfer
     cdf_maximum::_ReportedTransfer
     cdf_sum::_ReportedTransfer
-    summary_maximum::_ReportedTransfer
-    summary_scaled_sum::_ReportedTransfer
-    summary_scaled_square_sum::_ReportedTransfer
+    logweight_maximum::_ReportedTransfer
+    logweight_scaled_sum::_ReportedTransfer
+    logweight_scaled_square_sum::_ReportedTransfer
+    covariance_diagnostic::_ReportedTransfer
 end
 
 function _ReportedTransferReasons()
     return _ReportedTransferReasons(
+        _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),
@@ -44,8 +46,11 @@ function _record_reported_transfer!(
     reason = getfield(counter.reasons, R)
     counter.count += count
     counter.bytes += bytes
-    reason.count += count
-    reason.bytes += bytes
+    setfield!(
+        counter.reasons,
+        R,
+        _ReportedTransfer(reason.count + count, reason.bytes + bytes),
+    )
     return nothing
 end
 
@@ -69,6 +74,48 @@ _record_device_scalar_transfer!(counter, storage, type::Type) =
 _record_device_scalar_transfer!(counter, storage, type::Type, reason::Val) =
     _is_host_storage(storage) ?
     nothing : _record_scalar_transfer!(counter, type, reason)
+
+function _logweight_summary(
+    logweights,
+    transfers::_ResultTransferCounter=_ResultTransferCounter(0, 0),
+)
+    maximum_logweight = maximum(logweights)
+    _record_device_scalar_transfer!(
+        transfers,
+        logweights,
+        eltype(logweights),
+        Val(:logweight_maximum),
+    )
+    scaled_sum = mapreduce(
+        value -> exp(value - maximum_logweight),
+        +,
+        logweights;
+        init=zero(eltype(logweights)),
+    )
+    _record_device_scalar_transfer!(
+        transfers,
+        logweights,
+        eltype(logweights),
+        Val(:logweight_scaled_sum),
+    )
+    scaled_square_sum = mapreduce(
+        value -> abs2(exp(value - maximum_logweight)),
+        +,
+        logweights;
+        init=zero(eltype(logweights)),
+    )
+    _record_device_scalar_transfer!(
+        transfers,
+        logweights,
+        eltype(logweights),
+        Val(:logweight_scaled_square_sum),
+    )
+    T = eltype(logweights)
+    return (
+        ess=abs2(scaled_sum) / scaled_square_sum,
+        lognormalizer=maximum_logweight + log(scaled_sum) - log(T(length(logweights))),
+    )
+end
 
 struct _KernelExecution{E}
     cpu_execution::E

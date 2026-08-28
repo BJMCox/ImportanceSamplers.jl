@@ -5,6 +5,7 @@
 ```@docs
 AbstractImportanceSampler
 ImportanceSampling
+AMIS
 DeterministicMixturePMC
 prepare_sampler
 importance_sample
@@ -61,5 +62,6 @@ SamplerBusyError
 SamplerAlreadyExecutedError
 SamplerDeviceError
 SamplerExecutionError
+AMISRoundError
 DMPMCRoundError
 ```

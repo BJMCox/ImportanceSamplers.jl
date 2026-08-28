@@ -23,9 +23,10 @@ const DM_PMC_TRANSFER_REASONS = (
     :failure_snapshot,
     :cdf_maximum,
     :cdf_sum,
-    :summary_maximum,
-    :summary_scaled_sum,
-    :summary_scaled_square_sum,
+    :logweight_maximum,
+    :logweight_scaled_sum,
+    :logweight_scaled_square_sum,
+    :covariance_diagnostic,
 )
 
 struct DMPMCNormalTarget{T<:AbstractFloat}

@@ -3,6 +3,7 @@ using ImportanceSamplers
 import Adapt
 import DensityInterface
 import KernelAbstractions
+import LinearAlgebra
 import MLDataDevices
 import Random
 import Random: rand, randn
@@ -74,11 +75,15 @@ Base.size(array::KernelArgumentTestArray) = size(array.storage)
 Base.getindex(array::KernelArgumentTestArray, indices...) =
     getindex(array.storage, indices...)
 Base.IndexStyle(::Type{<:KernelArgumentTestArray}) = IndexLinear()
+const KERNEL_ARGUMENT_TEST_INT_SIMILAR_LENGTHS = Int[]
 Base.similar(
     ::KernelArgumentTestArray,
     ::Type{T},
     dimensions::Dims{N},
-) where {T,N} = KernelArgumentTestArray(Array{T,N}(undef, dimensions))
+) where {T,N} = begin
+    T === Int && push!(KERNEL_ARGUMENT_TEST_INT_SIMILAR_LENGTHS, prod(dimensions))
+    KernelArgumentTestArray(Array{T,N}(undef, dimensions))
+end
 
 KernelAbstractions.get_backend(::KernelArgumentTestArray) =
     KernelArgumentTestBackend()
@@ -116,14 +121,20 @@ function KernelAbstractions.argconvert(
     kernel::KernelAbstractions.Kernel{KernelArgumentTestBackend},
     argument,
 )
-    push!(KERNEL_ARGUMENT_TEST_ARGUMENTS, (typeof(kernel), typeof(argument)))
-    return kernel_argument_test_adapt(argument)
+    converted = kernel_argument_test_adapt(argument)
+    push!(KERNEL_ARGUMENT_TEST_ARGUMENTS, (typeof(kernel), typeof(converted)))
+    return converted
 end
 
 struct KernelArgumentTestAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
 MLDataDevices.functional(::KernelArgumentTestAccelerator) = true
+MLDataDevices.get_device(::KernelArgumentTestArray) = KernelArgumentTestAccelerator()
+MLDataDevices.get_device(
+    array::SubArray{T,N,<:KernelArgumentTestArray},
+) where {T,N} = MLDataDevices.get_device(parent(array))
 const KERNEL_ARGUMENT_TEST_CURRENT = Ref(:caller)
 const KERNEL_ARGUMENT_TEST_CPU_COPIES = Ref(0)
+const KERNEL_ARGUMENT_TEST_CPU_ELEMENTS = Ref(0)
 
 function Adapt.adapt_storage(::KernelArgumentTestAccelerator, array::Array)
     KERNEL_ARGUMENT_TEST_CURRENT[] === :selected || error("wrong active mock device")
@@ -133,13 +144,80 @@ end
 function Base.Array(array::KernelArgumentTestArray)
     KERNEL_ARGUMENT_TEST_CURRENT[] === :selected || error("wrong active mock device")
     KERNEL_ARGUMENT_TEST_CPU_COPIES[] += 1
+    KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] += length(array)
     return copy(array.storage)
+end
+
+function Base.Array(
+    array::SubArray{T,N,<:KernelArgumentTestArray},
+) where {T,N}
+    KERNEL_ARGUMENT_TEST_CURRENT[] === :selected || error("wrong active mock device")
+    KERNEL_ARGUMENT_TEST_CPU_COPIES[] += 1
+    KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] += length(array)
+    return Array(view(parent(array).storage, parentindices(array)...))
 end
 
 struct LateFailAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
 MLDataDevices.functional(::LateFailAccelerator) = true
 Adapt.adapt_storage(::LateFailAccelerator, array::Array) =
     KernelArgumentTestArray(copy(array))
+
+struct AMISExecutionTestAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
+MLDataDevices.functional(::AMISExecutionTestAccelerator) = true
+const AMIS_EXECUTION_TEST_CURRENT = Ref(:caller)
+
+struct AMISPublicationSyncBackend <: KernelAbstractions.GPU end
+
+struct AMISPublicationSyncArray{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
+    storage::A
+end
+
+Base.size(array::AMISPublicationSyncArray) = size(array.storage)
+Base.IndexStyle(::Type{<:AMISPublicationSyncArray}) = IndexLinear()
+Base.getindex(array::AMISPublicationSyncArray, indices...) =
+    getindex(array.storage, indices...)
+Base.setindex!(array::AMISPublicationSyncArray, value, indices...) =
+    setindex!(array.storage, value, indices...)
+KernelAbstractions.get_backend(::AMISPublicationSyncArray) =
+    AMISPublicationSyncBackend()
+KernelAbstractions.synchronize(::AMISPublicationSyncBackend) =
+    error("intentional AMIS publication synchronization failure")
+
+mutable struct AMISExecutionTestRNG <: Random.AbstractRNG
+    draws::Int
+end
+
+mutable struct AMISExecutionPrefilledRNG{T} <: Random.AbstractRNG
+    batches::Vector{Vector{T}}
+    index::Int
+end
+
+struct AMISZeroFloat32Target end
+(::AMISZeroFloat32Target)(sample)::Float32 = 0.0f0
+
+struct AMISZeroSampleFailureTarget{T} end
+
+function (::AMISZeroSampleFailureTarget{T})(sample)::T where {T}
+    value = sample isa Real ? sample : sample[1]
+    return iszero(value) ? T(NaN) : zero(T)
+end
+
+function Random.randn!(rng::AMISExecutionTestRNG, destination::AbstractArray)
+    fill!(destination, zero(eltype(destination)))
+    rng.draws += 1
+    return destination
+end
+
+function Random.randn!(rng::AMISExecutionPrefilledRNG, destination::AbstractArray)
+    copyto!(destination, rng.batches[rng.index])
+    rng.index += 1
+    return destination
+end
+
+function Adapt.adapt_storage(::AMISExecutionTestAccelerator, array::Array)
+    AMIS_EXECUTION_TEST_CURRENT[] === :selected || error("wrong active mock device")
+    return copy(array)
+end
 
 @eval ImportanceSamplers begin
     function _with_backend_device(f, ::Main.KernelArgumentTestAccelerator)
@@ -156,6 +234,48 @@ Adapt.adapt_storage(::LateFailAccelerator, array::Array) =
         Random.Xoshiro(seed)
     _owned_backend_rng(::Main.LateFailAccelerator, seed::UInt64) =
         iszero(seed) ? Random.Xoshiro(seed) : error("late RNG construction failure")
+
+    function _with_backend_device(f, ::Main.AMISExecutionTestAccelerator)
+        previous = Main.AMIS_EXECUTION_TEST_CURRENT[]
+        Main.AMIS_EXECUTION_TEST_CURRENT[] = :selected
+        try
+            return f()
+        finally
+            Main.AMIS_EXECUTION_TEST_CURRENT[] = previous
+        end
+    end
+
+    _backend_state_resident(::Main.AMISExecutionTestAccelerator, state) = true
+    _owned_backend_rng(::Main.AMISExecutionTestAccelerator, seed::UInt64) =
+        Main.AMISExecutionTestRNG(0)
+
+    function _amis_potrf!(
+        ::Main.AMISExecutionTestAccelerator,
+        factor::StridedMatrix{T},
+    ) where {T<:Union{Float32,Float64}}
+        all(isfinite, factor) || return factor
+        factorization = LinearAlgebra.cholesky!(LinearAlgebra.Symmetric(factor, :L))
+        copyto!(factor, factorization.L)
+        return factor
+    end
+    _preflight_accelerator_method(
+        ::Main.AMISExecutionTestAccelerator,
+        target,
+        algorithm::AMIS,
+        method_state::_PreparedAMIS,
+        random_buffers::_RandomBuffers,
+    ) = nothing
+
+    function _amis_potrf!(
+        ::Main.KernelArgumentTestAccelerator,
+        factor::Main.KernelArgumentTestArray{T,2},
+    ) where {T<:Union{Float32,Float64}}
+        factorization = LinearAlgebra.cholesky!(
+            LinearAlgebra.Symmetric(factor.storage, :L),
+        )
+        copyto!(factor.storage, factorization.L)
+        return factor
+    end
 end
 
 const HOOK_ACCELERATOR_CURRENT = Ref(:caller)
@@ -901,7 +1021,7 @@ end
         @test ndims.(representative_arguments) == (2, 1, 1, 1, 1)
         @test all(argument -> argument isa SubArray, representative_arguments)
         backend = KernelAbstractions.get_backend(buffers.normals)
-        round_kernel = IS._mis_round_kernel!(backend)
+        round_kernel = IS._mis_round_launch_kernel!(backend)
         finalize_kernel = IS._dm_pmc_finalize_cdf_kernel!(backend)
         select_kernel = IS._dm_pmc_select_ancestors_kernel!(backend)
         gather_kernel = IS._dm_pmc_gather_ancestors_kernel!(backend)
@@ -914,7 +1034,7 @@ end
             (select_kernel, representative_arguments[5]),
             (gather_kernel, representative_arguments[1]),
         )
-            @test (typeof(kernel), typeof(argument)) in
+            @test (typeof(kernel), typeof(kernel_argument_test_adapt(argument))) in
                   KERNEL_ARGUMENT_TEST_ARGUMENTS
         end
         return destination
@@ -1016,6 +1136,546 @@ end
     @test serial_error.reason === :serial_accelerator
     @test rand(getfield(serial_source, :rng), UInt64) ==
           rand(expected_serial_rng, UInt64)
+end
+
+@testset "AMIS accelerator transfer, preflight, and snapshots" begin
+    device = KernelArgumentTestAccelerator()
+    schedule = [4, 5, 6]
+
+    function make_amis_source(seed, proposal)
+        return prepare_sampler(
+            Random.Xoshiro(seed),
+            static_mis_device_target,
+            (shift=[0.25],),
+            AMIS(proposal; rounds=3, round_size=schedule);
+            threaded=true,
+        )
+    end
+
+    for (seed, proposal, history_type) in (
+        (0x2226, SphericalGaussian(0.0, 1.0), IS._AMISScalarHistory),
+        (
+            0x2227,
+            FactorGaussian([0.0, 0.0], [1.0 0.0; 0.25 0.75]),
+            IS._AMISFactorHistory,
+        ),
+    )
+        empty!(KERNEL_ARGUMENT_TEST_ARGUMENTS)
+        empty!(KERNEL_ARGUMENT_TEST_INT_SIMILAR_LENGTHS)
+        source = make_amis_source(seed, proposal)
+        expected_rng = copy(getfield(source, :rng))
+        destination = device(source)
+        state = destination.method_state
+        history = state.history
+        workspace = state.workspace
+        buffers = destination.random_buffers
+        scale_storage = history isa IS._AMISScalarHistory ?
+                        history.scales : history.factors
+        @test history isa history_type
+        @test all(
+            array -> array isa KernelArgumentTestArray,
+            (
+                state.logcounts,
+                history.means,
+                scale_storage,
+                history.lognormalizers,
+                workspace.samples,
+                workspace.logtargets,
+                workspace.lognumerators,
+                workspace.logweights,
+                workspace.normalized_weights,
+                workspace.centered_scaled,
+                workspace.covariance,
+                workspace.candidate_mean,
+                workspace.candidate_scale,
+                workspace.candidate_lognormalizer,
+                buffers.uniform,
+                buffers.normal,
+                buffers.failure_scratch.record.storage,
+            ),
+        )
+        @test state.schedule isa Tuple
+        @test state.offsets isa Tuple
+        @test destination.device === device
+        @test KERNEL_ARGUMENT_TEST_CURRENT[] === :caller
+        @test KERNEL_ARGUMENT_TEST_INT_SIMILAR_LENGTHS == [1]
+        rand(expected_rng, UInt64)
+        @test rand(getfield(source, :rng), UInt64) == rand(expected_rng, UInt64)
+
+        representative_round = findmax(state.schedule)[2]
+        first_sample = state.offsets[representative_round]
+        last_sample = state.offsets[representative_round + 1] - 1
+        new_indices = first_sample:last_sample
+        samples = IS._sample_view(workspace.samples, new_indices)
+        binding_sample = IS._native_binding_sample(samples)
+        bound_target = IS._bind_resolved_target(destination.target, binding_sample)
+        log_type = eltype(workspace.logweights)
+        target_argument = IS._NativeDeviceTarget{
+            log_type,
+            typeof(bound_target),
+        }(bound_target)
+        backend = KernelAbstractions.get_backend(buffers.normal)
+        round_ids = similar(workspace.logweights, Int, length(new_indices))
+        logtotal = log(eltype(state.logcounts)(last_sample))
+        assignments = IS._FixedMISAssignments(
+            representative_round,
+            length(new_indices),
+        )
+        denominator = IS._AMISMixtureDenominator(
+            state.logcounts,
+            representative_round,
+        )
+        round_kernel = IS._amis_round_launch_kernel!(backend)
+        append_kernel = IS._append_logmixture_kernel!(backend)
+        weight_kernel = IS._form_amis_logweights_kernel!(backend)
+        expected_preflight = Tuple{DataType,DataType}[]
+        function expect_preflight!(kernel, arguments)
+            append!(
+                expected_preflight,
+                (
+                    (typeof(kernel), typeof(kernel_argument_test_adapt(argument))) for
+                    argument in arguments
+                ),
+            )
+        end
+        expect_preflight!(
+            round_kernel,
+            (
+                samples,
+                view(workspace.logtargets, new_indices),
+                view(workspace.lognumerators, new_indices),
+                view(workspace.logweights, new_indices),
+                round_ids,
+                logtotal,
+                representative_round,
+                buffers.failure_scratch.record.storage,
+                buffers.normal,
+                target_argument,
+                history,
+                assignments,
+                denominator,
+                workspace.centered_scaled,
+            ),
+        )
+        old_indices = 1:max(first_sample - 1, 1)
+        expect_preflight!(
+            append_kernel,
+            (
+                view(workspace.lognumerators, old_indices),
+                IS._sample_view(workspace.samples, old_indices),
+                history,
+                representative_round,
+                state.logcounts,
+                buffers.failure_scratch.record.storage,
+                workspace.centered_scaled,
+            ),
+        )
+        current_indices = 1:last_sample
+        expect_preflight!(
+            weight_kernel,
+            (
+                view(workspace.logweights, current_indices),
+                view(workspace.logtargets, current_indices),
+                view(workspace.lognumerators, current_indices),
+                logtotal,
+                buffers.failure_scratch.record.storage,
+            ),
+        )
+        if history isa IS._AMISScalarHistory
+            ridge_kernel = IS._add_amis_scalar_ridge_kernel!(backend)
+            finish_kernel = IS._finish_amis_scalar_candidate_kernel!(backend)
+            expect_preflight!(
+                ridge_kernel,
+                (workspace.covariance, history.scales, representative_round),
+            )
+            expect_preflight!(
+                finish_kernel,
+                (
+                    workspace.candidate_scale,
+                    workspace.candidate_lognormalizer,
+                    workspace.covariance,
+                    buffers.failure_scratch.record.storage,
+                    last_sample + 1,
+                ),
+            )
+        else
+            ridge_kernel = IS._add_amis_factor_ridge_kernel!(backend)
+            finish_kernel = IS._finish_amis_factor_candidate_kernel!(backend)
+            expect_preflight!(
+                ridge_kernel,
+                (
+                    workspace.covariance,
+                    history.factors,
+                    representative_round,
+                ),
+            )
+            expect_preflight!(
+                finish_kernel,
+                (
+                    workspace.candidate_mean,
+                    workspace.candidate_scale,
+                    workspace.candidate_lognormalizer,
+                    buffers.failure_scratch.record.storage,
+                    last_sample + 1,
+                ),
+            )
+        end
+        @test KERNEL_ARGUMENT_TEST_ARGUMENTS == expected_preflight
+
+        KERNEL_ARGUMENT_TEST_CPU_COPIES[] = 0
+        KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] = 0
+        implicit_error = caught_device_error(() -> current_proposal(destination))
+        @test implicit_error isa ArgumentError
+        @test occursin("current_proposal(cpu_device(), sampler)", implicit_error.msg)
+        @test KERNEL_ARGUMENT_TEST_CPU_COPIES[] == 0
+        @test KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] == 0
+
+        preserving = MLDataDevices.cpu_device()
+        snapshot = @inferred current_proposal(preserving, destination)
+        @test KERNEL_ARGUMENT_TEST_CURRENT[] === :caller
+        @test KERNEL_ARGUMENT_TEST_CPU_COPIES[] == 2
+        expected_elements = history isa IS._AMISScalarHistory ? 2 : 6
+        @test KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] == expected_elements
+        @test snapshot.location == proposal.location
+        if history isa IS._AMISScalarHistory
+            @test snapshot.scale.scale == proposal.scale.scale
+        else
+            @test snapshot.scale.factor == proposal.scale.factor
+        end
+
+        KERNEL_ARGUMENT_TEST_CPU_COPIES[] = 0
+        KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] = 0
+        converting_error = caught_device_error(
+            () -> current_proposal(MLDataDevices.cpu_device(Float32), destination),
+        )
+        @test converting_error isa ArgumentError
+        @test occursin("preserving CPU destination", converting_error.msg)
+        @test KERNEL_ARGUMENT_TEST_CPU_COPIES[] == 0
+        @test KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] == 0
+        noncpu_error = caught_device_error(
+            () -> current_proposal(device, destination),
+        )
+        @test noncpu_error isa ArgumentError
+        @test occursin("CPU destination", noncpu_error.msg)
+        @test KERNEL_ARGUMENT_TEST_CPU_COPIES[] == 0
+        @test KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] == 0
+    end
+
+    unsupported = make_amis_source(
+        0x2228,
+        FactorGaussian([0.0, 0.0], [1.0 0.0; 0.25 0.75]),
+    )
+    expected_unsupported_rng = copy(unsupported.rng)
+    unsupported_error = caught_device_error(() -> LateFailAccelerator()(unsupported))
+    @test unsupported_error isa SamplerDeviceError
+    @test unsupported_error.reason === :accelerator_factorization_unavailable
+    @test rand(unsupported.rng, UInt64) == rand(expected_unsupported_rng, UInt64)
+end
+
+@testset "AMIS round diagnostics transfer only three device scalars" begin
+    for T in (Float32, Float64)
+        logweights = KernelArgumentTestArray(T[log(T(1)), log(T(3)), log(T(2)), T(100)])
+        transfers = IS._ResultTransferCounter(0, 0)
+
+        summary = @inferred IS._logweight_summary(view(logweights, 1:3), transfers)
+
+        @test summary.ess ≈ T(18 / 7) rtol = 8eps(T)
+        @test summary.lognormalizer ≈ log(T(2)) rtol = 8eps(T)
+        @test transfers.count == 3
+        @test transfers.bytes == 3sizeof(T)
+        @test transfers.reasons.logweight_maximum.count == 1
+        @test transfers.reasons.logweight_scaled_sum.count == 1
+        @test transfers.reasons.logweight_scaled_square_sum.count == 1
+    end
+end
+
+@testset "AMIS covariance failure diagnostics transfer only two device scalars" begin
+    covariance = KernelArgumentTestArray([2.0 -4.0; -4.0 3.0])
+    transfers = IS._ResultTransferCounter(0, 0)
+    KERNEL_ARGUMENT_TEST_CPU_COPIES[] = 0
+    KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] = 0
+
+    diagnostics = IS._amis_covariance_diagnostics(covariance, transfers)
+
+    @test diagnostics == (
+        minimum_diagonal=2.0,
+        maximum_absolute_entry=4.0,
+    )
+    @test transfers.count == 2
+    @test transfers.bytes == 2sizeof(Float64)
+    @test transfers.reasons.covariance_diagnostic.count == 2
+    @test transfers.reasons.covariance_diagnostic.bytes == 2sizeof(Float64)
+    @test iszero(KERNEL_ARGUMENT_TEST_CPU_COPIES[])
+    @test iszero(KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[])
+end
+
+@testset "AMIS accelerator scalar covariance failure is transactional" begin
+    T = Float32
+    scale = nextfloat(zero(T))
+    algorithm = AMIS(
+        SphericalGaussian(zero(T), scale);
+        rounds=1,
+        round_size=1,
+    )
+    target = AMISZeroFloat32Target()
+
+    cpu = prepare_sampler(
+        AMISExecutionTestRNG(0),
+        target,
+        algorithm;
+        threaded=false,
+    )
+    cpu_before = current_proposal(cpu)
+    cpu_failure = caught_device_error(() -> importance_sample!(cpu))
+    @test cpu_failure isa AMISRoundError
+    @test cpu_failure.phase === :factorization
+    @test cpu_failure.cause isa LinearAlgebra.PosDefException
+    @test cpu_failure.cause.info == 1
+    @test cpu_failure.diagnostics.covariance == (
+        minimum_diagonal=zero(T),
+        maximum_absolute_entry=zero(T),
+    )
+    @test iszero(cpu_failure.diagnostics.transfers.count)
+    @test cpu.rng.draws == 1
+    @test current_proposal(cpu) == cpu_before
+
+    source = prepare_sampler(
+        Random.Xoshiro(0x2229),
+        target,
+        algorithm;
+        threaded=true,
+    )
+    device = AMISExecutionTestAccelerator()
+    prepared = device(source)
+    before = current_proposal(MLDataDevices.cpu_device(), prepared)
+    failure = caught_device_error(() -> importance_sample!(prepared))
+    @test failure isa AMISRoundError
+    if failure isa AMISRoundError
+        @test failure.round == 1
+        @test failure.phase === :factorization
+        @test failure.cause isa LinearAlgebra.PosDefException
+        @test failure.diagnostics.covariance ==
+              cpu_failure.diagnostics.covariance
+        @test iszero(failure.diagnostics.transfers.count)
+        if failure.cause isa LinearAlgebra.PosDefException
+            @test failure.cause.info == cpu_failure.cause.info == 1
+        end
+    end
+    @test prepared.rng.draws == 1
+    failure_storage = prepared.random_buffers.failure_scratch.record.storage
+    failure_snapshot = IS._decode_native_failure(
+        failure_storage[1],
+        failure_storage[2],
+    )
+    @test failure_snapshot.count == 1
+    @test failure_snapshot.reason_bits == IS._AMIS_COVARIANCE_INVALID
+    @test iszero(failure_storage[3])
+    after = try
+        current_proposal(MLDataDevices.cpu_device(), prepared)
+    catch cause
+        cause
+    end
+    @test after == before
+    @test AMIS_EXECUTION_TEST_CURRENT[] === :caller
+    @test !prepared.running
+end
+
+@testset "AMIS accelerator authority synchronization is transactional" begin
+    T = Float64
+    algorithm = AMIS(
+        SphericalGaussian(zero(T), one(T));
+        rounds=1,
+        round_size=3,
+    )
+    device = AMISExecutionTestAccelerator()
+    base = device(prepare_sampler(
+        Random.Xoshiro(0x2231),
+        AMISZeroFloat32Target(),
+        algorithm;
+        threaded=true,
+    ))
+    old_state = base.method_state
+    old_history = old_state.history
+    history = IS._AMISScalarHistory(
+        AMISPublicationSyncArray(old_history.means),
+        old_history.scales,
+        old_history.lognormalizers,
+    )
+    state = IS._PreparedAMIS(
+        old_state.schedule,
+        old_state.offsets,
+        old_state.logcounts,
+        history,
+        old_state.workspace,
+        old_state.committed_in_workspace,
+    )
+    prepared = IS._PreparedImportanceSampler(
+        AMISExecutionPrefilledRNG(fill(T[-1, 0, 1], 2), 1),
+        base.random_buffers,
+        base.target,
+        base.algorithm,
+        state,
+        base.device,
+        base.threaded,
+        false,
+        false,
+    )
+    @test importance_sample!(prepared) isa WeightedSamples
+    @test prepared.method_state.committed_in_workspace
+    before = current_proposal(MLDataDevices.cpu_device(), prepared)
+
+    failure = caught_device_error(() -> importance_sample!(prepared))
+
+    @test failure isa AMISRoundError
+    if failure isa AMISRoundError
+        @test failure.round == 1
+        @test failure.phase === :result_construction
+        @test failure.cause isa ErrorException
+        @test failure.cause.msg ==
+              "intentional AMIS publication synchronization failure"
+        @test failure.diagnostics.completed_rounds == 0
+    end
+    @test current_proposal(MLDataDevices.cpu_device(), prepared) == before
+    @test prepared.method_state.committed_in_workspace
+    @test !prepared.running
+    @test AMIS_EXECUTION_TEST_CURRENT[] === :caller
+end
+
+@testset "AMIS final workspace synchronization is transactional" begin
+    T = Float64
+    algorithm = AMIS(
+        SphericalGaussian(zero(T), one(T));
+        rounds=1,
+        round_size=3,
+    )
+    device = AMISExecutionTestAccelerator()
+    prepared = device(prepare_sampler(
+        Random.Xoshiro(0x2232),
+        AMISZeroFloat32Target(),
+        algorithm;
+        threaded=true,
+    ))
+    @test importance_sample!(prepared) isa WeightedSamples
+    before = current_proposal(MLDataDevices.cpu_device(), prepared)
+
+    old_state = prepared.method_state
+    old_workspace = old_state.workspace
+    workspace = IS._AMISWorkspace(
+        old_workspace.samples,
+        old_workspace.logtargets,
+        old_workspace.lognumerators,
+        old_workspace.logweights,
+        old_workspace.normalized_weights,
+        old_workspace.centered_scaled,
+        old_workspace.covariance,
+        AMISPublicationSyncArray(old_workspace.candidate_mean),
+        old_workspace.candidate_scale,
+        old_workspace.candidate_lognormalizer,
+    )
+    state = IS._PreparedAMIS(
+        old_state.schedule,
+        old_state.offsets,
+        old_state.logcounts,
+        old_state.history,
+        workspace,
+        old_state.committed_in_workspace,
+    )
+    failing = IS._PreparedImportanceSampler(
+        AMISExecutionPrefilledRNG([T[-2, 0, 2]], 1),
+        prepared.random_buffers,
+        prepared.target,
+        prepared.algorithm,
+        state,
+        prepared.device,
+        prepared.threaded,
+        false,
+        false,
+    )
+
+    failure = caught_device_error(() -> importance_sample!(failing))
+
+    @test failure isa AMISRoundError
+    if failure isa AMISRoundError
+        @test failure.round == 1
+        @test failure.phase === :result_construction
+        @test failure.cause isa ErrorException
+        @test failure.cause.msg ==
+              "intentional AMIS publication synchronization failure"
+        @test failure.diagnostics.completed_rounds == 1
+    end
+    @test current_proposal(MLDataDevices.cpu_device(), failing) == before
+    @test !failing.method_state.committed_in_workspace
+    @test !failing.running
+    @test AMIS_EXECUTION_TEST_CURRENT[] === :caller
+end
+
+@testset "AMIS packed sample failure precedes the later fit sentinel" begin
+    T = Float64
+    round_size = 3
+    scale = sqrt(floatmax(T)) / T(4)
+    algorithm = AMIS(
+        FactorGaussian(T[0], reshape(T[scale], 1, 1));
+        rounds=1,
+        round_size,
+    )
+    device = AMISExecutionTestAccelerator()
+    base = device(prepare_sampler(
+        Random.Xoshiro(0x2230),
+        AMISZeroSampleFailureTarget{T}(),
+        algorithm;
+        threaded=true,
+    ))
+    base_buffers = base.random_buffers
+    failure_scratch = IS._NativeFailureScratch(
+        base_buffers.failure_scratch.record,
+        IS._NoNativeTargetFailures(),
+    )
+    buffers = IS._RandomBuffers(
+        base_buffers.uniform,
+        base_buffers.normal,
+        failure_scratch,
+    )
+    rng = AMISExecutionPrefilledRNG(
+        [T[-8, 0, 8], T[-0.25, 0.25, 0.5]],
+        1,
+    )
+    prepared = IS._PreparedImportanceSampler(
+        rng,
+        buffers,
+        base.target,
+        base.algorithm,
+        base.method_state,
+        base.device,
+        base.threaded,
+        false,
+        false,
+    )
+    before = current_proposal(MLDataDevices.cpu_device(), prepared)
+
+    failure = caught_device_error(() -> importance_sample!(prepared))
+    snapshot = IS._decode_native_failure(
+        prepared.random_buffers.failure_scratch.record.storage[1],
+        prepared.random_buffers.failure_scratch.record.storage[2],
+    )
+
+    @test failure isa AMISRoundError
+    @test failure.phase === :target
+    @test failure.cause isa SamplerExecutionError
+    @test failure.cause.sample_index == 2
+    @test snapshot.count == 2
+    @test snapshot.first_logical_index == 2
+    @test snapshot.reason_bits == IS._NATIVE_TARGET_NAN
+    @test iszero(prepared.random_buffers.failure_scratch.record.storage[3])
+    after = current_proposal(MLDataDevices.cpu_device(), prepared)
+    @test after.location == before.location
+    @test after.scale.factor == before.scale.factor
+    @test after.lognormalizer == before.lognormalizer
+    @test rng.index == 2
+    @test !prepared.running
+
+    @test importance_sample!(prepared) isa WeightedSamples
+    @test rng.index == 3
+    @test !prepared.running
 end
 
 @testset "backend hooks own device scope and validate residency" begin

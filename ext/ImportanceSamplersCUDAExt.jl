@@ -2,6 +2,7 @@ module ImportanceSamplersCUDAExt
 
 import CUDA
 import ImportanceSamplers
+import LinearAlgebra
 import MLDataDevices
 
 ImportanceSamplers._backend_functional(::MLDataDevices.CUDADevice) =
@@ -49,5 +50,14 @@ ImportanceSamplers._owned_backend_rng(
     ::MLDataDevices.CUDADevice,
     seed::UInt64,
 ) = CUDA.RNG(seed)
+
+function ImportanceSamplers._amis_potrf!(
+    ::MLDataDevices.CUDADevice,
+    factor::CUDA.StridedCuMatrix{T},
+) where {T<:Union{Float32,Float64}}
+    factor, info = CUDA.cuSOLVER.potrf!('L', factor)
+    info == 0 || throw(LinearAlgebra.PosDefException(info))
+    return factor
+end
 
 end

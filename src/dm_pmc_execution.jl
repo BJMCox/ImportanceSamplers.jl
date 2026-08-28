@@ -204,49 +204,6 @@ function _dm_pmc_resampling_cdf!(
     return cdf
 end
 
-function _dm_pmc_round_summary(
-    logweights,
-    transfers::_ResultTransferCounter=_ResultTransferCounter(0, 0),
-)
-    maximum_logweight = maximum(logweights)
-    _record_device_scalar_transfer!(
-        transfers,
-        logweights,
-        eltype(logweights),
-        Val(:summary_maximum),
-    )
-    scaled_sum = mapreduce(
-        value -> exp(value - maximum_logweight),
-        +,
-        logweights;
-        init=zero(eltype(logweights)),
-    )
-    _record_device_scalar_transfer!(
-        transfers,
-        logweights,
-        eltype(logweights),
-        Val(:summary_scaled_sum),
-    )
-    scaled_square_sum = mapreduce(
-        value -> abs2(exp(value - maximum_logweight)),
-        +,
-        logweights;
-        init=zero(eltype(logweights)),
-    )
-    _record_device_scalar_transfer!(
-        transfers,
-        logweights,
-        eltype(logweights),
-        Val(:summary_scaled_square_sum),
-    )
-    T = eltype(logweights)
-    return (
-        ess=abs2(scaled_sum) / scaled_square_sum,
-        lognormalizer=maximum_logweight + log(scaled_sum) -
-                      log(T(length(logweights))),
-    )
-end
-
 function _capture_dm_pmc_round(f, round, phase, round_size, committed_rounds)
     try
         return f()
@@ -321,8 +278,7 @@ function _importance_sample_cpu!(
         _capture_dm_pmc_round(round, :sample_and_weight, round_size, round - 1) do
             _launch_mis_round!(
                 round_samples,
-                round_logweights,
-                round_proposal_ids,
+                _MISRoundOutput(round_logweights, round_proposal_ids),
                 buffers.failure_scratch.record.storage,
                 buffers.normals,
                 target_evaluator,
@@ -357,7 +313,7 @@ function _importance_sample_cpu!(
                 workspace.candidate_locations,
                 execution,
             )
-            _dm_pmc_round_summary(round_logweights, transfers)
+            _logweight_summary(round_logweights, transfers)
         end
         output_indices = plan.offsets[round]:(plan.offsets[round + 1] - 1)
         _capture_dm_pmc_round(round, :commit_output, round_size, round - 1) do
