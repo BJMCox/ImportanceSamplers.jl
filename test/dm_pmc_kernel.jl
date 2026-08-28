@@ -248,9 +248,9 @@ end
     for reason in (
         Val(:cdf_maximum),
         Val(:cdf_sum),
-        Val(:summary_maximum),
-        Val(:summary_scaled_sum),
-        Val(:summary_scaled_square_sum),
+        Val(:logweight_maximum),
+        Val(:logweight_scaled_sum),
+        Val(:logweight_scaled_square_sum),
     )
         DMPMCKernelIS._record_scalar_transfer!(transfers, Float32, reason)
     end
@@ -261,9 +261,9 @@ end
         :failure_snapshot,
         :cdf_maximum,
         :cdf_sum,
-        :summary_maximum,
-        :summary_scaled_sum,
-        :summary_scaled_square_sum,
+        :logweight_maximum,
+        :logweight_scaled_sum,
+        :logweight_scaled_square_sum,
         :covariance_diagnostic,
     )
     @test transfers.reasons.failure_snapshot.count == 1

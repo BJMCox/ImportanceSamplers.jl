@@ -80,7 +80,7 @@ end
 
 _algorithm_proposal(algorithm::AMIS) = algorithm.proposal
 _algorithm_sample_budget(algorithm::AMIS) =
-    sum(_resolve_adaptive_schedule(algorithm.rounds, algorithm.round_size))
+    _adaptive_sample_budget(algorithm.rounds, algorithm.round_size)
 
 """
     AMISRoundError

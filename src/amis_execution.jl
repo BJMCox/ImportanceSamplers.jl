@@ -322,7 +322,7 @@ function _preflight_amis_kernels(
     log_type = eltype(workspace.logweights)
     target_argument = _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
     backend = KernelAbstractions.get_backend(buffers.normal)
-    round_ids = similar(workspace.logweights, Int, length(new_indices))
+    round_ids = similar(workspace.logweights, Int, 1)
     logtotal = log(eltype(method_state.logcounts)(last_sample))
     assignments = _FixedMISAssignments(
         representative_round,
@@ -452,7 +452,7 @@ function _normalize_amis_weights!(
         transfers,
         logweights,
         eltype(logweights),
-        Val(:summary_maximum),
+        Val(:logweight_maximum),
     )
     maximum_logweight == -Inf && throw(AllZeroWeightsError())
     active_weights = view(normalized_weights, 1:sample_count)
@@ -462,7 +462,7 @@ function _normalize_amis_weights!(
         transfers,
         normalized_weights,
         T,
-        Val(:summary_scaled_sum),
+        Val(:logweight_scaled_sum),
     )
     isfinite(total) && total > zero(T) || throw(AllZeroWeightsError())
     active_weights ./= total

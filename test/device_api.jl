@@ -75,11 +75,15 @@ Base.size(array::KernelArgumentTestArray) = size(array.storage)
 Base.getindex(array::KernelArgumentTestArray, indices...) =
     getindex(array.storage, indices...)
 Base.IndexStyle(::Type{<:KernelArgumentTestArray}) = IndexLinear()
+const KERNEL_ARGUMENT_TEST_INT_SIMILAR_LENGTHS = Int[]
 Base.similar(
     ::KernelArgumentTestArray,
     ::Type{T},
     dimensions::Dims{N},
-) where {T,N} = KernelArgumentTestArray(Array{T,N}(undef, dimensions))
+) where {T,N} = begin
+    T === Int && push!(KERNEL_ARGUMENT_TEST_INT_SIMILAR_LENGTHS, prod(dimensions))
+    KernelArgumentTestArray(Array{T,N}(undef, dimensions))
+end
 
 KernelAbstractions.get_backend(::KernelArgumentTestArray) =
     KernelArgumentTestBackend()
@@ -1157,6 +1161,7 @@ end
         ),
     )
         empty!(KERNEL_ARGUMENT_TEST_ARGUMENTS)
+        empty!(KERNEL_ARGUMENT_TEST_INT_SIMILAR_LENGTHS)
         source = make_amis_source(seed, proposal)
         expected_rng = copy(getfield(source, :rng))
         destination = device(source)
@@ -1193,6 +1198,7 @@ end
         @test state.offsets isa Tuple
         @test destination.device === device
         @test KERNEL_ARGUMENT_TEST_CURRENT[] === :caller
+        @test KERNEL_ARGUMENT_TEST_INT_SIMILAR_LENGTHS == [1]
         rand(expected_rng, UInt64)
         @test rand(getfield(source, :rng), UInt64) == rand(expected_rng, UInt64)
 
@@ -1377,9 +1383,9 @@ end
         @test summary.lognormalizer ≈ log(T(2)) rtol = 8eps(T)
         @test transfers.count == 3
         @test transfers.bytes == 3sizeof(T)
-        @test transfers.reasons.summary_maximum.count == 1
-        @test transfers.reasons.summary_scaled_sum.count == 1
-        @test transfers.reasons.summary_scaled_square_sum.count == 1
+        @test transfers.reasons.logweight_maximum.count == 1
+        @test transfers.reasons.logweight_scaled_sum.count == 1
+        @test transfers.reasons.logweight_scaled_square_sum.count == 1
     end
 end
 
@@ -1532,6 +1538,74 @@ end
     @test current_proposal(MLDataDevices.cpu_device(), prepared) == before
     @test prepared.method_state.committed_in_workspace
     @test !prepared.running
+    @test AMIS_EXECUTION_TEST_CURRENT[] === :caller
+end
+
+@testset "AMIS final workspace synchronization is transactional" begin
+    T = Float64
+    algorithm = AMIS(
+        SphericalGaussian(zero(T), one(T));
+        rounds=1,
+        round_size=3,
+    )
+    device = AMISExecutionTestAccelerator()
+    prepared = device(prepare_sampler(
+        Random.Xoshiro(0x2232),
+        AMISZeroFloat32Target(),
+        algorithm;
+        threaded=true,
+    ))
+    @test importance_sample!(prepared) isa WeightedSamples
+    before = current_proposal(MLDataDevices.cpu_device(), prepared)
+
+    old_state = prepared.method_state
+    old_workspace = old_state.workspace
+    workspace = IS._AMISWorkspace(
+        old_workspace.samples,
+        old_workspace.logtargets,
+        old_workspace.lognumerators,
+        old_workspace.logweights,
+        old_workspace.normalized_weights,
+        old_workspace.centered_scaled,
+        old_workspace.covariance,
+        AMISPublicationSyncArray(old_workspace.candidate_mean),
+        old_workspace.candidate_scale,
+        old_workspace.candidate_lognormalizer,
+    )
+    state = IS._PreparedAMIS(
+        old_state.schedule,
+        old_state.offsets,
+        old_state.logcounts,
+        old_state.history,
+        workspace,
+        old_state.committed_in_workspace,
+    )
+    failing = IS._PreparedImportanceSampler(
+        AMISExecutionPrefilledRNG([T[-2, 0, 2]], 1),
+        prepared.random_buffers,
+        prepared.target,
+        prepared.algorithm,
+        state,
+        prepared.device,
+        prepared.threaded,
+        false,
+        false,
+    )
+
+    failure = caught_device_error(() -> importance_sample!(failing))
+
+    @test failure isa AMISRoundError
+    if failure isa AMISRoundError
+        @test failure.round == 1
+        @test failure.phase === :result_construction
+        @test failure.cause isa ErrorException
+        @test failure.cause.msg ==
+              "intentional AMIS publication synchronization failure"
+        @test failure.diagnostics.completed_rounds == 1
+    end
+    @test current_proposal(MLDataDevices.cpu_device(), failing) == before
+    @test !failing.method_state.committed_in_workspace
+    @test !failing.running
     @test AMIS_EXECUTION_TEST_CURRENT[] === :caller
 end
 

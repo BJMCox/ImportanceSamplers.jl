@@ -273,9 +273,9 @@ function assert_dm_pmc_reported_transfers(transfers, rounds, ::Type{T}) where {T
     for reason in (
         :cdf_maximum,
         :cdf_sum,
-        :summary_maximum,
-        :summary_scaled_sum,
-        :summary_scaled_square_sum,
+        :logweight_maximum,
+        :logweight_scaled_sum,
+        :logweight_scaled_square_sum,
     )
         @test getfield(record.reasons, reason) == (
             count=rounds,
@@ -499,11 +499,11 @@ function strict_resampling_and_ess_case(::Type{T}) where {T}
     @test transfers.count == 3
     @test transfers.bytes == 3sizeof(T)
     reason_record = reported_transfer_record(transfers)
-    @test reason_record.reasons.summary_maximum ==
+    @test reason_record.reasons.logweight_maximum ==
           (count=1, bytes=sizeof(T))
-    @test reason_record.reasons.summary_scaled_sum ==
+    @test reason_record.reasons.logweight_scaled_sum ==
           (count=1, bytes=sizeof(T))
-    @test reason_record.reasons.summary_scaled_square_sum ==
+    @test reason_record.reasons.logweight_scaled_square_sum ==
           (count=1, bytes=sizeof(T))
     return (; selected, ess=summary.ess, transfers=reason_record)
 end

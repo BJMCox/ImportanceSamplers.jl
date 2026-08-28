@@ -10,9 +10,9 @@ mutable struct _ReportedTransferReasons
     failure_snapshot::_ReportedTransfer
     cdf_maximum::_ReportedTransfer
     cdf_sum::_ReportedTransfer
-    summary_maximum::_ReportedTransfer
-    summary_scaled_sum::_ReportedTransfer
-    summary_scaled_square_sum::_ReportedTransfer
+    logweight_maximum::_ReportedTransfer
+    logweight_scaled_sum::_ReportedTransfer
+    logweight_scaled_square_sum::_ReportedTransfer
     covariance_diagnostic::_ReportedTransfer
 end
 
@@ -84,7 +84,7 @@ function _logweight_summary(
         transfers,
         logweights,
         eltype(logweights),
-        Val(:summary_maximum),
+        Val(:logweight_maximum),
     )
     scaled_sum = mapreduce(
         value -> exp(value - maximum_logweight),
@@ -96,7 +96,7 @@ function _logweight_summary(
         transfers,
         logweights,
         eltype(logweights),
-        Val(:summary_scaled_sum),
+        Val(:logweight_scaled_sum),
     )
     scaled_square_sum = mapreduce(
         value -> abs2(exp(value - maximum_logweight)),
@@ -108,7 +108,7 @@ function _logweight_summary(
         transfers,
         logweights,
         eltype(logweights),
-        Val(:summary_scaled_square_sum),
+        Val(:logweight_scaled_square_sum),
     )
     T = eltype(logweights)
     return (

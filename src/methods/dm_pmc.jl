@@ -22,6 +22,8 @@ end
 
 _resolve_adaptive_schedule(rounds, round_size::Int) = fill(round_size, rounds)
 _resolve_adaptive_schedule(rounds, round_size::Vector{Int}) = copy(round_size)
+_adaptive_sample_budget(rounds, round_size::Int) = rounds * round_size
+_adaptive_sample_budget(rounds, round_size::Vector{Int}) = sum(round_size)
 
 """
     DeterministicMixturePMC(bank; rounds, round_size)
@@ -60,7 +62,7 @@ end
 
 _algorithm_proposal(algorithm::DeterministicMixturePMC) = algorithm.bank
 _algorithm_sample_budget(algorithm::DeterministicMixturePMC) =
-    sum(_resolve_adaptive_schedule(algorithm.rounds, algorithm.round_size))
+    _adaptive_sample_budget(algorithm.rounds, algorithm.round_size)
 
 """
     current_proposal(sampler)

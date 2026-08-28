@@ -70,15 +70,15 @@ function assert_amis_transfers(transfers, rounds, ::Type{T}) where {T}
         count=rounds,
         bytes=rounds * 3sizeof(UInt64),
     )
-    @test record.reasons.summary_maximum == (
+    @test record.reasons.logweight_maximum == (
         count=2rounds,
         bytes=2rounds * sizeof(T),
     )
-    @test record.reasons.summary_scaled_sum == (
+    @test record.reasons.logweight_scaled_sum == (
         count=2rounds,
         bytes=2rounds * sizeof(T),
     )
-    @test record.reasons.summary_scaled_square_sum == (
+    @test record.reasons.logweight_scaled_square_sum == (
         count=rounds,
         bytes=rounds * sizeof(T),
     )
@@ -93,10 +93,10 @@ function assert_amis_factorization_failure_transfers(failure, ::Type{T}) where {
     @test record.count == 5
     @test record.bytes == 3sizeof(UInt64) + 4sizeof(T)
     @test record.reasons.failure_snapshot == (count=1, bytes=3sizeof(UInt64))
-    @test record.reasons.summary_maximum == (count=1, bytes=sizeof(T))
-    @test record.reasons.summary_scaled_sum == (count=1, bytes=sizeof(T))
+    @test record.reasons.logweight_maximum == (count=1, bytes=sizeof(T))
+    @test record.reasons.logweight_scaled_sum == (count=1, bytes=sizeof(T))
     @test record.reasons.covariance_diagnostic == (count=2, bytes=2sizeof(T))
-    for reason in (:cdf_maximum, :cdf_sum, :summary_scaled_square_sum)
+    for reason in (:cdf_maximum, :cdf_sum, :logweight_scaled_square_sum)
         @test getfield(record.reasons, reason) == (count=0, bytes=0)
     end
     return record
@@ -107,12 +107,12 @@ function assert_amis_sample_fit_failure_transfers(failure, ::Type{T}) where {T}
     @test record.count == 3
     @test record.bytes == 3sizeof(UInt64) + 2sizeof(T)
     @test record.reasons.failure_snapshot == (count=1, bytes=3sizeof(UInt64))
-    @test record.reasons.summary_maximum == (count=1, bytes=sizeof(T))
-    @test record.reasons.summary_scaled_sum == (count=1, bytes=sizeof(T))
+    @test record.reasons.logweight_maximum == (count=1, bytes=sizeof(T))
+    @test record.reasons.logweight_scaled_sum == (count=1, bytes=sizeof(T))
     for reason in (
         :cdf_maximum,
         :cdf_sum,
-        :summary_scaled_square_sum,
+        :logweight_scaled_square_sum,
         :covariance_diagnostic,
     )
         @test getfield(record.reasons, reason) == (count=0, bytes=0)
