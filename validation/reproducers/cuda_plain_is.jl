@@ -1,6 +1,7 @@
 using CUDA
 using DensityInterface
 using ImportanceSamplers
+using LinearAlgebra
 using MLDataDevices
 using Pkg
 using Random
@@ -410,7 +411,7 @@ function validate_case(device, ::Type{T}, case, seed) where {T}
     @test gpu.logweights isa CuArray
     @test _all_array_leaves(array -> eltype(array) === T, gpu.samples)
     @test eltype(gpu.logweights) === T
-    @test transfer_tuple(gpu) == (1, 2sizeof(UInt64))
+    @test transfer_tuple(gpu) == (1, 3sizeof(UInt64))
 
     resident_view = gpu[1:16]
     @test _all_array_leaves(
@@ -418,12 +419,12 @@ function validate_case(device, ::Type{T}, case, seed) where {T}
         resident_view.samples,
     )
     @test MLDataDevices.get_device(resident_view.logweights) isa MLDataDevices.CUDADevice
-    @test transfer_tuple(gpu) == (1, 2sizeof(UInt64))
+    @test transfer_tuple(gpu) == (1, 3sizeof(UInt64))
 
     resident_normalized = normalized_weights(gpu)
     @test resident_normalized isa CuArray
     @test MLDataDevices.get_device(resident_normalized) isa MLDataDevices.CUDADevice
-    @test transfer_tuple(gpu) == (2, 2sizeof(UInt64) + 2sizeof(T))
+    @test transfer_tuple(gpu) == (2, 3sizeof(UInt64) + 2sizeof(T))
 
     host = MLDataDevices.cpu_device()(gpu)
     @test _all_array_leaves(array -> array isa Array, host.samples)
@@ -547,6 +548,55 @@ function validate_context_execution(device)
     @test named_result.samples isa CuArray
     @test named_result.logweights isa CuArray
     @test length(named_result) == 2_048
+    return nothing
+end
+
+function validate_factor_batch_execution(device, ::Type{T}) where {T}
+    dimension = 32
+    nsamples = 4096
+    location = T.(range(-0.4, 0.4; length=dimension))
+    factor = Matrix{T}(I, dimension, dimension)
+    for index in 1:dimension
+        factor[index, index] = T(0.7) + T(0.01index)
+        index > 1 && (factor[index, index - 1] = T(0.08))
+    end
+    proposal = FactorGaussian(
+        location,
+        factor,
+    )
+    context = (
+        location=T.(range(0.3, -0.3; length=dimension)),
+        scale=fill(T(1.2), dimension),
+    )
+    prepared = prepare_sampler(
+        Xoshiro(VALIDATION_SEED + 0x500),
+        vector_gaussian_logtarget,
+        context,
+        ImportanceSampling(proposal; nsamples);
+        factor_execution=BatchedFactorExecution(),
+        threaded=true,
+    ) |> device
+    @test ImportanceSamplers._use_native_factor_batch_path(
+        prepared.device,
+        prepared.algorithm.proposal,
+        ImportanceSamplers._NoSampleTransform(),
+        prepared.factor_execution,
+    )
+    result = importance_sample!(prepared)
+    CUDA.synchronize()
+    @test result.samples isa CUDA.AnyCuArray
+    @test result.logweights isa CUDA.AnyCuArray
+    @test size(result.samples) == (dimension, nsamples)
+    samples = Array(result.samples)
+    proposal_logconstant =
+        -T(0.5dimension) * log(T(2pi)) - sum(log, diag(factor))
+    expected = map(eachcol(samples)) do sample
+        standardized = LowerTriangular(factor) \ (sample - location)
+        vector_gaussian_logtarget(sample, context) -
+        (proposal_logconstant - T(0.5) * sum(abs2, standardized))
+    end
+    tolerance = T(4096) * eps(T)
+    @test Array(result.logweights) ≈ expected rtol = tolerance atol = tolerance
     return nothing
 end
 
@@ -738,26 +788,26 @@ function validate_failure_scratch_reuse_and_reset(device)
     @test failure_snapshot.failure.first_logical_index == 1
     @test failure_snapshot.failure.first_block == 1
     @test failure_snapshot.failure.reason_bits == UInt16(0x0800)
-    @test failure_snapshot.transfers == (count=1, bytes=2 * sizeof(UInt64))
+    @test failure_snapshot.transfers == (count=1, bytes=3 * sizeof(UInt64))
 
     fill!(prepared_scale, one(T))
     first_result = importance_sample!(prepared)
     @test getfield(getfield(prepared, :random_buffers), :failure_scratch) ===
           scratch
     @test getfield(getfield(scratch, :record), :storage) === failure_storage
-    @test Array(failure_storage) == zeros(UInt64, 2)
+    @test Array(failure_storage) == zeros(UInt64, 3)
     @test (
         first_result.diagnostics.transfers.count,
         first_result.diagnostics.transfers.bytes,
-    ) == (1, 2 * sizeof(UInt64))
+    ) == (1, 3 * sizeof(UInt64))
 
     second_result = importance_sample!(prepared)
     @test getfield(getfield(scratch, :record), :storage) === failure_storage
-    @test Array(failure_storage) == zeros(UInt64, 2)
+    @test Array(failure_storage) == zeros(UInt64, 3)
     @test (
         second_result.diagnostics.transfers.count,
         second_result.diagnostics.transfers.bytes,
-    ) == (1, 2 * sizeof(UInt64))
+    ) == (1, 3 * sizeof(UInt64))
     @test first_result.samples !== second_result.samples
     @test first_result.logweights !== second_result.logweights
     @test first_result.diagnostics.transfers !==
@@ -858,6 +908,7 @@ function main()
             @testset "$T $(case.label)" for (case_index, case) in enumerate(cases)
                 validate_case(device, T, case, VALIDATION_SEED + UInt64(case_index))
             end
+            validate_factor_batch_execution(device, T)
         end
         @testset "fail closed" begin
             validate_rejections(device)

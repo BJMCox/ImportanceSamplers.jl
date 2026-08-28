@@ -1,6 +1,7 @@
 using BenchmarkTools
 using CUDA
 using ImportanceSamplers
+using LinearAlgebra
 using MLDataDevices
 using Pkg
 using Random
@@ -33,6 +34,13 @@ end
         )
     end
     return value
+end
+
+function static_mis_factor_logdensity(sample, location, factor)
+    T = eltype(sample)
+    standardized = LowerTriangular(factor) \ (sample - location)
+    return -T(0.5length(sample)) * log(T(2pi)) -
+           sum(log, diag(factor)) - T(0.5) * sum(abs2, standardized)
 end
 
 @inline function static_mis_mixture_target(sample, context)
@@ -180,9 +188,11 @@ function assert_resident(prepared, result)
     bank = getfield(method_state, :bank)
     design = getfield(method_state, :design)
     buffers = getfield(prepared, :random_buffers)
+    scale_storage = bank isa ImportanceSamplers._PackedFactorGaussianBank ?
+                    bank.factors : bank.scales
     arrays = Any[
         bank.locations,
-        bank.scales,
+        scale_storage,
         bank.lognormalizers,
         bank.logmasses,
         bank.cdf,
@@ -337,6 +347,64 @@ function synchronized_copy(result)
     return copied
 end
 
+function factor_batch_case(device, ::Type{T}, scheme) where {T}
+    dimension = 32
+    nsamples = 4096
+    proposal_count = 4
+    locations = Matrix{T}(undef, dimension, proposal_count)
+    factors = Array{T}(undef, dimension, dimension, proposal_count)
+    proposals = map(1:proposal_count) do proposal
+        location = T.(range(-0.2, 0.2; length=dimension)) .+
+                   T(0.25proposal)
+        factor = Matrix{T}(I, dimension, dimension)
+        for index in 1:dimension
+            factor[index, index] = T(0.65) + T(0.06proposal) + T(0.005index)
+            index > 1 && (factor[index, index - 1] = T(0.02proposal))
+        end
+        locations[:, proposal] = location
+        factors[:, :, proposal] = factor
+        FactorGaussian(location, factor)
+    end
+    masses = T[1, 2, 3, 4]
+    masses ./= sum(masses)
+    bank = ProposalBank(proposals, masses)
+    _, context, _ = static_mis_case(T, proposal_count, dimension)
+    prepared = prepare_sampler(
+        Xoshiro(STATIC_MIS_SEED + 0x500),
+        static_mis_mixture_target,
+        context,
+        ImportanceSampling(bank; nsamples, mis_scheme=scheme);
+        factor_execution=BatchedFactorExecution(),
+        threaded=true,
+    ) |> device
+    @assert ImportanceSamplers._use_factor_batch_mis_path(
+        prepared.device,
+        prepared.method_state.bank,
+        prepared.method_state.design.denominator,
+        T,
+        prepared.factor_execution,
+    )
+    result = importance_sample!(prepared)
+    CUDA.synchronize()
+    assert_resident(prepared, result)
+    samples = Array(result.samples)
+    expected = map(eachcol(samples)) do sample
+        denominator = T(-Inf)
+        for proposal in 1:proposal_count
+            term = log(masses[proposal]) + static_mis_factor_logdensity(
+                sample,
+                view(locations, :, proposal),
+                view(factors, :, :, proposal),
+            )
+            denominator = static_mis_logaddexp(denominator, term)
+        end
+        static_mis_mixture_target(sample, context) - denominator
+    end
+    tolerance = T(8192) * eps(T)
+    @assert Array(result.logweights) ≈ expected rtol = tolerance atol = tolerance
+    return (scalar_type=T, scheme=typeof(scheme), dimension, nsamples)
+end
+
 function benchmark_case(device, ::Type{T}, scheme, proposal_count, dimension, nsamples) where {T}
     bank, context, _ = static_mis_case(T, proposal_count, dimension)
     sampler = prepare_sampler(
@@ -423,6 +491,11 @@ function main()
         scheme.label in row.direct.schemes
     ]
     @assert length(direct_cases) == 32
+    factor_batches = RUN_CORRECTNESS ? [
+        factor_batch_case(device, T, scheme) for
+        T in (Float32, Float64) for
+        scheme in (StratifiedMixture(), RandomMixture())
+    ] : NamedTuple[]
     correctness = RUN_CORRECTNESS ? [
         correctness_case(
             device,
@@ -448,6 +521,7 @@ function main()
         environment,
         correctness_cases=length(correctness),
         correctness,
+        factor_batches,
         benchmark_cases=length(benchmarks),
         benchmark_output=RUN_BENCHMARKS ? BENCHMARK_OUTPUT : nothing,
         benchmark_throughput_extrema=isempty(benchmarks) ? nothing : (

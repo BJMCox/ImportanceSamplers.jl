@@ -663,6 +663,41 @@ function run_static_mis_prefilled_round(
     return (; samples, logweights, proposal_ids, failure_storage, solve_scratch)
 end
 
+function run_static_mis_prefilled_factor_batch(
+    bank,
+    normals,
+    assignments,
+    target,
+    execution,
+)
+    T = eltype(bank.locations)
+    nsamples = length(assignments)
+    samples = Matrix{T}(undef, size(bank.locations, 1), nsamples)
+    logweights = Vector{T}(undef, nsamples)
+    proposal_ids = Vector{Int}(undef, nsamples)
+    failure_storage = zeros(UInt64, 3)
+    normal_scratch = copy(normals)
+    solve_scratch = ISK._allocate_mis_solve_scratch(
+        normal_scratch,
+        bank,
+        nsamples,
+    )
+    target_evaluator = ISK._NativeDeviceTarget{T,typeof(target)}(target)
+    ISK._launch_factor_batch_mis_round!(
+        samples,
+        ISK._MISRoundOutput(logweights, proposal_ids),
+        failure_storage,
+        normal_scratch,
+        target_evaluator,
+        bank,
+        assignments,
+        ISK._FullMixtureDenominator(),
+        solve_scratch,
+        execution,
+    )
+    return (; samples, logweights, proposal_ids, failure_storage)
+end
+
 function static_mis_prefilled_launch_allocated!(
     result,
     bank,
@@ -777,6 +812,59 @@ end
             @test threaded_failure.failure_storage ==
                   serial_failure.failure_storage
         end
+
+        factor_batch = run_static_mis_prefilled_factor_batch(
+            factor_bank,
+            normals,
+            assignments,
+            target,
+            ISK._SerialCPUExecution(),
+        )
+        factor_oracle = static_mis_prefilled_oracle(
+            factor_bank,
+            normals,
+            assignments,
+            target,
+        )
+        @test factor_batch.samples == factor_oracle.samples
+        @test factor_batch.logweights ≈ factor_oracle.logweights rtol = 32eps(T)
+        @test factor_batch.proposal_ids == factor_oracle.proposal_ids
+        @test iszero(factor_batch.failure_storage)
+
+        failed_normals = copy(normals)
+        failed_normals[1] = T(Inf)
+        failed_fused = run_static_mis_prefilled_round(
+            factor_bank,
+            failed_normals,
+            assignments,
+            target,
+            ISK._SerialCPUExecution(),
+        )
+        failed_batch = run_static_mis_prefilled_factor_batch(
+            factor_bank,
+            failed_normals,
+            assignments,
+            target,
+            ISK._SerialCPUExecution(),
+        )
+        @test failed_batch.failure_storage == failed_fused.failure_storage
+
+        fill!(factor_bank.lognormalizers, T(-Inf))
+        invalid_fused = run_static_mis_prefilled_round(
+            factor_bank,
+            normals,
+            assignments,
+            target,
+            ISK._SerialCPUExecution(),
+        )
+        invalid_batch = run_static_mis_prefilled_factor_batch(
+            factor_bank,
+            normals,
+            assignments,
+            target,
+            ISK._SerialCPUExecution(),
+        )
+        @test invalid_batch.failure_storage == invalid_fused.failure_storage
 
         diagonal_scratch = ISK._allocate_mis_solve_scratch(
             normals,

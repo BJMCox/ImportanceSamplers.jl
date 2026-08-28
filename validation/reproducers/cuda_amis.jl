@@ -507,13 +507,14 @@ function factor_batch_case(device)
         Random.Xoshiro(AMIS_CUDA_SEED + 0x50),
         AMISQuadraticTarget{T}(),
         AMIS(proposal; rounds=length(schedule), round_size=schedule);
+        factor_execution=BatchedFactorExecution(),
         threaded=true,
     )
     prepared = device(source)
     @test IS._use_factor_batch_path(
         device,
         prepared.method_state.history,
-        first(schedule),
+        prepared.factor_execution,
     )
 
     result = importance_sample!(prepared)
@@ -736,6 +737,7 @@ function factor_overflow_transaction_case(device, ::Type{T}) where {T}
         base.algorithm,
         base.method_state,
         base.device,
+        base.factor_execution,
         base.threaded,
         false,
         false,
@@ -851,6 +853,7 @@ function combined_sample_fit_failure_case(device, ::Type{T}) where {T}
         base.algorithm,
         base.method_state,
         base.device,
+        base.factor_execution,
         base.threaded,
         false,
         false,

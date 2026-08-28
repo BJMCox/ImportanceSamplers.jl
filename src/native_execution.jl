@@ -166,19 +166,35 @@ _factor_batch_locations(history::_AMISFactorHistory) = history.means
 _factor_batch_factors(bank::_PackedFactorGaussianBank) = bank.factors
 _factor_batch_factors(history::_AMISFactorHistory) = history.factors
 
+_factor_batch_location(proposal::_GaussianProposal, proposal_slot) =
+    proposal.location
+_factor_batch_factor(proposal::_GaussianProposal, proposal_slot) =
+    proposal.scale.factor
+_factor_batch_lognormalizers(bank::_PackedFactorGaussianBank) =
+    bank.lognormalizers
+_factor_batch_lognormalizers(history::_AMISFactorHistory) =
+    history.lognormalizers
+_factor_batch_lognormalizers(proposal::_GaussianProposal) =
+    proposal.lognormalizer
+
+_factor_batch_location(source, proposal_slot) =
+    view(_factor_batch_locations(source), :, proposal_slot)
+_factor_batch_factor(source, proposal_slot) =
+    view(_factor_batch_factors(source), :, :, proposal_slot)
+
 function _factor_batch_draw!(samples, normals, bank, proposal_slot)
-    factor = view(_factor_batch_factors(bank), :, :, proposal_slot)
-    location = view(_factor_batch_locations(bank), :, proposal_slot)
+    factor = _factor_batch_factor(bank, proposal_slot)
+    location = _factor_batch_location(bank, proposal_slot)
     LinearAlgebra.mul!(samples, factor, normals)
     samples .+= reshape(location, :, 1)
     return samples
 end
 
 _factor_batch_supported(device) = false
-_factor_batch_profitable(bank, sample_count) =
-    _mis_dimension(bank) >= 32 && sample_count >= 4096
-_use_factor_batch_path(device, bank, sample_count) =
-    _factor_batch_supported(device) && _factor_batch_profitable(bank, sample_count)
+_factor_batch_supported(::MLDataDevices.AbstractCPUDevice) = true
+_use_factor_batch_path(device, source, ::FusedFactorExecution) = false
+_use_factor_batch_path(device, source, ::BatchedFactorExecution) =
+    _factor_batch_supported(device)
 
 @inline function _packed_gaussian_logdensity!(
     bank::Union{_PackedFactorGaussianBank,_AMISFactorHistory},
@@ -673,4 +689,104 @@ function _launch_native_fused!(
     )
     KernelAbstractions.synchronize(backend)
     return nothing
+end
+
+@inline function _factor_batch_sample_finite(samples, sample_index)
+    valid = true
+    @inbounds for coordinate in axes(samples, 1)
+        valid &= isfinite(samples[coordinate, sample_index])
+    end
+    return valid
+end
+
+@kernel function _native_factor_batch_finish_kernel!(
+    samples,
+    logweights,
+    failure_storage,
+    target,
+)
+    sample_index = @index(Global, Linear)
+    if !_factor_batch_sample_finite(samples, sample_index)
+        _record_native_failure!(
+            failure_storage,
+            sample_index,
+            0,
+            _NATIVE_GENERATED_NONFINITE,
+        )
+    else
+        target_log, target_reason, target_failed = target(
+            _native_sample_at(samples, sample_index),
+            sample_index,
+        )
+        if target_failed
+            iszero(target_reason) || _record_native_failure!(
+                failure_storage,
+                sample_index,
+                0,
+                target_reason,
+            )
+        else
+            proposal_log = @inbounds logweights[sample_index]
+            reason = _native_proposal_reason(proposal_log)
+            if iszero(reason)
+                value, reason = _subtract_logweight(target_log, proposal_log)
+                iszero(reason) && (@inbounds logweights[sample_index] = value)
+            end
+            iszero(reason) || _record_native_failure!(
+                failure_storage,
+                sample_index,
+                0,
+                reason,
+            )
+        end
+    end
+end
+
+function _launch_native_factor_batch!(
+    samples,
+    logweights,
+    failure_record,
+    normal_buffer,
+    target,
+    base,
+    execution,
+)
+    sample_count = length(logweights)
+    dimension = _gaussian_dimension(base.location)
+    normals = reshape(normal_buffer, dimension, sample_count)
+    _factor_batch_draw!(samples, normals, base, 1)
+    fill!(logweights, eltype(logweights)(-Inf))
+    _launch_factor_batch_logmixture!(
+        logweights,
+        normals,
+        samples,
+        base,
+        1,
+        zero(eltype(logweights)),
+        failure_record.storage,
+        execution,
+    )
+    backend = KernelAbstractions.get_backend(normal_buffer)
+    finish_kernel = _native_factor_batch_finish_kernel!(backend)
+    finish_kernel(
+        samples,
+        logweights,
+        failure_record.storage,
+        target;
+        ndrange=sample_count,
+        workgroupsize=_native_workgroupsize(execution, sample_count),
+    )
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
+function _use_native_factor_batch_path(
+    device,
+    base,
+    transform,
+    factor_execution,
+)
+    return transform isa _NoSampleTransform &&
+           base.scale isa _FactorGaussianScale &&
+           _use_factor_batch_path(device, base, factor_execution)
 end

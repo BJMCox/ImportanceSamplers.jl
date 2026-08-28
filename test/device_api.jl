@@ -264,6 +264,7 @@ end
         algorithm::AMIS,
         method_state::_PreparedAMIS,
         random_buffers::_RandomBuffers,
+        factor_execution,
     ) = nothing
 
     function _amis_potrf!(
@@ -369,6 +370,7 @@ end
 
 function make_transfer_sampler(
     rng::Random.AbstractRNG;
+    factor_execution=FusedFactorExecution(),
     threaded=true,
     target=TransferTarget([0.25]),
 )
@@ -380,6 +382,7 @@ function make_transfer_sampler(
         target,
         context,
         algorithm;
+        factor_execution,
         threaded=threaded,
     )
 end
@@ -423,7 +426,11 @@ end
 @testset "explicit prepared device transfer" begin
     cpu = MLDataDevices.cpu_device()
     cpu32 = MLDataDevices.cpu_device(Float32)
-    source = make_transfer_sampler(2101; threaded=false)
+    source = make_transfer_sampler(
+        2101;
+        factor_execution=BatchedFactorExecution(),
+        threaded=false,
+    )
     source_parts = prepared_parts(source)
 
     @test source_parts.device isa MLDataDevices.CPUDevice
@@ -448,6 +455,8 @@ end
     @test destination_parts.device === cpu32
     @test destination_parts.algorithm.nsamples == source_parts.algorithm.nsamples
     @test getfield(destination, :threaded) === getfield(source, :threaded)
+    @test getfield(destination, :factor_execution) ===
+          getfield(source, :factor_execution)
     @test getfield(destination, :executed) === false
     @test destination_parts.callable isa TransferTarget
     @test destination_parts.callable.offset == source_parts.callable.offset
@@ -1521,6 +1530,7 @@ end
         base.algorithm,
         state,
         base.device,
+        base.factor_execution,
         base.threaded,
         false,
         false,
@@ -1592,6 +1602,7 @@ end
         prepared.algorithm,
         state,
         prepared.device,
+        prepared.factor_execution,
         prepared.threaded,
         false,
         false,
@@ -1651,6 +1662,7 @@ end
         base.algorithm,
         base.method_state,
         base.device,
+        base.factor_execution,
         base.threaded,
         false,
         false,

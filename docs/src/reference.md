@@ -7,6 +7,8 @@ AbstractImportanceSampler
 ImportanceSampling
 AMIS
 DeterministicMixturePMC
+FusedFactorExecution
+BatchedFactorExecution
 prepare_sampler
 importance_sample
 importance_sample!

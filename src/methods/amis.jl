@@ -422,12 +422,14 @@ function _preflight_accelerator_method(
     algorithm::AMIS,
     method_state::_PreparedAMIS,
     random_buffers::_RandomBuffers,
+    factor_execution,
 )
     return _preflight_amis_kernels(
         device,
         target,
         method_state,
         random_buffers,
+        factor_execution,
     )
 end
 

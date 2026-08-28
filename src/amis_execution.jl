@@ -255,6 +255,7 @@ end
     @inbounds logtargets[sample_index] = T(-Inf)
     @inbounds lognumerators[sample_index] = T(-Inf)
     @inbounds logweights[sample_index] = T(-Inf)
+    @inbounds round_ids[sample_index] = 0
     if !_amis_batch_sample_finite(samples, sample_index)
         _record_native_failure!(
             failure_storage,
@@ -275,68 +276,6 @@ end
             @inbounds round_ids[sample_index] = round
         end
     end
-end
-
-@kernel function _append_factor_batch_logmixture_kernel!(
-    lognumerators,
-    standardized,
-    lognormalizers,
-    logcounts,
-    proposal_slot,
-    failure_storage,
-)
-    sample_index = @index(Global, Linear)
-    T = eltype(lognumerators)
-    squared_radius = zero(T)
-    @inbounds for coordinate in axes(standardized, 1)
-        squared_radius += abs2(standardized[coordinate, sample_index])
-    end
-    logdensity = @inbounds lognormalizers[proposal_slot] - T(0.5) * squared_radius
-    reason = isnan(logdensity) ? _NATIVE_PROPOSAL_INVALID : UInt16(0)
-    if iszero(reason)
-        value = _append_logmixture(
-            @inbounds(lognumerators[sample_index]),
-            @inbounds(logcounts[proposal_slot]),
-            logdensity,
-        )
-        reason = _native_proposal_reason(value)
-        iszero(reason) && (@inbounds lognumerators[sample_index] = value)
-    end
-    iszero(reason) || _record_native_failure!(
-        failure_storage,
-        sample_index,
-        0,
-        reason,
-    )
-end
-
-function _launch_factor_batch_logmixture!(
-    lognumerators,
-    solve_scratch,
-    samples,
-    history,
-    proposal_slot,
-    logcounts,
-    failure_storage,
-    execution,
-)
-    factor = view(_factor_batch_factors(history), :, :, proposal_slot)
-    location = view(_factor_batch_locations(history), :, proposal_slot)
-    solve_scratch .= samples .- reshape(location, :, 1)
-    LinearAlgebra.ldiv!(LinearAlgebra.LowerTriangular(factor), solve_scratch)
-    backend = KernelAbstractions.get_backend(lognumerators)
-    kernel = _append_factor_batch_logmixture_kernel!(backend)
-    kernel(
-        lognumerators,
-        solve_scratch,
-        history.lognormalizers,
-        logcounts,
-        proposal_slot,
-        failure_storage;
-        ndrange=length(lognumerators),
-        workgroupsize=_native_workgroupsize(execution, length(lognumerators)),
-    )
-    return nothing
 end
 
 function _launch_prefilled_amis_factor_batch!(
@@ -387,6 +326,7 @@ function _launch_prefilled_amis_factor_batch!(
             workgroupsize=_native_workgroupsize(execution, new_sample_count),
         )
 
+        new_round_ids = view(round_ids, new_indices)
         for proposal_slot in 1:(round - 1)
             _launch_factor_batch_logmixture!(
                 view(lognumerators, new_indices),
@@ -397,12 +337,15 @@ function _launch_prefilled_amis_factor_batch!(
                 logcounts,
                 failure_storage,
                 execution,
+                new_round_ids,
+                new_round_ids,
             )
         end
 
         iszero(old_sample_count) || KernelAbstractions.synchronize(backend)
         phase = iszero(old_sample_count) ? :sampling : :denominator
         current_indices = 1:last_sample
+        current_round_ids = view(round_ids, current_indices)
         _launch_factor_batch_logmixture!(
             view(lognumerators, current_indices),
             view(solve_scratch, :, current_indices),
@@ -412,6 +355,8 @@ function _launch_prefilled_amis_factor_batch!(
             logcounts,
             failure_storage,
             execution,
+            current_round_ids,
+            current_round_ids,
         )
 
         KernelAbstractions.synchronize(backend)
@@ -447,13 +392,14 @@ function _launch_prefilled_amis_round!(
     solve_scratch,
     execution,
     device=nothing,
+    factor_execution=FusedFactorExecution(),
 )
     first_sample = offsets[round]
     last_sample = offsets[round + 1] - 1
     old_sample_count = first_sample - 1
     phase = :sampling
     try
-        if _use_factor_batch_path(device, history, last_sample - first_sample + 1)
+        if _use_factor_batch_path(device, history, factor_execution)
             return _launch_prefilled_amis_factor_batch!(
                 samples,
                 logtargets,
@@ -531,6 +477,7 @@ function _preflight_amis_kernels(
     target,
     method_state::_PreparedAMIS,
     buffers::_RandomBuffers,
+    factor_execution,
 )
     history = method_state.history
     workspace = method_state.workspace
@@ -602,7 +549,7 @@ function _preflight_amis_kernels(
         _preflight_kernel_argument(device, weight_kernel, argument)
     end
 
-    if _use_factor_batch_path(device, history, length(new_indices))
+    if _use_factor_batch_path(device, history, factor_execution)
         target_kernel = _amis_batch_target_kernel!(backend)
         for argument in (
             view(workspace.logtargets, new_indices),
@@ -1339,6 +1286,7 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAMIS, thread
                 workspace.centered_scaled,
                 execution,
                 sampler.device,
+                sampler.factor_execution,
             )
             if !deferred_accelerator_snapshot
                 snapshot = _amis_failure_snapshot!(
@@ -1450,6 +1398,7 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAMIS, thread
         method=:amis,
         execution=_execution_name(execution),
         threaded=sampler.threaded,
+        factor_execution_policy=_factor_execution_name(sampler.factor_execution),
         rounds=rounds,
         round_sizes=collect(schedule),
         round_ess=round_ess,

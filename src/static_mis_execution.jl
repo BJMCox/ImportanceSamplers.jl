@@ -96,12 +96,14 @@ function _preflight_accelerator_method(
         _PackedFactorGaussianBank,
     }},
     random_buffers,
+    factor_execution,
 )
     return _preflight_packed_static_mis_kernel_target(
         device,
         target,
         method_state,
         random_buffers,
+        factor_execution,
     )
 end
 
@@ -200,6 +202,7 @@ function _preflight_packed_static_mis_kernel_target(
         _PackedFactorGaussianBank,
     }},
     buffers::_PackedStaticMISRandomBuffers,
+    factor_execution,
 )
     bank = method_state.bank
     samples = _allocate_packed_static_mis_samples(buffers.normal, bank, 1)
@@ -240,6 +243,16 @@ function _preflight_packed_static_mis_kernel_target(
     )
         _preflight_kernel_argument(device, sampling_kernel, argument)
     end
+    if _use_factor_batch_mis_path(
+        device,
+        bank,
+        method_state.design.denominator,
+        log_type,
+        factor_execution,
+    )
+        batch_kernel = _factor_batch_mis_draw_target_kernel!(backend)
+        _preflight_kernel_argument(device, batch_kernel, target_argument)
+    end
     return nothing
 end
 
@@ -263,6 +276,8 @@ function _launch_packed_static_mis!(
     target,
     method_state,
     execution,
+    device,
+    factor_execution,
 )
     backend = KernelAbstractions.get_backend(buffers.normal)
     assignment_kernel = _static_mis_assignment_kernel!(backend)
@@ -276,7 +291,14 @@ function _launch_packed_static_mis!(
     )
     KernelAbstractions.synchronize(backend)
 
-    _launch_mis_round!(
+    launch = _use_factor_batch_mis_path(
+        device,
+        method_state.bank,
+        method_state.design.denominator,
+        eltype(logweights),
+        factor_execution,
+    ) ? _launch_factor_batch_mis_round! : _launch_mis_round!
+    launch(
         samples,
         _MISRoundOutput(logweights, proposal_ids),
         buffers.failure_scratch.record.storage,
@@ -335,6 +357,8 @@ function _importance_sample_cpu!(
         target_evaluator,
         method_state,
         cpu_execution,
+        sampler.device,
+        sampler.factor_execution,
     )
     snapshot = _device_failure_snapshot(failure_scratch.record)
     _throw_native_failures(
@@ -351,6 +375,7 @@ function _importance_sample_cpu!(
         ),
         execution=_execution_name(cpu_execution),
         threaded=sampler.threaded,
+        factor_execution_policy=_factor_execution_name(sampler.factor_execution),
         nsamples=nsamples,
         failures=0,
         transfers=snapshot.transfers,
