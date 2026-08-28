@@ -6,6 +6,8 @@ import Random
 
 const AMISIS = ImportanceSamplers
 
+include(joinpath(@__DIR__, "..", "validation", "amis_capabilities.jl"))
+
 struct AMISTarget{T} end
 
 function (::AMISTarget{T})(sample)::T where {T}
@@ -367,4 +369,16 @@ end
             4,
         ) == 0
     end
+end
+
+@testset "AMIS capability table executes every advertised CPU row" begin
+    table = checked_amis_capability_table()
+
+    @test table == """
+| Scalar type | Geometry | CPU evidence | CUDA evidence |
+|:--|:--|:--|:--|
+| `Float32` | scalar spherical Gaussian | public execution during docs build | NVIDIA A100-PCIE-40GB reproducer |
+| `Float64` | scalar spherical Gaussian | public execution during docs build | NVIDIA A100-PCIE-40GB reproducer |
+| `Float32` | factor Gaussian | public execution during docs build | NVIDIA A100-PCIE-40GB reproducer |
+| `Float64` | factor Gaussian | public execution during docs build | NVIDIA A100-PCIE-40GB reproducer |"""
 end

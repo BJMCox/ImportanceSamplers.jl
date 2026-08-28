@@ -8,6 +8,7 @@ import MLDataDevices
 include(joinpath(@__DIR__, "..", "validation", "cuda_plain_is_capabilities.jl"))
 include(joinpath(@__DIR__, "..", "validation", "static_mis_capabilities.jl"))
 include(joinpath(@__DIR__, "..", "validation", "dm_pmc_capabilities.jl"))
+include(joinpath(@__DIR__, "..", "validation", "amis_capabilities.jl"))
 
 struct CapabilityGaussian end
 
@@ -348,6 +349,7 @@ function checked_dm_pmc_capability_table()
 end
 
 const DM_PMC_CAPABILITY_TABLE = checked_dm_pmc_capability_table()
+const AMIS_CAPABILITY_TABLE = Markdown.parse(checked_amis_capability_table())
 
 makedocs(
     modules=[ImportanceSamplers],
@@ -365,6 +367,7 @@ makedocs(
         "Methods" => [
             "Plain importance sampling" => "methods/importance_sampling.md",
             "Static multiple importance sampling" => "methods/static_mis.md",
+            "Adaptive multiple importance sampling" => "methods/amis.md",
             "Deterministic-mixture population Monte Carlo" => "methods/dm_pmc.md",
         ],
         "Guides" => [
@@ -380,6 +383,7 @@ makedocs(
     linkcheck_ignore=[
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/validation/reproducers/(cuda_)?static_mis\.jl$",
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/dm_pmc|examples/(dm_pmc|numerical_integration)|validation/reproducers/(cuda_dm_pmc|dm_pmc_global))\.jl$",
+        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/amis|examples/amis|validation/reproducers/(cuda_)?amis)\.jl$",
     ],
     warnonly=false,
 )
