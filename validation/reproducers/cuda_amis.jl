@@ -7,10 +7,10 @@ using Random
 using Test
 
 include(joinpath(@__DIR__, "..", "cuda_plain_is_support.jl"))
+include(joinpath(@__DIR__, "..", "amis_capabilities.jl"))
 
 const IS = ImportanceSamplers
 const AMIS_CUDA_SEED = 0x616d697363756461
-const AMIS_CUDA_HARDWARE = "NVIDIA A100-PCIE-40GB"
 
 struct AMISQuadraticTarget{T} end
 struct AMISZeroTarget{T} end
@@ -49,14 +49,6 @@ end
     end
     return -T(0.5) * value
 end
-
-amis_proposal(::Type{T}, ::Val{:scalar}) where {T} =
-    SphericalGaussian(T(-1), T(1.5))
-
-amis_proposal(::Type{T}, ::Val{:factor}) where {T} = FactorGaussian(
-    T[-1, 0.5, 1.25],
-    T[1.2 0 0; -0.2 0.9 0; 0.15 0.25 1.1],
-)
 
 function reported_transfer_record(transfers)
     reason_names = fieldnames(typeof(transfers.reasons))
@@ -132,7 +124,7 @@ function zero_append_case(device, ::Type{T}, kind::Symbol) where {T}
     source = prepare_sampler(
         Random.Xoshiro(0x616d69737a65726f),
         AMISZeroTarget{T}(),
-        AMIS(amis_proposal(T, Val(kind)); rounds=2, round_size=2),
+        AMIS(amis_capability_proposal(T, kind); rounds=2, round_size=2),
     )
     history = source.method_state.history
     if kind === :scalar
@@ -350,12 +342,13 @@ end
 
 function public_execution_case(
     device,
-    ::Type{T},
-    kind;
+    row;
     repeated=false,
-) where {T}
+)
+    T = row.type
+    kind = row.geometry
     schedule = [9, 11, 13]
-    proposal = amis_proposal(T, Val(kind))
+    proposal = amis_capability_proposal(row)
     target = AMISQuadraticTarget{T}()
     source = prepare_sampler(
         Random.Xoshiro(AMIS_CUDA_SEED + UInt(sizeof(T)) + UInt(kind === :factor)),
@@ -470,7 +463,7 @@ function transfer_shape_case(device, ::Type{T}) where {T}
             Random.Xoshiro(AMIS_CUDA_SEED + UInt(sum(schedule))),
             AMISQuadraticTarget{T}(),
             AMIS(
-                amis_proposal(T, Val(kind));
+                amis_capability_proposal(T, kind);
                 rounds=length(schedule),
                 round_size=schedule,
             );
@@ -501,7 +494,7 @@ function wrong_device_pre_rng_case(device, ::Type{T}) where {T}
     other = first(filter(!=(caller), devices))
     wrong = MLDataDevices.CUDADevice{typeof(other),Nothing}(other)
     algorithm = AMIS(
-        amis_proposal(T, Val(:scalar));
+        amis_capability_proposal(T, :scalar);
         rounds=2,
         round_size=[7, 9],
     )
@@ -883,17 +876,21 @@ end
 function main()
     device = cuda_device()
     caller_device = CUDA.device()
-    @test CUDA.name(caller_device) == AMIS_CUDA_HARDWARE
-    rows = Dict{Tuple{DataType,Symbol},NamedTuple}()
-    for T in (Float32, Float64), kind in (:scalar, :factor)
-        rows[(T, kind)] = public_execution_case(
+    @test all(
+        row -> row.cuda.hardware == CUDA.name(caller_device),
+        AMIS_CAPABILITY_ROWS,
+    )
+    records = map(AMIS_CAPABILITY_ROWS) do row
+        @test row.cuda.status === :supported
+        value = public_execution_case(
             device,
-            T,
-            kind;
-            repeated=T === Float64 && kind === :factor,
+            row;
+            repeated=row.label === :float64_factor,
         )
         @test CUDA.device() == caller_device
+        return (label=row.label, status=:passed, value)
     end
+    rows = checked_amis_cuda_capability_results(records)
     transfer_shape = transfer_shape_case(device, Float64)
     wrong_device = wrong_device_pre_rng_case(device, Float64)
     degenerate_scalar_covariance = degenerate_scalar_covariance_case(device)
@@ -912,12 +909,7 @@ function main()
     @test CUDA.device() == caller_device
     return (
         environment=environment_record(),
-        rows=(
-            float32_scalar=rows[(Float32, :scalar)],
-            float64_scalar=rows[(Float64, :scalar)],
-            float32_factor=rows[(Float32, :factor)],
-            float64_factor=rows[(Float64, :factor)],
-        ),
+        rows,
         transfer_shape,
         wrong_device,
         degenerate_scalar_covariance,

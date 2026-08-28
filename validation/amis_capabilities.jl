@@ -71,6 +71,37 @@ const AMIS_PERFORMANCE_SCALING_CELLS = (
 const AMIS_SCALING_ROUNDS = (2, 4, 8)
 const AMIS_SCALING_DIMENSIONS = (1, 4, 16)
 
+amis_capability_proposal(row) = row.proposal(row.type)
+
+function amis_capability_proposal(::Type{T}, geometry) where {T}
+    matches = filter(
+        row -> row.type === T && row.geometry === geometry,
+        AMIS_CAPABILITY_ROWS,
+    )
+    length(matches) == 1 || error(
+        "AMIS capability metadata must contain exactly one $T $geometry row",
+    )
+    return amis_capability_proposal(only(matches))
+end
+
+function checked_amis_cuda_capability_results(records)
+    expected_labels = Tuple(row.label for row in AMIS_CAPABILITY_ROWS)
+    observed_labels = Tuple(record.label for record in records)
+    observed_labels == expected_labels || throw(
+        ArgumentError(
+            "AMIS CUDA capability results must match advertised rows; " *
+            "expected $expected_labels, got $observed_labels",
+        ),
+    )
+    values = map(records) do record
+        record.status === :passed || throw(
+            ArgumentError("AMIS CUDA capability row $(record.label) did not pass"),
+        )
+        record.value
+    end
+    return NamedTuple{expected_labels}(values)
+end
+
 struct AMISCapabilityTarget{T<:AbstractFloat} end
 
 function (::AMISCapabilityTarget{T})(sample)::T where {T}
@@ -92,7 +123,7 @@ function checked_amis_capability_table()
                 Random.Xoshiro(10row_index + schedule_index),
                 AMISCapabilityTarget{row.type}(),
                 AMIS(
-                    row.proposal(row.type);
+                    amis_capability_proposal(row);
                     rounds=length(schedule),
                     round_size=schedule,
                 );

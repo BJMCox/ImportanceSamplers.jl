@@ -382,3 +382,16 @@ end
 | `Float32` | factor Gaussian | public execution during docs build | NVIDIA A100-PCIE-40GB reproducer |
 | `Float64` | factor Gaussian | public execution during docs build | NVIDIA A100-PCIE-40GB reproducer |"""
 end
+
+@testset "AMIS CUDA capability results fail closed" begin
+    records = Tuple(
+        (label=row.label, status=:passed, value=row.label) for
+        row in AMIS_CAPABILITY_ROWS
+    )
+    expected_labels = Tuple(row.label for row in AMIS_CAPABILITY_ROWS)
+
+    @test keys(checked_amis_cuda_capability_results(records)) == expected_labels
+    @test_throws ArgumentError checked_amis_cuda_capability_results(records[1:end - 1])
+    failed = Base.setindex(records, merge(records[2], (status=:failed,)), 2)
+    @test_throws ArgumentError checked_amis_cuda_capability_results(failed)
+end
