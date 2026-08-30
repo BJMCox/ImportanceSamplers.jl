@@ -1,7 +1,9 @@
 module ImportanceSamplers
 
+import ADTypes
 import Adapt
 import DensityInterface
+import DifferentiationInterface
 import KernelAbstractions
 import KernelAbstractions: @index, @kernel
 import LinearAlgebra
@@ -58,8 +60,8 @@ include("proposals.jl")
 include("transforms.jl")
 include("proposal_composition.jl")
 include("proposal_banks.jl")
-include("methods/importance_sampling.jl")
 include("targets.jl")
+include("methods/importance_sampling.jl")
 include("storage.jl")
 include("execution.jl")
 include("methods/static_mis.jl")

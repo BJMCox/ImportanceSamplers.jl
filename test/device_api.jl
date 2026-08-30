@@ -1,5 +1,6 @@
 using Test
 using ImportanceSamplers
+import ADTypes
 import Adapt
 import DensityInterface
 import KernelAbstractions
@@ -40,6 +41,52 @@ Adapt.@adapt_structure AdaptableFunction
 
 function (target::AdaptableFunction)(sample, p)
     return p.shift[1] + target.offset[1] - abs2(sample) / 2
+end
+
+const DERIVATIVE_VALUE_TRANSFERS = Ref(0)
+const DERIVATIVE_GRADIENT_TRANSFERS = Ref(0)
+const DERIVATIVE_CONTEXT_TRANSFERS = Ref(0)
+
+struct DerivativeTransferValue{A<:AbstractVector}
+    offset::A
+end
+
+MLDataDevices.isleaf(::DerivativeTransferValue) = true
+
+function (target::DerivativeTransferValue)(sample, p)
+    return p.shift[1] + target.offset[1] - abs2(sample) / 2
+end
+
+function Adapt.adapt_structure(to, target::DerivativeTransferValue)
+    DERIVATIVE_VALUE_TRANSFERS[] += 1
+    return DerivativeTransferValue(Adapt.adapt(to, target.offset))
+end
+
+struct DerivativeTransferGradient{A<:AbstractVector}
+    scale::A
+end
+
+MLDataDevices.isleaf(::DerivativeTransferGradient) = true
+
+function (gradient::DerivativeTransferGradient)(destination, sample, p)
+    destination .= -gradient.scale[1] .* sample
+    return destination
+end
+
+function Adapt.adapt_structure(to, gradient::DerivativeTransferGradient)
+    DERIVATIVE_GRADIENT_TRANSFERS[] += 1
+    return DerivativeTransferGradient(Adapt.adapt(to, gradient.scale))
+end
+
+struct DerivativeTransferContext{A<:AbstractVector}
+    shift::A
+end
+
+MLDataDevices.isleaf(::DerivativeTransferContext) = true
+
+function Adapt.adapt_structure(to, context::DerivativeTransferContext)
+    DERIVATIVE_CONTEXT_TRANSFERS[] += 1
+    return DerivativeTransferContext(Adapt.adapt(to, context.shift))
 end
 
 struct UncopyableRNG <: Random.AbstractRNG end
@@ -360,7 +407,7 @@ function prepared_parts(prepared)
     target = getfield(prepared, :target)
     return (
         rng=getfield(prepared, :rng),
-        callable=getfield(target, :target),
+        callable=getfield(target, :logdensity),
         context=getfield(target, :context),
         proposal=getfield(getfield(prepared, :algorithm), :proposal),
         algorithm=getfield(prepared, :algorithm),
@@ -534,6 +581,78 @@ end
     )
     @test source_result.samples == destination_result.samples
     @test source_result.logweights == destination_result.logweights
+end
+
+@testset "LogTarget derivative metadata transfers once" begin
+    value = DerivativeTransferValue([0.25])
+    gradient = DerivativeTransferGradient([2.0])
+    context = DerivativeTransferContext([1.5])
+    adtype = ADTypes.AutoForwardDiff(chunksize=2, tag=:transfer_test)
+    source = prepare_sampler(
+        Random.Xoshiro(0x2110),
+        LogTarget(value, adtype; grad=gradient),
+        context,
+        ImportanceSampling(TransferProposal([0.5]); nsamples=1);
+        threaded=false,
+    )
+    DERIVATIVE_VALUE_TRANSFERS[] = 0
+    DERIVATIVE_GRADIENT_TRANSFERS[] = 0
+    DERIVATIVE_CONTEXT_TRANSFERS[] = 0
+
+    destination = @inferred MLDataDevices.cpu_device(Float32)(source)
+
+    @test DERIVATIVE_VALUE_TRANSFERS[] == 1
+    @test DERIVATIVE_GRADIENT_TRANSFERS[] == 1
+    @test DERIVATIVE_CONTEXT_TRANSFERS[] == 1
+    @test destination.target.logdensity isa
+          DerivativeTransferValue{Vector{Float32}}
+    @test destination.target.gradient isa
+          DerivativeTransferGradient{Vector{Float32}}
+    @test destination.target.context isa
+          DerivativeTransferContext{Vector{Float32}}
+    @test destination.target.adtype isa ADTypes.AutoForwardDiff
+    @test typeof(destination.target.adtype) === typeof(source.target.adtype)
+    @test destination.target.adtype == source.target.adtype
+
+    bound = @inferred IS._bind_resolved_target(
+        destination.target,
+        Float32(0.25),
+    )
+    @test bound(Float32(0.25)) === Float32(1.71875)
+end
+
+@testset "LogTarget derivative closures reject accelerator transfer" begin
+    context = DerivativeTransferContext([1.5])
+    proposal = ImportanceSampling(TransferProposal([0.5]); nsamples=1)
+    opaque_value = let captured = [0.25]
+        (sample, p) -> p.shift[1] + captured[1] - abs2(sample) / 2
+    end
+    value_source = prepare_sampler(
+        Random.Xoshiro(0x2111),
+        LogTarget(opaque_value; grad=DerivativeTransferGradient([1.0])),
+        context,
+        proposal;
+        threaded=true,
+    )
+    value_error = caught_device_error(() -> FunctionalAccelerator()(value_source))
+    @test value_error isa SamplerDeviceError
+    @test value_error.reason === :opaque_host_closure
+
+    opaque_gradient = let captured = [1.0]
+        (destination, sample, p) -> (destination .= -captured[1] .* sample)
+    end
+    gradient_source = prepare_sampler(
+        Random.Xoshiro(0x2112),
+        LogTarget(DerivativeTransferValue([0.25]); grad=opaque_gradient),
+        context,
+        proposal;
+        threaded=true,
+    )
+    gradient_error = caught_device_error(
+        () -> FunctionalAccelerator()(gradient_source),
+    )
+    @test gradient_error isa SamplerDeviceError
+    @test gradient_error.reason === :opaque_host_closure
 end
 
 @testset "device transfer lifecycle and accelerator limits" begin
