@@ -149,8 +149,65 @@ struct GRAMISReadCountingArray{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
     reads::Base.RefValue{Int}
 end
 
+struct GRAMISOperationCountingMatrix{T,A<:Matrix{T}} <: AbstractMatrix{T}
+    storage::A
+    factorizations::Base.RefValue{Int}
+    solves::Base.RefValue{Int}
+end
+
 Base.size(array::GRAMISReadCountingArray) = size(array.storage)
 Base.IndexStyle(::Type{<:GRAMISReadCountingArray}) = IndexCartesian()
+Base.size(matrix::GRAMISOperationCountingMatrix) = size(matrix.storage)
+Base.IndexStyle(::Type{<:GRAMISOperationCountingMatrix}) = IndexLinear()
+
+Base.getindex(matrix::GRAMISOperationCountingMatrix, index::Int) =
+    matrix.storage[index]
+
+function Base.setindex!(
+    matrix::GRAMISOperationCountingMatrix,
+    value,
+    index::Int,
+)
+    matrix.storage[index] = value
+    return value
+end
+
+Base.getindex(matrix::GRAMISOperationCountingMatrix, row::Int, column::Int) =
+    matrix.storage[row, column]
+
+function Base.setindex!(
+    matrix::GRAMISOperationCountingMatrix,
+    value,
+    row::Int,
+    column::Int,
+)
+    matrix.storage[row, column] = value
+    return value
+end
+
+function LinearAlgebra.LAPACK.potrf!(
+    uplo::AbstractChar,
+    matrix::GRAMISOperationCountingMatrix,
+)
+    matrix.factorizations[] += 1
+    _, info = LinearAlgebra.LAPACK.potrf!(uplo, matrix.storage)
+    return matrix, info
+end
+
+function LinearAlgebra.ldiv!(
+    factor::LinearAlgebra.LowerTriangular{
+        T,
+        <:GRAMISOperationCountingMatrix{T},
+    },
+    right_hand_side::AbstractMatrix{T},
+) where {T}
+    factor.data.solves[] += 1
+    LinearAlgebra.ldiv!(
+        LinearAlgebra.LowerTriangular(factor.data.storage),
+        right_hand_side,
+    )
+    return right_hand_side
+end
 
 function Base.getindex(
     array::GRAMISReadCountingArray{T,N},
@@ -1385,4 +1442,460 @@ end
 
 @testset "FirstOrderGRAMIS serial gradient move reuses workspaces" begin
     @test gram_is_gradient_move_allocation_counts() == (0, 0, 0)
+end
+
+@testset "FirstOrderGRAMIS pooled covariance is the mean frozen covariance" begin
+    for T in (Float32, Float64), dimension in (1, 2, 4), execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        proposal_count = 3
+        factors = zeros(T, dimension, dimension, proposal_count)
+        expected = zeros(T, dimension, dimension)
+        for proposal_slot in 1:proposal_count
+            for column in 1:dimension, row in column:dimension
+                factors[row, column, proposal_slot] =
+                    T(row + 2column + proposal_slot) / T(7)
+            end
+            factor = factors[:, :, proposal_slot]
+            expected .+= factor * transpose(factor)
+        end
+        expected ./= T(proposal_count)
+        pooled = fill(T(-99), dimension, dimension)
+
+        @test @inferred(GRAMISKernelIS._pooled_covariance!(
+            pooled,
+            factors,
+            execution,
+        )) === nothing
+        @test pooled ≈ expected rtol = 16eps(T)
+        @test pooled ≈ transpose(pooled) rtol = 16eps(T)
+    end
+end
+
+@testset "FirstOrderGRAMIS whitens one complete mean matrix in place" begin
+    for T in (Float32, Float64), dimension in (1, 2, 5)
+        proposal_count = 4
+        covariance = Matrix{T}(LinearAlgebra.I, dimension, dimension)
+        for row in 1:dimension
+            covariance[row, row] = T(row + 1)
+        end
+        for row in 2:dimension
+            covariance[row, 1] = covariance[1, row] = T(row) / T(10)
+        end
+        factor_storage = Matrix(LinearAlgebra.cholesky(
+            LinearAlgebra.Hermitian(covariance),
+        ).L)
+        factorizations = Ref(0)
+        solves = Ref(0)
+        counted_factor = GRAMISOperationCountingMatrix(
+            factor_storage,
+            factorizations,
+            solves,
+        )
+        means = reshape(
+            T.(1:(dimension * proposal_count)),
+            dimension,
+            proposal_count,
+        ) / T(3)
+        frozen_means = copy(means)
+        whitened = fill(T(-99), size(means))
+        expected = LinearAlgebra.LowerTriangular(factor_storage) \ means
+
+        @test @inferred(GRAMISKernelIS._whiten_means!(
+            whitened,
+            counted_factor,
+            means,
+        )) === nothing
+        @test whitened ≈ expected rtol = 32eps(T)
+        @test means == frozen_means
+        @test factorizations[] == 0
+        @test solves[] == 1
+    end
+end
+
+function gram_is_package_repulsion_oracle(
+    means,
+    factors,
+    strength,
+    softening,
+)
+    T = eltype(means)
+    dimension, proposal_count = size(means)
+    pooled_covariance = zeros(T, dimension, dimension)
+    for proposal_slot in 1:proposal_count
+        factor = factors[:, :, proposal_slot]
+        pooled_covariance .+= factor * transpose(factor)
+    end
+    pooled_covariance ./= T(proposal_count)
+    pooled_factor = LinearAlgebra.cholesky(
+        LinearAlgebra.Hermitian(pooled_covariance),
+    ).L
+    whitened = pooled_factor \ means
+    forces = zeros(T, size(means))
+    collision_counts = zeros(Int, proposal_count)
+    softening2 = abs2(softening)
+    for proposal_slot in 1:proposal_count
+        for peer_slot in 1:proposal_count
+            peer_slot == proposal_slot && continue
+            distance2 = zero(T)
+            for row in 1:dimension
+                distance2 += abs2(
+                    whitened[row, proposal_slot] - whitened[row, peer_slot],
+                )
+            end
+            iszero(distance2) && (collision_counts[proposal_slot] += 1)
+            denominator =
+                (distance2 + softening2) ^ (T(dimension) / T(2))
+            for row in 1:dimension
+                forces[row, proposal_slot] +=
+                    (means[row, proposal_slot] - means[row, peer_slot]) /
+                    denominator
+            end
+        end
+    end
+    forces .*= strength / T(proposal_count - 1)
+    return (; forces, collision_counts, pooled_covariance, whitened)
+end
+
+function gram_is_repulsion_fixture(::Type{T}, dimension, proposal_count) where {T}
+    means = Matrix{T}(undef, dimension, proposal_count)
+    factors = zeros(T, dimension, dimension, proposal_count)
+    for proposal_slot in 1:proposal_count
+        for row in 1:dimension
+            means[row, proposal_slot] =
+                T(3row - 2proposal_slot + row * proposal_slot) / T(5)
+        end
+        for column in 1:dimension, row in column:dimension
+            factors[row, column, proposal_slot] = row == column ?
+                T(row + proposal_slot + 2) / T(3) :
+                T(row - column + proposal_slot) / T(11)
+        end
+    end
+    return means, factors
+end
+
+function gram_is_run_repulsion(
+    means,
+    factors,
+    strength,
+    softening,
+    execution;
+    pooled_covariance=zeros(eltype(means), size(means, 1), size(means, 1)),
+)
+    forces = similar(means)
+    whitened = similar(means)
+    collision_counts = Vector{Int}(undef, size(means, 2))
+    GRAMISKernelIS._repulsion!(
+        forces,
+        collision_counts,
+        pooled_covariance,
+        whitened,
+        means,
+        factors,
+        strength,
+        softening,
+        execution,
+    )
+    return (; forces, collision_counts, pooled_covariance, whitened)
+end
+
+@testset "FirstOrderGRAMIS package repulsion matches an independent oracle" begin
+    for T in (Float32, Float64), dimension in (1, 2, 3, 5), proposal_count in (2, 4)
+        means, factors = gram_is_repulsion_fixture(T, dimension, proposal_count)
+        strength = T(0.7)
+        softening = T(0.4)
+        oracle = gram_is_package_repulsion_oracle(
+            means,
+            factors,
+            strength,
+            softening,
+        )
+        serial = gram_is_run_repulsion(
+            means,
+            factors,
+            strength,
+            softening,
+            GRAMISKernelIS._SerialCPUExecution(),
+        )
+        threaded = gram_is_run_repulsion(
+            means,
+            factors,
+            strength,
+            softening,
+            GRAMISKernelIS._ThreadedCPUExecution(),
+        )
+
+        @test serial.forces ≈ oracle.forces rtol = 128eps(T)
+        @test serial.collision_counts == oracle.collision_counts
+        @test threaded.forces == serial.forces
+        @test threaded.collision_counts == serial.collision_counts
+    end
+end
+
+@testset "FirstOrderGRAMIS repulsion is affine covariant" begin
+    for T in (Float32, Float64), dimension in (2, 4), execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        means, factors = gram_is_repulsion_fixture(T, dimension, 4)
+        transform = Matrix{T}(LinearAlgebra.I, dimension, dimension)
+        for row in 1:dimension
+            transform[row, row] = T(row + 1) / T(2)
+        end
+        for row in 2:dimension
+            transform[row, 1] = T(row) / T(7)
+        end
+        translation = T.(1:dimension) / T(3)
+        transformed_means = transform * means .+ translation
+        transformed_factors = similar(factors)
+        for proposal_slot in axes(factors, 3)
+            transformed_covariance =
+                transform * factors[:, :, proposal_slot] *
+                transpose(factors[:, :, proposal_slot]) * transpose(transform)
+            transformed_factors[:, :, proposal_slot] .= Matrix(
+                LinearAlgebra.cholesky(
+                    LinearAlgebra.Hermitian(transformed_covariance),
+                ).L,
+            )
+        end
+        strength = T(0.35)
+        softening = T(0.8)
+        original = gram_is_run_repulsion(
+            means,
+            factors,
+            strength,
+            softening,
+            execution,
+        )
+        transformed = gram_is_run_repulsion(
+            transformed_means,
+            transformed_factors,
+            strength,
+            softening,
+            execution,
+        )
+
+        @test transformed.forces ≈ transform * original.forces rtol = 512eps(T)
+        @test transformed.collision_counts == original.collision_counts
+    end
+end
+
+@testset "FirstOrderGRAMIS exact and near collisions are bounded" begin
+    for T in (Float32, Float64), dimension in (1, 2, 5), execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        softening = T(0.75)
+        factors = zeros(T, dimension, dimension, 2)
+        for proposal_slot in 1:2, row in 1:dimension
+            factors[row, row, proposal_slot] = one(T)
+        end
+        exact_means = zeros(T, dimension, 2)
+        exact = gram_is_run_repulsion(
+            exact_means,
+            factors,
+            one(T),
+            softening,
+            execution,
+        )
+        @test exact.forces == zeros(T, dimension, 2)
+        @test exact.collision_counts == [1, 1]
+
+        near_means = copy(exact_means)
+        near_means[1, 2] = softening / T(2)
+        near = gram_is_run_repulsion(
+            near_means,
+            factors,
+            one(T),
+            softening,
+            execution,
+        )
+        @test all(isfinite, near.forces)
+        @test near.forces[:, 1] == -near.forces[:, 2]
+        @test near.collision_counts == [0, 0]
+    end
+end
+
+@testset "FirstOrderGRAMIS collision detection preserves subnormal distinctions" begin
+    for T in (Float32, Float64), execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        smallest_positive = nextfloat(zero(T))
+        factors = ones(T, 1, 1, 2)
+
+        @testset "$(T), $(typeof(execution)), exact" begin
+            exact = gram_is_run_repulsion(
+                zeros(T, 1, 2),
+                factors,
+                one(T),
+                smallest_positive,
+                execution,
+            )
+            @test exact.forces == zeros(T, 1, 2)
+            @test exact.collision_counts == [1, 1]
+        end
+
+        @testset "$(T), $(typeof(execution)), separated" begin
+            separated = gram_is_run_repulsion(
+                reshape(T[0, smallest_positive], 1, 2),
+                factors,
+                one(T),
+                one(T),
+                execution,
+            )
+            @test separated.forces ==
+                  reshape(T[-smallest_positive, smallest_positive], 1, 2)
+            @test separated.collision_counts == [0, 0]
+        end
+    end
+end
+
+@testset "FirstOrderGRAMIS active repulsion performs one factor and one solve" begin
+    T = Float64
+    dimension = 3
+    proposal_count = 4
+    means, factors = gram_is_repulsion_fixture(T, dimension, proposal_count)
+    factor_reads = Ref(0)
+    mean_reads = Ref(0)
+    counted_factors = GRAMISReadCountingArray(factors, factor_reads)
+    counted_means = GRAMISReadCountingArray(means, mean_reads)
+    factorizations = Ref(0)
+    solves = Ref(0)
+    pooled = GRAMISOperationCountingMatrix(
+        zeros(T, dimension, dimension),
+        factorizations,
+        solves,
+    )
+
+    forces = similar(means)
+    whitened = similar(means)
+    collision_counts = Vector{Int}(undef, proposal_count)
+    @test @inferred(GRAMISKernelIS._repulsion!(
+        forces,
+        collision_counts,
+        pooled,
+        whitened,
+        counted_means,
+        counted_factors,
+        T(0.4),
+        T(0.5),
+        GRAMISKernelIS._SerialCPUExecution(),
+    )) === nothing
+    expected_factor_reads = proposal_count * sum(
+        2min(row, column) for row in 1:dimension, column in 1:dimension
+    )
+    expected_mean_reads =
+        dimension * proposal_count +
+        2dimension * proposal_count * (proposal_count - 1)
+
+    @test all(isfinite, forces)
+    @test factorizations[] == 1
+    @test solves[] == 1
+    @test factor_reads[] == expected_factor_reads
+    @test mean_reads[] == expected_mean_reads
+end
+
+@testset "FirstOrderGRAMIS zero strength skips every repulsion operation" begin
+    T = Float64
+    dimension = 3
+    proposal_count = 4
+    means, factors = gram_is_repulsion_fixture(T, dimension, proposal_count)
+    factor_reads = Ref(0)
+    mean_reads = Ref(0)
+    factorizations = Ref(0)
+    solves = Ref(0)
+    pooled_storage = fill(T(-91), dimension, dimension)
+    pooled = GRAMISOperationCountingMatrix(
+        pooled_storage,
+        factorizations,
+        solves,
+    )
+    whitened = fill(T(-92), dimension, proposal_count)
+    forces = fill(T(-93), dimension, proposal_count)
+    collision_counts = fill(-94, proposal_count)
+
+    @test @inferred(GRAMISKernelIS._repulsion!(
+        forces,
+        collision_counts,
+        pooled,
+        whitened,
+        GRAMISReadCountingArray(means, mean_reads),
+        GRAMISReadCountingArray(factors, factor_reads),
+        zero(T),
+        T(0.5),
+        GRAMISKernelIS._SerialCPUExecution(),
+    )) === nothing
+    @test forces == zeros(T, dimension, proposal_count)
+    @test collision_counts == fill(
+        GRAMISKernelIS._GRAMIS_COLLISIONS_UNAVAILABLE,
+        proposal_count,
+    )
+    @test pooled_storage == fill(T(-91), dimension, dimension)
+    @test whitened == fill(T(-92), dimension, proposal_count)
+    @test factorizations[] == 0
+    @test solves[] == 0
+    @test factor_reads[] == 0
+    @test mean_reads[] == 0
+end
+
+@testset "FirstOrderGRAMIS nonfinite force raises a typed repulsion failure" begin
+    for T in (Float32, Float64)
+        means = zeros(T, 2, 2)
+        means[1, 2] = eps(T)
+        factors = zeros(T, 2, 2, 2)
+        factors[:, :, 1] .= Matrix{T}(LinearAlgebra.I, 2, 2)
+        factors[:, :, 2] .= Matrix{T}(LinearAlgebra.I, 2, 2)
+        error = try
+            gram_is_run_repulsion(
+                means,
+                factors,
+                floatmax(T),
+                eps(T),
+                GRAMISKernelIS._SerialCPUExecution(),
+            )
+            nothing
+        catch cause
+            cause
+        end
+        @test error isa GRAMISKernelIS._FirstOrderGRAMISRepulsionError
+        @test error.reason == :force_nonfinite
+    end
+end
+
+function gram_is_repulsion_allocation_counts()
+    T = Float64
+    means, factors = gram_is_repulsion_fixture(T, 3, 4)
+    forces = similar(means)
+    collision_counts = Vector{Int}(undef, 4)
+    pooled_covariance = zeros(T, 3, 3)
+    whitened = similar(means)
+    execution = GRAMISKernelIS._SerialCPUExecution()
+    GRAMISKernelIS._repulsion!(
+        forces,
+        collision_counts,
+        pooled_covariance,
+        whitened,
+        means,
+        factors,
+        T(0.4),
+        T(0.5),
+        execution,
+    )
+    return @allocated GRAMISKernelIS._repulsion!(
+        forces,
+        collision_counts,
+        pooled_covariance,
+        whitened,
+        means,
+        factors,
+        T(0.4),
+        T(0.5),
+        execution,
+    )
+end
+
+@testset "FirstOrderGRAMIS serial repulsion reuses every workspace" begin
+    @test gram_is_repulsion_allocation_counts() == 0
 end

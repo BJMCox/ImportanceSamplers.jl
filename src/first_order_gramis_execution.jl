@@ -113,6 +113,251 @@ end
     throw(_FirstOrderGRAMISDerivativeError(proposal_slot, reason, value))
 end
 
+@inline function _pooled_covariance_entry!(
+    pooled_covariance,
+    factors,
+    entry,
+)
+    dimension = size(pooled_covariance, 1)
+    row = (entry - 1) % dimension + 1
+    column = (entry - 1) ÷ dimension + 1
+    proposal_count = size(factors, 3)
+    T = eltype(pooled_covariance)
+    covariance = zero(T)
+    for proposal_slot in axes(factors, 3)
+        covariance += _gramis_current_covariance(
+            factors,
+            row,
+            column,
+            proposal_slot,
+        )
+    end
+    @inbounds pooled_covariance[row, column] = covariance / T(proposal_count)
+    return nothing
+end
+
+function _pooled_covariance!(
+    pooled_covariance,
+    factors,
+    ::_SerialCPUExecution,
+)
+    @inbounds for entry in 1:length(pooled_covariance)
+        _pooled_covariance_entry!(pooled_covariance, factors, entry)
+    end
+    return nothing
+end
+
+function _pooled_covariance!(
+    pooled_covariance,
+    factors,
+    ::_ThreadedCPUExecution,
+)
+    Threads.@threads :dynamic for entry in 1:length(pooled_covariance)
+        _pooled_covariance_entry!(pooled_covariance, factors, entry)
+    end
+    return nothing
+end
+
+function _whiten_means!(whitened_means, pooled_factor, means)
+    copyto!(whitened_means, means)
+    LinearAlgebra.ldiv!(
+        LinearAlgebra.LowerTriangular(pooled_factor),
+        whitened_means,
+    )
+    return nothing
+end
+
+const _GRAMIS_COLLISIONS_UNAVAILABLE = -1
+
+struct _FirstOrderGRAMISRepulsionError{V} <: Exception
+    proposal_slot::Int
+    reason::Symbol
+    value::V
+end
+
+function Base.showerror(io::IO, error::_FirstOrderGRAMISRepulsionError)
+    print(
+        io,
+        "FirstOrderGRAMIS repulsion failure for proposal ",
+        error.proposal_slot,
+        ": ",
+        error.reason,
+        " (",
+        error.value,
+        ')',
+    )
+end
+
+@noinline function _throw_first_order_gramis_repulsion_error(
+    proposal_slot,
+    reason,
+    value,
+)
+    throw(_FirstOrderGRAMISRepulsionError(proposal_slot, reason, value))
+end
+
+function _factor_pooled_covariance!(pooled_covariance)
+    @inbounds for entry in eachindex(pooled_covariance)
+        value = pooled_covariance[entry]
+        isfinite(value) || _throw_first_order_gramis_repulsion_error(
+            0,
+            :pooled_covariance_nonfinite,
+            value,
+        )
+    end
+    _, info = LinearAlgebra.LAPACK.potrf!('L', pooled_covariance)
+    iszero(info) || _throw_first_order_gramis_repulsion_error(
+        0,
+        :pooled_factorization_failed,
+        info,
+    )
+    return nothing
+end
+
+@inline function _repulsion_slot!(
+    repulsion,
+    collision_counts,
+    means,
+    whitened_means,
+    strength,
+    softening,
+    proposal_slot,
+)
+    T = eltype(repulsion)
+    dimension, proposal_count = size(means)
+    @inbounds for row in axes(repulsion, 1)
+        repulsion[row, proposal_slot] = zero(T)
+    end
+    collision_count = 0
+    for peer_slot in axes(means, 2)
+        peer_slot == proposal_slot && continue
+        exact_collision = true
+        softened_norm = abs(softening)
+        for row in axes(means, 1)
+            whitened_difference = @inbounds(
+                whitened_means[row, proposal_slot] -
+                whitened_means[row, peer_slot]
+            )
+            exact_collision &= iszero(whitened_difference)
+            softened_norm = hypot(softened_norm, whitened_difference)
+        end
+        if exact_collision
+            for row in axes(means, 1)
+                exact_collision &= @inbounds(
+                    means[row, proposal_slot] == means[row, peer_slot]
+                )
+            end
+            if exact_collision
+                collision_count += 1
+                continue
+            end
+        end
+        denominator = softened_norm ^ dimension
+        for row in axes(means, 1)
+            @inbounds repulsion[row, proposal_slot] +=
+                (means[row, proposal_slot] - means[row, peer_slot]) /
+                denominator
+        end
+    end
+    scale = strength / T(proposal_count - 1)
+    @inbounds for row in axes(repulsion, 1)
+        repulsion[row, proposal_slot] *= scale
+    end
+    @inbounds collision_counts[proposal_slot] = collision_count
+    return nothing
+end
+
+function _repulsion_force!(
+    repulsion,
+    collision_counts,
+    means,
+    whitened_means,
+    strength,
+    softening,
+    ::_SerialCPUExecution,
+)
+    @inbounds for proposal_slot in axes(means, 2)
+        _repulsion_slot!(
+            repulsion,
+            collision_counts,
+            means,
+            whitened_means,
+            strength,
+            softening,
+            proposal_slot,
+        )
+    end
+    return nothing
+end
+
+function _repulsion_force!(
+    repulsion,
+    collision_counts,
+    means,
+    whitened_means,
+    strength,
+    softening,
+    ::_ThreadedCPUExecution,
+)
+    Threads.@threads :dynamic for proposal_slot in axes(means, 2)
+        _repulsion_slot!(
+            repulsion,
+            collision_counts,
+            means,
+            whitened_means,
+            strength,
+            softening,
+            proposal_slot,
+        )
+    end
+    return nothing
+end
+
+function _validate_repulsion!(repulsion)
+    @inbounds for proposal_slot in axes(repulsion, 2), row in axes(repulsion, 1)
+        force = repulsion[row, proposal_slot]
+        isfinite(force) || _throw_first_order_gramis_repulsion_error(
+            proposal_slot,
+            :force_nonfinite,
+            force,
+        )
+    end
+    return nothing
+end
+
+function _repulsion!(
+    repulsion,
+    collision_counts,
+    pooled_covariance,
+    whitened_means,
+    means,
+    factors,
+    strength::T,
+    softening::T,
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
+) where {T}
+    if iszero(strength)
+        fill!(repulsion, zero(eltype(repulsion)))
+        fill!(collision_counts, _GRAMIS_COLLISIONS_UNAVAILABLE)
+        return nothing
+    end
+
+    _pooled_covariance!(pooled_covariance, factors, execution)
+    _factor_pooled_covariance!(pooled_covariance)
+    _whiten_means!(whitened_means, pooled_covariance, means)
+    _repulsion_force!(
+        repulsion,
+        collision_counts,
+        means,
+        whitened_means,
+        strength,
+        softening,
+        execution,
+    )
+    _validate_repulsion!(repulsion)
+    return nothing
+end
+
 function _validate_frozen_derivatives!(values, gradients)
     @inbounds for proposal_slot in eachindex(values)
         value = values[proposal_slot]
