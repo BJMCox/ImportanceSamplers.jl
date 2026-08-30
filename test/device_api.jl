@@ -970,11 +970,24 @@ end
         destination = device(source)
         method_state = getfield(destination, :method_state)
         bank = getfield(method_state, :bank)
+        run_bank = getfield(method_state, :run_bank)
         plan = getfield(method_state, :plan)
         workspace = getfield(method_state, :workspace)
         buffers = getfield(destination, :random_buffers)
 
         @test bank isa bank_type
+        @test run_bank isa bank_type
+        @test run_bank.locations isa KernelArgumentTestArray
+        @test run_bank.locations !== bank.locations
+        @test run_bank.lognormalizers === bank.lognormalizers
+        @test run_bank.logmasses === bank.logmasses
+        @test run_bank.cdf === bank.cdf
+        @test run_bank.proposal_ids === bank.proposal_ids
+        if bank isa IS._PackedDiagonalGaussianBank
+            @test run_bank.scales === bank.scales
+        else
+            @test run_bank.factors === bank.factors
+        end
         bank_scale = bank isa IS._PackedDiagonalGaussianBank ? bank.scales : bank.factors
         solve_scratch = workspace.solve_scratch
         arrays = (

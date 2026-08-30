@@ -208,8 +208,37 @@ end
 
 mutable struct _PreparedDMPMC{B,P,W}
     bank::B
+    run_bank::B
     plan::P
     workspace::W
+end
+
+function _dm_pmc_with_locations(bank::_PackedDiagonalGaussianBank, locations)
+    return _PackedDiagonalGaussianBank(
+        locations,
+        bank.scales,
+        bank.lognormalizers,
+        bank.logmasses,
+        bank.cdf,
+        bank.proposal_ids,
+        bank.layout,
+    )
+end
+
+function _dm_pmc_with_locations(bank::_PackedFactorGaussianBank, locations)
+    return _PackedFactorGaussianBank(
+        locations,
+        bank.factors,
+        bank.lognormalizers,
+        bank.logmasses,
+        bank.cdf,
+        bank.proposal_ids,
+    )
+end
+
+function _dm_pmc_run_bank(bank)
+    locations = similar(bank.locations)
+    return _dm_pmc_with_locations(bank, locations)
 end
 
 _accelerator_method_state_limit(
@@ -400,7 +429,7 @@ function _prepare_method_state(algorithm::DeterministicMixturePMC)
         plan,
         eltype(bank.lognormalizers),
     )
-    return _PreparedDMPMC(bank, plan, workspace)
+    return _PreparedDMPMC(bank, _dm_pmc_run_bank(bank), plan, workspace)
 end
 
 function _prepare_method_state(algorithm::DeterministicMixturePMC, prepared_target)
@@ -413,7 +442,7 @@ function _prepare_method_state(algorithm::DeterministicMixturePMC, prepared_targ
         typeof(binding_sample),
     )
     workspace = _allocate_dm_pmc_workspace(bank, plan, log_type)
-    return _PreparedDMPMC(bank, plan, workspace)
+    return _PreparedDMPMC(bank, _dm_pmc_run_bank(bank), plan, workspace)
 end
 
 function _allocate_random_buffers(
@@ -490,8 +519,10 @@ function _prepare_transferred_method_state(
         _copy_to_device(device, workspace.ancestors),
         _copy_to_device(device, workspace.candidate_locations),
     )
+    transferred_bank = _copy_packed_gaussian_bank(device, method_state.bank)
     return _PreparedDMPMC(
-        _copy_packed_gaussian_bank(device, method_state.bank),
+        transferred_bank,
+        _dm_pmc_run_bank(transferred_bank),
         transferred_plan,
         transferred_workspace,
     )

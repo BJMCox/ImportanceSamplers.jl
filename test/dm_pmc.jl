@@ -1054,7 +1054,7 @@ end
     end
 end
 
-@testset "DM-PMC round failures preserve the last committed population" begin
+@testset "DM-PMC call failures preserve the pre-call population" begin
     T = Float64
     schedule = [4, 4, 4]
     normals = [fill(T(round) / 10, 4) for round in 1:3]
@@ -1070,15 +1070,7 @@ end
         algorithm;
         threaded=false,
     )
-    target_oracle = dm_pmc_scalar_oracle(
-        T[-1, 1],
-        T[1, 1],
-        [1, 2],
-        target_failure_sampler.method_state.plan,
-        normals[1:1],
-        uniforms[1:1],
-        DMPMCTarget{T}(),
-    )
+    target_initial = copy(target_failure_sampler.method_state.bank.locations)
     target_failure = caught_dm_pmc_error() do
         importance_sample!(target_failure_sampler)
     end
@@ -1087,7 +1079,9 @@ end
     @test target_failure.round == 2
     @test target_failure.phase == :sample_and_weight
     @test target_failure.cause isa SamplerExecutionError
-    @test vec(target_failure_sampler.method_state.bank.locations) == target_oracle.locations
+    @test target_failure.diagnostics.completed_rounds == 1
+    @test !haskey(target_failure.diagnostics, :committed_rounds)
+    @test target_failure_sampler.method_state.bank.locations == target_initial
     @test target_failure_rng.normal_index == 3
     @test target_failure_rng.uniform_index == 2
     @test occursin("round 2", sprint(showerror, target_failure))
@@ -1102,6 +1096,7 @@ end
         algorithm;
         threaded=false,
     )
+    zero_initial = copy(zero_sampler.method_state.bank.locations)
     zero_failure = caught_dm_pmc_error() do
         importance_sample!(zero_sampler)
     end
@@ -1110,7 +1105,54 @@ end
     @test zero_failure.round == 2
     @test zero_failure.phase == :resampling
     @test zero_failure.cause isa AllZeroWeightsError
-    @test vec(zero_sampler.method_state.bank.locations) == target_oracle.locations
+    @test zero_failure.diagnostics.completed_rounds == 1
+    @test !haskey(zero_failure.diagnostics, :committed_rounds)
+    @test zero_sampler.method_state.bank.locations == zero_initial
     @test zero_rng.normal_index == 3
     @test zero_rng.uniform_index == 2
+
+    result_sampler = dm_pmc_result_failure_sampler(prepare_sampler(
+        DMPMCPrefilledRNG(deepcopy(normals), deepcopy(uniforms)),
+        DMPMCTarget{T}(),
+        algorithm;
+        threaded=false,
+    ))
+    result_initial = copy(result_sampler.method_state.bank.locations)
+    result_failure = caught_dm_pmc_error() do
+        importance_sample!(result_sampler)
+    end
+
+    @test result_failure isa DMPMCRoundError
+    @test result_failure.round == 3
+    @test result_failure.phase == :result_construction
+    @test result_failure.cause isa ErrorException
+    @test result_failure.cause.msg ==
+          "intentional DM-PMC result validation failure"
+    @test result_failure.diagnostics.completed_rounds == 3
+    @test result_sampler.method_state.bank.locations == result_initial
+
+    repeated_normals = [fill(T(round) / 10, 4) for round in 1:9]
+    repeated_uniforms = [T[0.1, 0.9] for _ in 1:9]
+    repeated_target = DMPMCFailAfterTarget(T, 17)
+    repeated_sampler = prepare_sampler(
+        DMPMCPrefilledRNG(repeated_normals, repeated_uniforms),
+        repeated_target,
+        algorithm;
+        threaded=false,
+    )
+
+    importance_sample!(repeated_sampler)
+    retained_locations = copy(repeated_sampler.method_state.bank.locations)
+    repeated_failure = caught_dm_pmc_error() do
+        importance_sample!(repeated_sampler)
+    end
+
+    @test repeated_failure isa DMPMCRoundError
+    @test repeated_failure.round == 2
+    @test repeated_failure.diagnostics.completed_rounds == 1
+    @test repeated_sampler.method_state.bank.locations == retained_locations
+
+    repeated_target.fail_after = typemax(Int)
+    importance_sample!(repeated_sampler)
+    @test repeated_sampler.method_state.bank.locations != retained_locations
 end
