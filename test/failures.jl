@@ -1895,15 +1895,14 @@ end
 
     for (cause, expected_phase) in causes
         failure = caught_exception() do
-            ImportanceSamplers._capture_first_order_gramis_round(
+            ImportanceSamplers.@_capture_first_order_gramis_round(
                 state,
                 transfers,
                 1,
                 :backtracking,
                 0,
-            ) do
-                throw(cause)
-            end
+                throw(cause),
+            )
         end
         @test failure isa FirstOrderGRAMISRoundError
         @test failure.round == 1

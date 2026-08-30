@@ -1,11 +1,61 @@
 using Test
 using ImportanceSamplers
+import ADTypes
+import DifferentiationInterface
+import LinearAlgebra
 import MLDataDevices
 import Random
 
 include("support/first_order_gramis.jl")
 
 const GRAMISIS = ImportanceSamplers
+
+mutable struct FirstOrderGRAMISDITrace
+    next_preparation::Threads.Atomic{Int}
+    lock::ReentrantLock
+    calls::Vector{Tuple{Int,Any}}
+end
+
+FirstOrderGRAMISDITrace() = FirstOrderGRAMISDITrace(
+    Threads.Atomic{Int}(0),
+    ReentrantLock(),
+    Tuple{Int,Any}[],
+)
+
+struct FirstOrderGRAMISRecordingAD <: ADTypes.AbstractADType
+    trace::FirstOrderGRAMISDITrace
+end
+
+ADTypes.mode(::FirstOrderGRAMISRecordingAD) = ADTypes.ForwardMode()
+
+mutable struct FirstOrderGRAMISRecordingPreparation
+    id::Int
+    trace::FirstOrderGRAMISDITrace
+end
+
+function DifferentiationInterface.prepare_gradient(
+    target,
+    backend::FirstOrderGRAMISRecordingAD,
+    sample,
+)
+    id = Threads.atomic_add!(backend.trace.next_preparation, 1) + 1
+    return FirstOrderGRAMISRecordingPreparation(id, backend.trace)
+end
+
+function DifferentiationInterface.gradient!(
+    target,
+    destination,
+    preparation::FirstOrderGRAMISRecordingPreparation,
+    backend::FirstOrderGRAMISRecordingAD,
+    sample,
+)
+    thread_id = Threads.threadid()
+    lock(preparation.trace.lock) do
+        push!(preparation.trace.calls, (thread_id, preparation))
+    end
+    destination .= -sample
+    return destination
+end
 
 @testset "FirstOrderGRAMIS constructor and schedules" begin
     for T in (Float32, Float64)
@@ -365,6 +415,174 @@ function first_order_gramis_round_summary(logweights)
     )
 end
 
+function first_order_gramis_assert_same_diagnostics(serial, threaded)
+    @test serial.execution === :serial
+    @test serial.threaded === false
+    @test threaded.execution === :threaded
+    @test threaded.threaded === true
+    for field in propertynames(serial)
+        field in (:execution, :threaded, :transfers) && continue
+        @test getproperty(serial, field) == getproperty(threaded, field)
+    end
+    @test serial.transfers.count == threaded.transfers.count
+    @test serial.transfers.bytes == threaded.transfers.bytes
+    for reason in propertynames(serial.transfers.reasons)
+        @test getproperty(serial.transfers.reasons, reason) ==
+              getproperty(threaded.transfers.reasons, reason)
+    end
+    return nothing
+end
+
+function first_order_gramis_assert_same_population(serial, threaded)
+    @test serial.masses == threaded.masses
+    @test length(serial.proposals) == length(threaded.proposals)
+    for (serial_proposal, threaded_proposal) in
+        zip(serial.proposals, threaded.proposals)
+        @test serial_proposal.location == threaded_proposal.location
+        @test serial_proposal.scale.factor == threaded_proposal.scale.factor
+        @test serial_proposal.lognormalizer == threaded_proposal.lognormalizer
+    end
+    return nothing
+end
+
+@testset "FirstOrderGRAMIS serial and threaded public execution are deterministic" begin
+    for T in (Float32, Float64)
+        bank = first_order_gramis_bank(T)
+        round_sizes = [12, 15]
+        batches = [
+            [T(mod(index, 7) - 3) / T(4) for index in 1:(2 * round_size)] for
+            round_size in round_sizes
+        ]
+        algorithm = FirstOrderGRAMIS(
+            bank;
+            rounds=2,
+            round_size=round_sizes,
+            repulsion_strength=T[0, 0.1],
+            covariance_ess_threshold=3,
+        )
+        target = LogTarget(
+            FirstOrderGRAMISTarget{T}();
+            grad=first_order_gramis_gradient!,
+        )
+        serial = @inferred prepare_sampler(
+            FirstOrderGRAMISPrefilledRNG(deepcopy(batches)),
+            target,
+            algorithm;
+            threaded=false,
+        )
+        threaded = @inferred prepare_sampler(
+            FirstOrderGRAMISPrefilledRNG(deepcopy(batches)),
+            target,
+            algorithm;
+            threaded=true,
+        )
+
+        serial_result = @inferred importance_sample!(serial)
+        threaded_result = @inferred importance_sample!(threaded)
+
+        # Threading changes only independent outer-loop scheduling; every
+        # floating-point reduction retains the same within-slot operation order.
+        @test serial_result.samples == threaded_result.samples
+        @test serial_result.logweights == threaded_result.logweights
+        @test serial_result.provenance == threaded_result.provenance
+        first_order_gramis_assert_same_diagnostics(
+            serial_result.diagnostics,
+            threaded_result.diagnostics,
+        )
+        first_order_gramis_assert_same_population(
+            current_proposal(serial),
+            current_proposal(threaded),
+        )
+    end
+end
+
+@testset "FirstOrderGRAMIS threaded public execution uses private DI preparations" begin
+    T = Float64
+    worker_count = Threads.nthreads(:default)
+    proposal_count = 8max(worker_count, 2)
+    dimension = 2
+    proposals = map(1:proposal_count) do proposal_slot
+        phase = T(2pi * (proposal_slot - 1) / proposal_count)
+        FactorGaussian(
+            T[2cos(phase), 2sin(phase)],
+            Matrix{T}(LinearAlgebra.I, dimension, dimension),
+        )
+    end
+    bank = ProposalBank(proposals)
+    round_size = proposal_count * (dimension + 2)
+    round_sizes = [round_size, round_size]
+    batches = [
+        [T(mod(index, 17) - 8) / T(8) for index in 1:(dimension * round_size)]
+        for _ in round_sizes
+    ]
+    algorithm = FirstOrderGRAMIS(
+        bank;
+        rounds=2,
+        round_size=round_sizes,
+        repulsion_strength=zero(T),
+        covariance_ess_threshold=dimension + 1,
+    )
+    serial_trace = FirstOrderGRAMISDITrace()
+    threaded_trace = FirstOrderGRAMISDITrace()
+    serial = prepare_sampler(
+        FirstOrderGRAMISPrefilledRNG(deepcopy(batches)),
+        LogTarget(
+            FirstOrderGRAMISTarget{T}(),
+            FirstOrderGRAMISRecordingAD(serial_trace),
+        ),
+        algorithm;
+        threaded=false,
+    )
+    threaded = prepare_sampler(
+        FirstOrderGRAMISPrefilledRNG(deepcopy(batches)),
+        LogTarget(
+            FirstOrderGRAMISTarget{T}(),
+            FirstOrderGRAMISRecordingAD(threaded_trace),
+        ),
+        algorithm;
+        threaded=true,
+    )
+
+    serial_result = importance_sample!(serial)
+    threaded_result = importance_sample!(threaded)
+    @test serial_result.samples == threaded_result.samples
+    @test serial_result.logweights == threaded_result.logweights
+    @test serial_result.provenance == threaded_result.provenance
+    first_order_gramis_assert_same_diagnostics(
+        serial_result.diagnostics,
+        threaded_result.diagnostics,
+    )
+    first_order_gramis_assert_same_population(
+        current_proposal(serial),
+        current_proposal(threaded),
+    )
+
+    threaded_pool = threaded.method_state.threaded_gradient.preparation
+    serial_only_preparation = only(
+        threaded.method_state.serial_gradient.preparation.preparations,
+    )
+    calls = copy(threaded_trace.calls)
+    observed_thread_ids = sort!(unique(first.(calls)))
+    @test observed_thread_ids == sort!(collect(Threads.threadpooltids(:default)))
+    @test length(threaded_pool.preparations) == worker_count
+    for thread_id in observed_thread_ids
+        preparations = last.(filter(call -> first(call) == thread_id, calls))
+        @test !isempty(preparations)
+        @test all(preparation -> preparation === first(preparations), preparations)
+        slot = threaded_pool.thread_slots[thread_id]
+        @test first(preparations) === threaded_pool.preparations[slot]
+        @test first(preparations) !== serial_only_preparation
+    end
+    used_preparations = [
+        only(unique(last.(filter(call -> first(call) == thread_id, calls)))) for
+        thread_id in observed_thread_ids
+    ]
+    @test all(
+        left == right || used_preparations[left] !== used_preparations[right] for
+        left in eachindex(used_preparations) for right in eachindex(used_preparations)
+    )
+end
+
 @testset "FirstOrderGRAMIS two-round execution is causal and retains only q3" begin
     T = Float64
     bank = first_order_gramis_two_proposal_bank(T)
@@ -526,6 +744,37 @@ end
     @test second.diagnostics.round_sizes == [6, 8]
     @test second.diagnostics.minimum_whitened_pair_distance.round == [2]
     @test length(second.diagnostics.minimum_whitened_pair_distance.value) == 1
+end
+
+function first_order_gramis_steady_state_allocation(::Type{T}) where {T}
+    sampler = prepare_sampler(
+        Random.Xoshiro(0x7461736b3131),
+        LogTarget(
+            FirstOrderGRAMISShiftedTarget(T(0.5));
+            grad=first_order_gramis_shifted_gradient!,
+        ),
+        FirstOrderGRAMIS(
+            first_order_gramis_two_proposal_bank(T);
+            rounds=2,
+            round_size=[60, 80],
+            repulsion_strength=T[0, 0.1],
+            covariance_ess_threshold=2,
+        );
+        threaded=false,
+    )
+    warm_result = importance_sample!(sampler)
+    holder = Ref{typeof(warm_result)}()
+    holder[] = importance_sample!(sampler)
+    allocation = @allocated holder[] = importance_sample!(sampler)
+    return allocation, Base.summarysize(holder[])
+end
+
+@testset "FirstOrderGRAMIS public execution has bounded steady-state allocation" begin
+    for T in (Float32, Float64)
+        allocation, owned_summary =
+            first_order_gramis_steady_state_allocation(T)
+        @test allocation <= owned_summary + 2_048
+    end
 end
 
 @testset "FirstOrderGRAMIS repeated calls reuse learned state and restart rounds" begin

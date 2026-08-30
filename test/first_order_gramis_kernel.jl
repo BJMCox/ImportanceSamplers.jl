@@ -12,6 +12,14 @@ function (::GRAMISKernelTarget{T})(sample)::T where {T}
     return -abs2(value) / T(2)
 end
 
+struct GRAMISSubtractionOverflowTarget{T}
+    value::T
+end
+
+function (target::GRAMISSubtractionOverflowTarget{T})(sample)::T where {T}
+    return target.value
+end
+
 function gram_is_factor_policy_result(algorithm, policy)
     return importance_sample(
         Random.Xoshiro(0x4752414d49534b45),
@@ -325,6 +333,122 @@ function run_gram_is_frozen_round(
         target_calls=counted_target.calls[],
         oracle,
     )
+end
+
+function run_gram_is_subtraction_overflow(::Type{T}, branch, execution) where {T}
+    large_normal = T(0.9) * sqrt(floatmax(T))
+    if branch === :returned
+        locations = T[0, 1]
+        normals = T[large_normal]
+        assignments = [1]
+        counts = [1, 0]
+    elseif branch === :local
+        locations = T[0, large_normal]
+        normals = T[large_normal, 0]
+        assignments = [1, 2]
+        counts = [1, 1]
+    else
+        error("unknown subtraction-overflow branch")
+    end
+    bank = GRAMISKernelIS._first_order_gramis_factor_bank(ProposalBank([
+        FactorGaussian(T[location], reshape(T[1], 1, 1)) for location in locations
+    ]))
+    sample_count = length(assignments)
+    samples = fill(T(101), 1, sample_count)
+    returned_logweights = fill(T(102), sample_count)
+    local_logweights = fill(T(103), sample_count)
+    generating_logdensities = fill(T(104), sample_count)
+    proposal_ids = fill(105, sample_count)
+    round_ids = fill(106, sample_count)
+    failures = zeros(UInt64, 3)
+    denominator = GRAMISKernelIS._RealizedMixtureDenominator(
+        reshape(log.(T.(counts) ./ T(sample_count)), :, 1),
+        1,
+    )
+    target_value = T(0.75) * floatmax(T)
+    target = GRAMISKernelIS._NativeDeviceTarget{
+        T,
+        GRAMISSubtractionOverflowTarget{T},
+    }(GRAMISSubtractionOverflowTarget(target_value))
+    GRAMISKernelIS._first_order_gramis_sample_round!(
+        samples,
+        returned_logweights,
+        local_logweights,
+        generating_logdensities,
+        proposal_ids,
+        round_ids,
+        failures,
+        normals,
+        target,
+        bank,
+        assignments,
+        denominator,
+        GRAMISKernelIS._allocate_mis_solve_scratch(normals, bank, sample_count),
+        7,
+        execution,
+        GRAMISKernelIS.MLDataDevices.CPUDevice(),
+        FusedFactorExecution(),
+    )
+    return (;
+        samples,
+        returned_logweights,
+        local_logweights,
+        generating_logdensities,
+        proposal_ids,
+        round_ids,
+        failures,
+        target_value,
+    )
+end
+
+@testset "serial fused subtraction failures match the portable path" begin
+    for T in (Float32, Float64), branch in (:returned, :local)
+        serial = run_gram_is_subtraction_overflow(
+            T,
+            branch,
+            GRAMISKernelIS._SerialCPUExecution(),
+        )
+        portable = run_gram_is_subtraction_overflow(
+            T,
+            branch,
+            GRAMISKernelIS._ThreadedCPUExecution(),
+        )
+        for field in (
+            :samples,
+            :returned_logweights,
+            :local_logweights,
+            :generating_logdensities,
+            :proposal_ids,
+            :round_ids,
+            :failures,
+        )
+            @test getproperty(serial, field) == getproperty(portable, field)
+        end
+        decoded = GRAMISKernelIS._decode_native_failure(
+            serial.failures[1],
+            serial.failures[2],
+        )
+        @test decoded.count == 1
+        @test decoded.first_logical_index == 1
+        @test decoded.reason_bits == GRAMISKernelIS._NATIVE_LOGWEIGHT_INVALID
+        @test iszero(serial.failures[3])
+
+        if branch === :returned
+            @test serial.returned_logweights == fill(T(-Inf), 1)
+            @test serial.local_logweights == fill(T(-Inf), 1)
+            @test serial.generating_logdensities == fill(T(-Inf), 1)
+            @test serial.proposal_ids == [0]
+            @test serial.round_ids == [0]
+        else
+            @test isfinite(serial.returned_logweights[1])
+            @test serial.local_logweights[1] == serial.target_value
+            @test isfinite(serial.generating_logdensities[1])
+            @test serial.proposal_ids[1] == 1
+            @test serial.round_ids[1] == 0
+            @test serial.proposal_ids[2] == 2
+            @test serial.round_ids[2] == 7
+        end
+    end
 end
 
 @testset "failed frozen-round samples clear fused and batched adaptation state" begin

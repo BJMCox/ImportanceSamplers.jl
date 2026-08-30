@@ -22,6 +22,110 @@
     end
 end
 
+@inline function _first_order_gramis_sample_slot!(
+    samples,
+    returned_logweights,
+    local_logweights,
+    generating_logdensities,
+    proposal_ids,
+    round_ids,
+    failure_storage,
+    normal_buffer,
+    target,
+    bank,
+    assignments,
+    denominator,
+    solve_scratch,
+    round,
+    sample_index,
+)
+    T = eltype(returned_logweights)
+    @inbounds returned_logweights[sample_index] = T(-Inf)
+    @inbounds local_logweights[sample_index] = T(-Inf)
+    @inbounds generating_logdensities[sample_index] = T(-Inf)
+    @inbounds proposal_ids[sample_index] = 0
+    @inbounds round_ids[sample_index] = 0
+    valid, target_log, logdenominator, generating_slot, generating_logdensity =
+        _mis_round_values!(
+            T,
+            sample_index,
+            samples,
+            failure_storage,
+            normal_buffer,
+            target,
+            bank,
+            assignments,
+            denominator,
+            solve_scratch,
+        )
+    valid || return nothing
+    returned_logweight, returned_reason =
+        _subtract_logweight(target_log, logdenominator)
+    if !iszero(returned_reason)
+        _record_native_failure!(
+            failure_storage,
+            sample_index,
+            0,
+            returned_reason,
+        )
+        return nothing
+    end
+    @inbounds returned_logweights[sample_index] = returned_logweight
+    @inbounds local_logweights[sample_index] = target_log
+    @inbounds generating_logdensities[sample_index] = generating_logdensity
+    @inbounds proposal_ids[sample_index] = bank.proposal_ids[generating_slot]
+    local_logweight, local_reason =
+        _subtract_logweight(target_log, generating_logdensity)
+    if iszero(local_reason)
+        @inbounds local_logweights[sample_index] = local_logweight
+        @inbounds round_ids[sample_index] = round
+    else
+        _record_native_failure!(failure_storage, sample_index, 0, local_reason)
+    end
+    return nothing
+end
+
+function _first_order_gramis_sample_round!(
+    samples,
+    returned_logweights,
+    local_logweights,
+    generating_logdensities,
+    proposal_ids,
+    round_ids,
+    failure_storage,
+    normal_buffer,
+    target,
+    bank,
+    assignments,
+    denominator,
+    solve_scratch,
+    round,
+    ::_SerialCPUExecution,
+    ::MLDataDevices.AbstractCPUDevice,
+    ::FusedFactorExecution,
+)
+    @inbounds for sample_index in eachindex(returned_logweights)
+        _first_order_gramis_sample_slot!(
+            samples,
+            returned_logweights,
+            local_logweights,
+            generating_logdensities,
+            proposal_ids,
+            round_ids,
+            failure_storage,
+            normal_buffer,
+            target,
+            bank,
+            assignments,
+            denominator,
+            solve_scratch,
+            round,
+            sample_index,
+        )
+    end
+    return nothing
+end
+
 function _first_order_gramis_sample_round!(
     samples,
     returned_logweights,
@@ -1521,35 +1625,40 @@ function _first_order_gramis_failure_details(cause)
     return (; covariance, derivative)
 end
 
-@inline function _capture_first_order_gramis_round(
-    f,
+macro _capture_first_order_gramis_round(
     method_state,
     transfers,
     round,
     phase,
     completed_rounds,
+    expression,
 )
-    try
-        return f()
-    catch cause
-        cause isa FirstOrderGRAMISRoundError && rethrow()
-        failure_phase = _first_order_gramis_round_phase(cause, phase)
-        details = _first_order_gramis_failure_details(cause)
-        throw(
-            FirstOrderGRAMISRoundError(
-                round,
-                failure_phase,
+    return quote
+        try
+            $(esc(expression))
+        catch cause
+            cause isa FirstOrderGRAMISRoundError && rethrow()
+            failure_phase = _first_order_gramis_round_phase(
                 cause,
-                (
-                    round_size=method_state.plan.schedule[round],
-                    completed_rounds=completed_rounds,
-                    covariance=details.covariance,
-                    derivative=details.derivative,
-                    transfers=transfers,
-                    pre_call_state_preserved=true,
+                $(esc(phase)),
+            )
+            details = _first_order_gramis_failure_details(cause)
+            throw(
+                FirstOrderGRAMISRoundError(
+                    $(esc(round)),
+                    failure_phase,
+                    cause,
+                    (
+                        round_size=$(esc(method_state)).plan.schedule[$(esc(round))],
+                        completed_rounds=$(esc(completed_rounds)),
+                        covariance=details.covariance,
+                        derivative=details.derivative,
+                        transfers=$(esc(transfers)),
+                        pre_call_state_preserved=true,
+                    ),
                 ),
-            ),
-        )
+            )
+        end
     end
 end
 
@@ -1725,67 +1834,68 @@ function _importance_sample_cpu!(
     L = eltype(workspace.round_logweights)
     transfers = _ResultTransferCounter(0, 0)
 
-    storage = _capture_first_order_gramis_round(
+    storage = @_capture_first_order_gramis_round(
         method_state,
         transfers,
         1,
         :result_construction,
         0,
-    ) do
-        allocated_active_rounds = findall(
-            !iszero,
-            method_state.repulsion_strength,
-        )
-        active_repulsion_count = length(allocated_active_rounds)
-        (
-            samples=similar(workspace.samples, T, dimension, total_samples),
-            logweights=similar(workspace.round_logweights, L, total_samples),
-            round_ids=similar(workspace.round_ids, Int, total_samples),
-            proposal_ids=similar(
-                workspace.round_proposal_ids,
-                Int,
-                total_samples,
-            ),
-            local_ess=similar(workspace.local_ess, T, proposal_count, rounds),
-            tempering_powers=similar(
-                workspace.tempering_powers,
-                T,
-                proposal_count,
-                rounds,
-            ),
-            fallback_status=similar(
-                workspace.factor_status,
-                UInt8,
-                proposal_count,
-                rounds,
-            ),
-            accepted_steps=similar(
-                workspace.steps,
-                T,
-                proposal_count,
-                rounds,
-            ),
-            backtracking_trials=similar(
-                workspace.backtracking_trials,
-                Int,
-                proposal_count,
-                rounds,
-            ),
-            collision_counts=similar(
-                workspace.collision_counts,
-                Int,
-                proposal_count,
-                rounds,
-            ),
-            round_ess=Vector{L}(undef, rounds),
-            round_lognormalizers=Vector{L}(undef, rounds),
-            active_repulsion_rounds=allocated_active_rounds,
-            minimum_whitened_distances=Vector{T}(
-                undef,
-                active_repulsion_count,
-            ),
-        )
-    end
+        begin
+            allocated_active_rounds = findall(
+                !iszero,
+                method_state.repulsion_strength,
+            )
+            active_repulsion_count = length(allocated_active_rounds)
+            (
+                samples=similar(workspace.samples, T, dimension, total_samples),
+                logweights=similar(workspace.round_logweights, L, total_samples),
+                round_ids=similar(workspace.round_ids, Int, total_samples),
+                proposal_ids=similar(
+                    workspace.round_proposal_ids,
+                    Int,
+                    total_samples,
+                ),
+                local_ess=similar(workspace.local_ess, T, proposal_count, rounds),
+                tempering_powers=similar(
+                    workspace.tempering_powers,
+                    T,
+                    proposal_count,
+                    rounds,
+                ),
+                fallback_status=similar(
+                    workspace.factor_status,
+                    UInt8,
+                    proposal_count,
+                    rounds,
+                ),
+                accepted_steps=similar(
+                    workspace.steps,
+                    T,
+                    proposal_count,
+                    rounds,
+                ),
+                backtracking_trials=similar(
+                    workspace.backtracking_trials,
+                    Int,
+                    proposal_count,
+                    rounds,
+                ),
+                collision_counts=similar(
+                    workspace.collision_counts,
+                    Int,
+                    proposal_count,
+                    rounds,
+                ),
+                round_ess=Vector{L}(undef, rounds),
+                round_lognormalizers=Vector{L}(undef, rounds),
+                active_repulsion_rounds=allocated_active_rounds,
+                minimum_whitened_distances=Vector{T}(
+                    undef,
+                    active_repulsion_count,
+                ),
+            )
+        end,
+    )
     samples = storage.samples
     logweights = storage.logweights
     round_ids = storage.round_ids
@@ -1806,44 +1916,45 @@ function _importance_sample_cpu!(
     fallback_backtracking = Ref(0)
     target_trial_evaluations = Ref(0)
 
-    _capture_first_order_gramis_round(
+    @_capture_first_order_gramis_round(
         method_state,
         transfers,
         1,
         :proposal,
         0,
-    ) do
         _copy_first_order_gramis_population!(
             method_state.run,
             method_state.committed,
-        )
-    end
-    target = _capture_first_order_gramis_round(
+        ),
+    )
+    target = @_capture_first_order_gramis_round(
         method_state,
         transfers,
         1,
         :target,
         0,
-    ) do
-        _bind_resolved_target(
-            sampler.target,
-            view(method_state.run.locations, :, 1),
-        )
-    end
-    target_evaluator, target_failures = _capture_first_order_gramis_round(
+        begin
+            _bind_resolved_target(
+                sampler.target,
+                view(method_state.run.locations, :, 1),
+            )
+        end,
+    )
+    target_evaluator, target_failures = @_capture_first_order_gramis_round(
         method_state,
         transfers,
         1,
         :target,
         0,
-    ) do
-        _native_target_evaluator(
-            KernelAbstractions.get_backend(buffers.normal),
-            target,
-            L,
-            buffers.failure_scratch.target_failures,
-        )
-    end
+        begin
+            _native_target_evaluator(
+                KernelAbstractions.get_backend(buffers.normal),
+                target,
+                L,
+                buffers.failure_scratch.target_failures,
+            )
+        end,
+    )
 
     for round in eachindex(plan.schedule)
         views = _first_order_gramis_round_views(method_state, round)
@@ -1854,192 +1965,198 @@ function _importance_sample_cpu!(
             1:(dimension * views.round_size),
         )
 
-        _capture_first_order_gramis_round(
+        @_capture_first_order_gramis_round(
             method_state,
             transfers,
             round,
             :sampling,
             round - 1,
-        ) do
-            Random.randn!(sampler.rng, normal_buffer)
-            _first_order_gramis_sample_round!(
-                views.samples,
-                views.logweights,
-                views.local_logweights,
-                views.generating_logdensities,
-                views.proposal_ids,
-                views.round_ids,
-                buffers.failure_scratch.record.storage,
-                normal_buffer,
-                target_evaluator,
-                method_state.run,
-                views.assignments,
-                denominator,
-                workspace.solve_scratch,
-                round,
-                execution,
-                sampler.device,
-                sampler.factor_execution,
-            )
-            snapshot = _device_failure_snapshot(buffers.failure_scratch.record)
-            _record_reported_transfer!(
-                transfers,
-                snapshot.transfers.count,
-                snapshot.transfers.bytes,
-                Val(:failure_snapshot),
-            )
-            _throw_native_failures(
-                snapshot.failure,
-                snapshot.draw_failure,
-                target_failures,
-                _NoSampleTransform(),
-            )
-        end
-        _capture_first_order_gramis_round(
+            begin
+                Random.randn!(sampler.rng, normal_buffer)
+                _first_order_gramis_sample_round!(
+                    views.samples,
+                    views.logweights,
+                    views.local_logweights,
+                    views.generating_logdensities,
+                    views.proposal_ids,
+                    views.round_ids,
+                    buffers.failure_scratch.record.storage,
+                    normal_buffer,
+                    target_evaluator,
+                    method_state.run,
+                    views.assignments,
+                    denominator,
+                    workspace.solve_scratch,
+                    round,
+                    execution,
+                    sampler.device,
+                    sampler.factor_execution,
+                )
+                snapshot = _device_failure_snapshot(buffers.failure_scratch.record)
+                _record_reported_transfer!(
+                    transfers,
+                    snapshot.transfers.count,
+                    snapshot.transfers.bytes,
+                    Val(:failure_snapshot),
+                )
+                _throw_native_failures(
+                    snapshot.failure,
+                    snapshot.draw_failure,
+                    target_failures,
+                    _NoSampleTransform(),
+                )
+            end,
+        )
+        @_capture_first_order_gramis_round(
             method_state,
             transfers,
             round,
             :covariance,
             round - 1,
-        ) do
-            _fit_local_covariances!(method_state, round, execution)
-        end
-        _capture_first_order_gramis_round(
+            _fit_local_covariances!(method_state, round, execution),
+        )
+        @_capture_first_order_gramis_round(
             method_state,
             transfers,
             round,
             :derivative,
             round - 1,
-        ) do
-            _evaluate_frozen_gradients!(method_state, target, execution)
-            _precondition_gradients!(method_state, execution)
-        end
-        _capture_first_order_gramis_round(
+            begin
+                _evaluate_frozen_gradients!(method_state, target, execution)
+                _precondition_gradients!(method_state, execution)
+            end,
+        )
+        @_capture_first_order_gramis_round(
             method_state,
             transfers,
             round,
             :repulsion,
             round - 1,
-        ) do
-            strength = method_state.repulsion_strength[round]
-            _repulsion!(
-                workspace.repulsion,
-                workspace.collision_counts,
-                workspace.pooled_covariance,
-                workspace.whitened_means,
-                method_state.run.locations,
-                method_state.run.factors,
-                strength,
-                method_state.repulsion_softening,
-                execution,
-            )
-            if !iszero(strength)
-                active_repulsion_position[] += 1
-                minimum_whitened_distances[active_repulsion_position[]] =
-                    _minimum_first_order_gramis_whitened_distance(
-                        sampler.device,
-                        workspace.whitened_means,
-                        transfers,
-                        execution,
-                    )
-            end
-        end
-        _capture_first_order_gramis_round(
+            begin
+                strength = method_state.repulsion_strength[round]
+                _repulsion!(
+                    workspace.repulsion,
+                    workspace.collision_counts,
+                    workspace.pooled_covariance,
+                    workspace.whitened_means,
+                    method_state.run.locations,
+                    method_state.run.factors,
+                    strength,
+                    method_state.repulsion_softening,
+                    execution,
+                )
+                if !iszero(strength)
+                    active_repulsion_position[] += 1
+                    minimum_whitened_distances[active_repulsion_position[]] =
+                        _minimum_first_order_gramis_whitened_distance(
+                            sampler.device,
+                            workspace.whitened_means,
+                            transfers,
+                            execution,
+                        )
+                end
+            end,
+        )
+        @_capture_first_order_gramis_round(
             method_state,
             transfers,
             round,
             :derivative,
             round - 1,
-        ) do
-            _backtrack_means!(method_state, target, execution)
-            _add_first_order_gramis_repulsion!(
-                sampler.device,
-                method_state.candidate.locations,
-                workspace.repulsion,
-                transfers,
-                execution,
-            )
-        end
-        _capture_first_order_gramis_round(
+            begin
+                _backtrack_means!(method_state, target, execution)
+                _add_first_order_gramis_repulsion!(
+                    sampler.device,
+                    method_state.candidate.locations,
+                    workspace.repulsion,
+                    transfers,
+                    execution,
+                )
+            end,
+        )
+        @_capture_first_order_gramis_round(
             method_state,
             transfers,
             round,
             :covariance,
             round - 1,
-        ) do
-            copyto!(
-                method_state.candidate.lognormalizers,
-                method_state.run.lognormalizers,
-            )
-            _update_local_covariances!(
-                sampler.device,
-                method_state,
-                round,
-                workspace.factor_info,
-                execution,
-            )
-            _throw_first_order_gramis_covariance_failure(
-                sampler.device,
-                workspace.factor_info,
-                transfers,
-                execution,
-            )
-            _validate_first_order_gramis_candidate_factors!(
-                sampler.device,
-                method_state.candidate,
-                workspace.factor_status,
-                transfers,
-                execution,
-            )
-        end
-        _capture_first_order_gramis_round(
+            begin
+                copyto!(
+                    method_state.candidate.lognormalizers,
+                    method_state.run.lognormalizers,
+                )
+                _update_local_covariances!(
+                    sampler.device,
+                    method_state,
+                    round,
+                    workspace.factor_info,
+                    execution,
+                )
+                _throw_first_order_gramis_covariance_failure(
+                    sampler.device,
+                    workspace.factor_info,
+                    transfers,
+                    execution,
+                )
+                _validate_first_order_gramis_candidate_factors!(
+                    sampler.device,
+                    method_state.candidate,
+                    workspace.factor_status,
+                    transfers,
+                    execution,
+                )
+            end,
+        )
+        @_capture_first_order_gramis_round(
             method_state,
             transfers,
             round,
             :proposal,
             round - 1,
-        ) do
-            method_state.run, method_state.candidate =
-                method_state.candidate, method_state.run
-        end
-        summary = _capture_first_order_gramis_round(
+            begin
+                method_state.run, method_state.candidate =
+                    method_state.candidate, method_state.run
+            end,
+        )
+        summary = @_capture_first_order_gramis_round(
             method_state,
             transfers,
             round,
             :diagnostics,
             round,
-        ) do
-            copyto!(_sample_view(samples, output_indices), views.samples)
-            copyto!(view(logweights, output_indices), views.logweights)
-            copyto!(view(round_ids, output_indices), views.round_ids)
-            copyto!(view(proposal_ids, output_indices), views.proposal_ids)
-            copyto!(view(local_ess, :, round), workspace.local_ess)
-            copyto!(
-                view(tempering_powers, :, round),
-                workspace.tempering_powers,
-            )
-            copyto!(view(fallback_status, :, round), workspace.factor_status)
-            copyto!(view(accepted_steps, :, round), workspace.steps)
-            copyto!(
-                view(backtracking_trials, :, round),
-                workspace.backtracking_trials,
-            )
-            copyto!(
-                view(collision_counts, :, round),
-                workspace.collision_counts,
-            )
-            (
-                weights=_logweight_summary(views.logweights, transfers),
-                bounded=_first_order_gramis_diagnostic_summary(
-                    sampler.device,
-                    workspace.factor_status,
-                    workspace.steps,
+            begin
+                copyto!(_sample_view(samples, output_indices), views.samples)
+                copyto!(view(logweights, output_indices), views.logweights)
+                copyto!(view(round_ids, output_indices), views.round_ids)
+                copyto!(view(proposal_ids, output_indices), views.proposal_ids)
+                copyto!(view(local_ess, :, round), workspace.local_ess)
+                copyto!(
+                    view(tempering_powers, :, round),
+                    workspace.tempering_powers,
+                )
+                copyto!(view(fallback_status, :, round), workspace.factor_status)
+                copyto!(view(accepted_steps, :, round), workspace.steps)
+                copyto!(
+                    view(backtracking_trials, :, round),
                     workspace.backtracking_trials,
-                    transfers,
-                    execution,
-                ),
-            )
-        end
+                )
+                copyto!(
+                    view(collision_counts, :, round),
+                    workspace.collision_counts,
+                )
+                (
+                    weights=_logweight_summary(views.logweights, transfers),
+                    bounded=_first_order_gramis_diagnostic_summary(
+                        sampler.device,
+                        workspace.factor_status,
+                        workspace.steps,
+                        workspace.backtracking_trials,
+                        transfers,
+                        execution,
+                    ),
+                )
+            end,
+        )
         round_ess[round] = summary.weights.ess
         round_lognormalizers[round] = summary.weights.lognormalizer
         fallback_all_zero[] += summary.bounded.all_zero
@@ -2048,66 +2165,68 @@ function _importance_sample_cpu!(
         target_trial_evaluations[] += summary.bounded.target_trials
     end
 
-    diagnostics = _capture_first_order_gramis_round(
+    diagnostics = @_capture_first_order_gramis_round(
         method_state,
         transfers,
         rounds,
         :result_construction,
         rounds,
-    ) do
-        (
-            method=:first_order_gramis,
-            execution=_execution_name(execution),
-            threaded=sampler.threaded,
-            factor_execution_policy=_factor_execution_name(
-                sampler.factor_execution,
-            ),
-            rounds=rounds,
-            round_sizes=collect(plan.schedule),
-            round_ess=round_ess,
-            round_lognormalizers=round_lognormalizers,
-            local_ess=local_ess,
-            tempering_powers=tempering_powers,
-            fallback_status=fallback_status,
-            accepted_steps=accepted_steps,
-            backtracking_trials=backtracking_trials,
-            collision_counts=collision_counts,
-            minimum_whitened_pair_distance=(
-                round=active_repulsion_rounds,
-                value=minimum_whitened_distances,
-            ),
-            fallbacks=(
-                all_zero_local_weights=fallback_all_zero[],
-                tempering=fallback_tempering[],
-                backtracking_exhaustion=fallback_backtracking[],
-            ),
-            target_evaluations=total_samples + rounds * proposal_count +
-                               target_trial_evaluations[],
-            gradient_evaluations=rounds * proposal_count,
-            proposal_evaluations=proposal_count * total_samples,
-            denominator_evaluations=total_samples,
-            failures=0,
-            transfers=transfers,
-        )
-    end
-    result = _capture_first_order_gramis_round(
+        begin
+            (
+                method=:first_order_gramis,
+                execution=_execution_name(execution),
+                threaded=sampler.threaded,
+                factor_execution_policy=_factor_execution_name(
+                    sampler.factor_execution,
+                ),
+                rounds=rounds,
+                round_sizes=collect(plan.schedule),
+                round_ess=round_ess,
+                round_lognormalizers=round_lognormalizers,
+                local_ess=local_ess,
+                tempering_powers=tempering_powers,
+                fallback_status=fallback_status,
+                accepted_steps=accepted_steps,
+                backtracking_trials=backtracking_trials,
+                collision_counts=collision_counts,
+                minimum_whitened_pair_distance=(
+                    round=active_repulsion_rounds,
+                    value=minimum_whitened_distances,
+                ),
+                fallbacks=(
+                    all_zero_local_weights=fallback_all_zero[],
+                    tempering=fallback_tempering[],
+                    backtracking_exhaustion=fallback_backtracking[],
+                ),
+                target_evaluations=total_samples + rounds * proposal_count +
+                                   target_trial_evaluations[],
+                gradient_evaluations=rounds * proposal_count,
+                proposal_evaluations=proposal_count * total_samples,
+                denominator_evaluations=total_samples,
+                failures=0,
+                transfers=transfers,
+            )
+        end,
+    )
+    result = @_capture_first_order_gramis_round(
         method_state,
         transfers,
         rounds,
         :result_construction,
         rounds,
-    ) do
-        constructed = _adopt_validated_weighted_samples(
-            samples,
-            logweights;
-            provenance=(round=round_ids, proposal_id=proposal_ids),
-            diagnostics=diagnostics,
-        )
-        KernelAbstractions.synchronize(
-            KernelAbstractions.get_backend(method_state.run.locations),
-        )
-        constructed
-    end
+        begin
+            constructed = _adopt_validated_weighted_samples(
+                samples,
+                logweights;
+                provenance=(round=round_ids, proposal_id=proposal_ids),
+                diagnostics=diagnostics,
+            )
+            KernelAbstractions.synchronize(
+                KernelAbstractions.get_backend(method_state.run.locations),
+            )
+            constructed
+        end,
+    )
     method_state.committed, method_state.run =
         method_state.run, method_state.committed
     return result

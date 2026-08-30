@@ -33,14 +33,6 @@ _gradient_source(::LogTarget{F,A,Nothing}) where {F,A<:ADTypes.NoAutoDiff} =
     throw(ArgumentError(_GRADIENT_SOURCE_MESSAGE))
 _gradient_source(::LogTarget{F,A,Nothing}) where {F,A} = :ad
 
-_gradient_source(::_PreparedLogTarget{F,P,A,G}) where {F,P,A,G} = :explicit
-function _gradient_source(
-    ::_PreparedLogTarget{F,P,A,Nothing},
-) where {F,P,A<:ADTypes.NoAutoDiff}
-    throw(ArgumentError(_GRADIENT_SOURCE_MESSAGE))
-end
-_gradient_source(::_PreparedLogTarget{F,P,A,Nothing}) where {F,P,A} = :ad
-
 function _gradient_source(target::_BoundLogDensityProblemsTarget)
     return _gradient_source(target.target)
 end

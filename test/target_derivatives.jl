@@ -498,10 +498,20 @@ end
     )
     worker_count = Threads.nthreads(:default)
     bound = ISD._prepare_bound_gradient(target, sample, worker_count)
+    calls_per_worker = 3
     destinations = [similar(sample) for _ in 1:worker_count]
+    preparation_calls = [Any[] for _ in 1:worker_count]
+    thread_calls = [Int[] for _ in 1:worker_count]
 
     Threads.@threads :static for worker in 1:worker_count
-        ISD._gradient!(destinations[worker], bound, sample)
+        for _ in 1:calls_per_worker
+            push!(thread_calls[worker], Threads.threadid())
+            push!(
+                preparation_calls[worker],
+                ISD._di_preparation(bound.preparation),
+            )
+            ISD._gradient!(destinations[worker], bound, sample)
+        end
     end
 
     @test all(==([-0.25, 0.5]), destinations)
@@ -518,4 +528,22 @@ end
     @test bound.preparation.thread_slots[
         Threads.threadpooltids(:default)
     ] == collect(1:worker_count)
+    @test sort!(only.(unique.(thread_calls))) ==
+          sort!(collect(Threads.threadpooltids(:default)))
+    for worker in 1:worker_count
+        @test length(preparation_calls[worker]) == calls_per_worker
+        @test all(
+            preparation -> preparation === first(preparation_calls[worker]),
+            preparation_calls[worker],
+        )
+        thread_id = only(unique(thread_calls[worker]))
+        slot = bound.preparation.thread_slots[thread_id]
+        @test first(preparation_calls[worker]) ===
+              bound.preparation.preparations[slot]
+    end
+    @test all(
+        left == right ||
+        first(preparation_calls[left]) !== first(preparation_calls[right])
+        for left in 1:worker_count for right in 1:worker_count
+    )
 end
