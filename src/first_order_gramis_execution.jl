@@ -90,6 +90,14 @@ const _GRAMIS_COVARIANCE_READY = UInt8(0)
 const _GRAMIS_ALL_ZERO_LOCAL = UInt8(1)
 const _GRAMIS_TEMPERING_FALLBACK = UInt8(2)
 
+@inline function _scale_aware_ridge(
+    previous_trace,
+    dimension,
+    regularization::T,
+) where {T}
+    return regularization * previous_trace / T(dimension)
+end
+
 @kernel function _local_group_starts_kernel!(starts, counts, round)
     first_sample = 1
     for proposal_slot in eachindex(starts)
@@ -424,5 +432,218 @@ function _fit_local_covariances!(
         workgroupsize=_native_workgroupsize(execution, covariance_entries),
     )
     KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
+@kernel function _blend_local_covariances_kernel!(
+    covariances,
+    factors,
+    status,
+    covariance_rate,
+    round,
+    regularization,
+)
+    proposal_slot = @index(Global, Linear)
+    if @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY
+        T = eltype(covariances)
+        dimension = size(covariances, 1)
+        previous_trace = zero(T)
+        for column in 1:dimension, row in column:dimension
+            previous_trace += abs2(@inbounds factors[row, column, proposal_slot])
+        end
+        ridge = _scale_aware_ridge(
+            previous_trace,
+            dimension,
+            regularization,
+        )
+        rate = T(@inbounds covariance_rate[round])
+        for column in 1:dimension, row in column:dimension
+            estimate = (
+                @inbounds(covariances[row, column, proposal_slot]) +
+                @inbounds(covariances[column, row, proposal_slot])
+            ) / T(2)
+            old = _gramis_current_covariance(
+                factors,
+                row,
+                column,
+                proposal_slot,
+            )
+            blended = (one(T) - rate) * old + rate * estimate
+            row == column && (blended += ridge)
+            @inbounds covariances[row, column, proposal_slot] = blended
+            @inbounds covariances[column, row, proposal_slot] = blended
+        end
+    end
+end
+
+function _blend_local_covariances!(
+    method_state::_PreparedFirstOrderGRAMIS,
+    round,
+    execution,
+)
+    workspace = method_state.workspace
+    proposal_count = size(method_state.run.locations, 2)
+    backend = KernelAbstractions.get_backend(workspace.covariances)
+    kernel = _blend_local_covariances_kernel!(backend)
+    kernel(
+        workspace.covariances,
+        method_state.run.factors,
+        workspace.factor_status,
+        method_state.covariance_rate,
+        round,
+        method_state.covariance_regularization;
+        ndrange=proposal_count,
+        workgroupsize=_native_workgroupsize(execution, proposal_count),
+    )
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
+const _GRAMIS_COVARIANCE_NONFINITE_INFO = -1
+
+@inline function _factor_population_slot!(
+    factors,
+    covariances,
+    info,
+    proposal_slot,
+)
+    factor = view(factors, :, :, proposal_slot)
+    covariance = view(covariances, :, :, proposal_slot)
+    copyto!(factor, covariance)
+    finite = true
+    @inbounds for entry in eachindex(factor)
+        finite &= isfinite(factor[entry])
+    end
+    if !finite
+        @inbounds info[proposal_slot] = _GRAMIS_COVARIANCE_NONFINITE_INFO
+        return nothing
+    end
+
+    factor, factor_info = LinearAlgebra.LAPACK.potrf!('L', factor)
+    @inbounds info[proposal_slot] = factor_info
+    if iszero(factor_info)
+        dimension = size(factor, 1)
+        @inbounds for column in 1:dimension, row in 1:(column - 1)
+            factor[row, column] = zero(eltype(factor))
+        end
+    end
+    return nothing
+end
+
+function _factor_population!(
+    ::MLDataDevices.AbstractCPUDevice,
+    factors::StridedArray{T,3},
+    covariances::StridedArray{T,3},
+    info::StridedVector{Int},
+    ::_SerialCPUExecution,
+) where {T<:Union{Float32,Float64}}
+    @inbounds for proposal_slot in axes(factors, 3)
+        _factor_population_slot!(
+            factors,
+            covariances,
+            info,
+            proposal_slot,
+        )
+    end
+    return nothing
+end
+
+function _factor_population!(
+    ::MLDataDevices.AbstractCPUDevice,
+    factors::StridedArray{T,3},
+    covariances::StridedArray{T,3},
+    info::StridedVector{Int},
+    ::_ThreadedCPUExecution,
+) where {T<:Union{Float32,Float64}}
+    Threads.@threads :dynamic for proposal_slot in axes(factors, 3)
+        _factor_population_slot!(
+            factors,
+            covariances,
+            info,
+            proposal_slot,
+        )
+    end
+    return nothing
+end
+
+function _factor_population!(
+    device::MLDataDevices.AbstractCPUDevice,
+    factors::StridedArray{T,3},
+    covariances::StridedArray{T,3},
+    info::StridedVector{Int},
+) where {T<:Union{Float32,Float64}}
+    return _factor_population!(
+        device,
+        factors,
+        covariances,
+        info,
+        _SerialCPUExecution(),
+    )
+end
+
+function _factor_ready_population!(
+    factors,
+    covariances,
+    info,
+    status,
+    ::_SerialCPUExecution,
+)
+    @inbounds for proposal_slot in axes(factors, 3)
+        if status[proposal_slot] == _GRAMIS_COVARIANCE_READY
+            _factor_population_slot!(
+                factors,
+                covariances,
+                info,
+                proposal_slot,
+            )
+        else
+            info[proposal_slot] = 0
+        end
+    end
+    return nothing
+end
+
+function _factor_ready_population!(
+    factors,
+    covariances,
+    info,
+    status,
+    ::_ThreadedCPUExecution,
+)
+    Threads.@threads :dynamic for proposal_slot in axes(factors, 3)
+        if @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY
+            _factor_population_slot!(
+                factors,
+                covariances,
+                info,
+                proposal_slot,
+            )
+        else
+            @inbounds info[proposal_slot] = 0
+        end
+    end
+    return nothing
+end
+
+function _update_local_covariances!(
+    ::MLDataDevices.AbstractCPUDevice,
+    method_state::_PreparedFirstOrderGRAMIS,
+    round,
+    info::StridedVector{Int},
+    execution,
+)
+    copyto!(method_state.candidate.factors, method_state.run.factors)
+    _blend_local_covariances!(method_state, round, execution)
+    workspace = method_state.workspace
+    _factor_ready_population!(
+        method_state.candidate.factors,
+        workspace.covariances,
+        info,
+        workspace.factor_status,
+        execution,
+    )
+    if any(!iszero, info)
+        copyto!(method_state.candidate.factors, method_state.run.factors)
+    end
     return nothing
 end

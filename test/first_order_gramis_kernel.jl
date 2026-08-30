@@ -609,3 +609,372 @@ end
               expected_ratio rtol = 8eps(T)
     end
 end
+
+function gram_is_covariance_update_state(
+    ::Type{T};
+    covariance_rate=one(T),
+    covariance_regularization=nothing,
+) where {T}
+    bank = ProposalBank([
+        FactorGaussian(T[0, 0], T[2 0; 1 3]),
+        FactorGaussian(T[10, 10], T[1 0; 0.5 2]),
+    ])
+    return GRAMISKernelIS._prepare_method_state(FirstOrderGRAMIS(
+        bank;
+        rounds=1,
+        round_size=8,
+        repulsion_strength=zero(T),
+        covariance_rate,
+        covariance_regularization,
+    ))
+end
+
+function gram_is_proposal_state_snapshot(bank)
+    return (
+        locations=copy(bank.locations),
+        factors=copy(bank.factors),
+        lognormalizers=copy(bank.lognormalizers),
+    )
+end
+
+@testset "FirstOrderGRAMIS accepted covariance blend and scale-aware ridge" begin
+    for T in (Float32, Float64), (rate, regularization) in (
+        (one(T), nothing),
+        (T(0.25), zero(T)),
+        (T(0.5), T(0.1)),
+    ), execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        state = gram_is_covariance_update_state(
+            T;
+            covariance_rate=rate,
+            covariance_regularization=regularization,
+        )
+        estimates = (
+            T[2 5; 3 8],
+            T[9 -1; 3 5],
+        )
+        for slot in 1:2
+            state.workspace.covariances[:, :, slot] .= estimates[slot]
+        end
+        fill!(
+            state.workspace.factor_status,
+            GRAMISKernelIS._GRAMIS_COVARIANCE_READY,
+        )
+        frozen = (
+            committed=gram_is_proposal_state_snapshot(state.committed),
+            run=gram_is_proposal_state_snapshot(state.run),
+            candidate=gram_is_proposal_state_snapshot(state.candidate),
+        )
+
+        @test @inferred(GRAMISKernelIS._blend_local_covariances!(
+            state,
+            1,
+            execution,
+        )) === nothing
+
+        old_covariances = (
+            T[4 2; 2 10],
+            T[1 0.5; 0.5 4.25],
+        )
+        resolved_regularization = something(regularization, sqrt(eps(T)))
+        for slot in 1:2
+            estimate = (estimates[slot] + transpose(estimates[slot])) / T(2)
+            old = old_covariances[slot]
+            ridge = resolved_regularization * LinearAlgebra.tr(old) / T(2)
+            expected = Matrix(LinearAlgebra.Hermitian(
+                (one(T) - rate) * old + rate * estimate +
+                ridge * LinearAlgebra.I,
+            ))
+            actual = state.workspace.covariances[:, :, slot]
+            @test actual ≈ expected rtol = 8eps(T)
+            @test LinearAlgebra.issymmetric(actual)
+        end
+        @test gram_is_proposal_state_snapshot(state.committed) == frozen.committed
+        @test gram_is_proposal_state_snapshot(state.run) == frozen.run
+        @test gram_is_proposal_state_snapshot(state.candidate) == frozen.candidate
+    end
+end
+
+@testset "CPU proposal-population Cholesky matches LinearAlgebra" begin
+    device = GRAMISKernelIS.MLDataDevices.CPUDevice()
+    for T in (Float32, Float64), dimension in (1, 2, 4), execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        proposal_count = 3
+        covariances = Array{T}(undef, dimension, dimension, proposal_count)
+        expected = similar(covariances)
+        for slot in 1:proposal_count
+            seed = reshape(
+                T.(1:(dimension * dimension)),
+                dimension,
+                dimension,
+            ) / T(3 + slot)
+            covariance = seed * transpose(seed) + T(slot) * LinearAlgebra.I
+            covariances[:, :, slot] .= covariance
+            expected[:, :, slot] .= Matrix(LinearAlgebra.cholesky(
+                LinearAlgebra.Hermitian(covariance),
+            ).L)
+        end
+        factors = fill(T(-99), size(covariances))
+        info = fill(-99, proposal_count)
+
+        if execution isa GRAMISKernelIS._SerialCPUExecution
+            @test @inferred(GRAMISKernelIS._factor_population!(
+                device,
+                factors,
+                covariances,
+                info,
+            )) === nothing
+        else
+            @test @inferred(GRAMISKernelIS._factor_population!(
+                device,
+                factors,
+                covariances,
+                info,
+                execution,
+            )) === nothing
+        end
+        @test info == zeros(Int, proposal_count)
+        @test factors ≈ expected rtol = 16eps(T)
+    end
+end
+
+@testset "CPU threaded population factorization is nestable" begin
+    if Threads.nthreads(:default) > 1
+        outer_workers = min(Threads.nthreads(:default), 4)
+        covariances = Array{Float64}(undef, 2, 2, 3)
+        covariances[:, :, 1] .= [2.0 0.5; 0.5 1.0]
+        covariances[:, :, 2] .= [3.0 -0.25; -0.25 2.0]
+        covariances[:, :, 3] .= [4.0 -1.0; -1.0 2.0]
+        expected = similar(covariances)
+        for slot in axes(covariances, 3)
+            expected[:, :, slot] .= Matrix(LinearAlgebra.cholesky(
+                LinearAlgebra.Hermitian(covariances[:, :, slot]),
+            ).L)
+        end
+        factor_populations = [fill(-99.0, size(covariances)) for _ in 1:outer_workers]
+        info_populations = [fill(-99, 3) for _ in 1:outer_workers]
+        failures = Vector{Any}(undef, outer_workers)
+        fill!(failures, nothing)
+
+        Threads.@threads :static for worker in 1:outer_workers
+            try
+                GRAMISKernelIS._factor_population!(
+                    GRAMISKernelIS.MLDataDevices.CPUDevice(),
+                    factor_populations[worker],
+                    covariances,
+                    info_populations[worker],
+                    GRAMISKernelIS._ThreadedCPUExecution(),
+                )
+            catch cause
+                failures[worker] = cause
+            end
+        end
+
+        @test all(isnothing, failures)
+        @test all(info -> info == zeros(Int, 3), info_populations)
+        @test all(
+            factors -> isapprox(factors, expected; rtol=16eps(Float64)),
+            factor_populations,
+        )
+    else
+        @test_skip "requires multiple default-pool threads"
+    end
+end
+
+@testset "CPU population factorization reports one bounded failure" begin
+    covariances = Array{Float64}(undef, 2, 2, 3)
+    covariances[:, :, 1] .= [2.0 0.5; 0.5 1.0]
+    covariances[:, :, 2] .= [1.0 2.0; 2.0 1.0]
+    covariances[:, :, 3] .= [4.0 -1.0; -1.0 2.0]
+    factors = fill(-99.0, size(covariances))
+    info = fill(-99, 3)
+
+    GRAMISKernelIS._factor_population!(
+        GRAMISKernelIS.MLDataDevices.CPUDevice(),
+        factors,
+        covariances,
+        info,
+        GRAMISKernelIS._SerialCPUExecution(),
+    )
+
+    @test count(!iszero, info) == 1
+    @test info[2] == 2
+    @test info[[1, 3]] == [0, 0]
+end
+
+@testset "FirstOrderGRAMIS seeds candidate factors before successful update" begin
+    for execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        state = gram_is_covariance_update_state(
+            Float64;
+            covariance_rate=1.0,
+            covariance_regularization=0.0,
+        )
+        state.workspace.covariances[:, :, 1] .= [2.0 0.0; 0.0 3.0]
+        state.workspace.covariances[:, :, 2] .= [4.0 0.5; 0.5 2.0]
+        fill!(
+            state.workspace.factor_status,
+            GRAMISKernelIS._GRAMIS_COVARIANCE_READY,
+        )
+        state.candidate.factors .= -77.0
+        frozen = (
+            committed=gram_is_proposal_state_snapshot(state.committed),
+            run=gram_is_proposal_state_snapshot(state.run),
+        )
+        expected = similar(state.candidate.factors)
+        for slot in axes(expected, 3)
+            expected[:, :, slot] .= Matrix(LinearAlgebra.cholesky(
+                LinearAlgebra.Hermitian(state.workspace.covariances[:, :, slot]),
+            ).L)
+        end
+        info = fill(-99, 2)
+
+        GRAMISKernelIS._update_local_covariances!(
+            GRAMISKernelIS.MLDataDevices.CPUDevice(),
+            state,
+            1,
+            info,
+            execution,
+        )
+
+        @test info == [0, 0]
+        @test state.candidate.factors ≈ expected rtol = 16eps(Float64)
+        @test gram_is_proposal_state_snapshot(state.committed) == frozen.committed
+        @test gram_is_proposal_state_snapshot(state.run) == frozen.run
+    end
+end
+
+@testset "FirstOrderGRAMIS covariance failures preserve proposal state" begin
+    cases = (
+        nonfinite=(
+            first=[NaN 0.0; 0.0 1.0],
+            second=[2.0 0.0; 0.0 2.0],
+            failed_slot=1,
+        ),
+        nonpositive=(
+            first=[2.0 0.0; 0.0 2.0],
+            second=[1.0 2.0; 2.0 1.0],
+            failed_slot=2,
+        ),
+    )
+    for case in values(cases), execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        state = gram_is_covariance_update_state(
+            Float64;
+            covariance_rate=1.0,
+            covariance_regularization=0.0,
+        )
+        state.workspace.covariances[:, :, 1] .= case.first
+        state.workspace.covariances[:, :, 2] .= case.second
+        fill!(
+            state.workspace.factor_status,
+            GRAMISKernelIS._GRAMIS_COVARIANCE_READY,
+        )
+        state.candidate.factors .= -77.0
+        frozen = (
+            committed=gram_is_proposal_state_snapshot(state.committed),
+            run=gram_is_proposal_state_snapshot(state.run),
+        )
+        candidate_locations = copy(state.candidate.locations)
+        candidate_lognormalizers = copy(state.candidate.lognormalizers)
+        info = fill(-99, 2)
+
+        GRAMISKernelIS._update_local_covariances!(
+            GRAMISKernelIS.MLDataDevices.CPUDevice(),
+            state,
+            1,
+            info,
+            execution,
+        )
+
+        @test count(!iszero, info) == 1
+        @test !iszero(info[case.failed_slot])
+        @test gram_is_proposal_state_snapshot(state.committed) == frozen.committed
+        @test gram_is_proposal_state_snapshot(state.run) == frozen.run
+        @test state.candidate.factors == frozen.run.factors
+        @test state.candidate.locations == candidate_locations
+        @test state.candidate.lognormalizers == candidate_lognormalizers
+    end
+end
+
+@testset "FirstOrderGRAMIS covariance fallbacks bypass blend ridge and factorization" begin
+    poison = [NaN Inf; -Inf NaN]
+    for fallback_status in (
+        GRAMISKernelIS._GRAMIS_ALL_ZERO_LOCAL,
+        GRAMISKernelIS._GRAMIS_TEMPERING_FALLBACK,
+    ), execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        state = gram_is_covariance_update_state(
+            Float64;
+            covariance_rate=0.5,
+            covariance_regularization=0.25,
+        )
+        state.workspace.samples .= [
+            -1.0 1.0 0.0 0.0 8.0 10.0 12.0 10.0
+            0.0 0.0 -1.0 1.0 10.0 8.0 10.0 12.0
+        ]
+        if fallback_status == GRAMISKernelIS._GRAMIS_ALL_ZERO_LOCAL
+            state.workspace.local_logweights .= [
+                -Inf,
+                -Inf,
+                -Inf,
+                -Inf,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ]
+        else
+            state.workspace.local_logweights .= [
+                floatmax(Float64),
+                -floatmax(Float64),
+                -floatmax(Float64),
+                -floatmax(Float64),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ]
+        end
+        GRAMISKernelIS._fit_local_covariances!(state, 1, execution)
+        @test state.workspace.factor_status[1] == fallback_status
+        @test state.workspace.factor_status[2] ==
+              GRAMISKernelIS._GRAMIS_COVARIANCE_READY
+
+        state.workspace.covariances[:, :, 1] .= poison
+        state.workspace.covariances[:, :, 2] .= [2.0 0.0; 0.0 3.0]
+        state.candidate.factors .= -77.0
+        frozen = (
+            committed=gram_is_proposal_state_snapshot(state.committed),
+            run=gram_is_proposal_state_snapshot(state.run),
+        )
+        frozen_poison = bitstring.(state.workspace.covariances[:, :, 1])
+        info = fill(-99, 2)
+
+        GRAMISKernelIS._update_local_covariances!(
+            GRAMISKernelIS.MLDataDevices.CPUDevice(),
+            state,
+            1,
+            info,
+            execution,
+        )
+
+        @test info == [0, 0]
+        @test bitstring.(state.workspace.covariances[:, :, 1]) == frozen_poison
+        @test state.candidate.factors[:, :, 1] == state.run.factors[:, :, 1]
+        @test all(isfinite, state.candidate.factors[:, :, 2])
+        @test state.candidate.factors[:, :, 2] != state.run.factors[:, :, 2]
+        @test gram_is_proposal_state_snapshot(state.committed) == frozen.committed
+        @test gram_is_proposal_state_snapshot(state.run) == frozen.run
+    end
+end
