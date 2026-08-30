@@ -1,5 +1,6 @@
 using Test
 using ImportanceSamplers
+import LinearAlgebra
 import Random
 
 const GRAMISKernelIS = ImportanceSamplers
@@ -338,4 +339,273 @@ end
         (round_sums[round] / round_sizes[round]) for round in 1:2
     )
     @test combined == sum(round_sums) / sum(round_sizes) == 19//276
+end
+
+function gram_is_local_covariance_fixture(::Type{T}) where {T}
+    bank = ProposalBank([
+        FactorGaussian(T[10], reshape(T[2], 1, 1)),
+        FactorGaussian(T[20], reshape(T[3], 1, 1)),
+        FactorGaussian(T[100], reshape(T[4], 1, 1)),
+    ])
+    algorithm = FirstOrderGRAMIS(
+        bank;
+        rounds=1,
+        round_size=12,
+        repulsion_strength=zero(T),
+        covariance_ess_threshold=3,
+    )
+    state = GRAMISKernelIS._prepare_method_state(algorithm)
+    state.workspace.samples .= reshape(
+        T[0, 2, 4, 6, 0, 2, 4, 6, 0, 1, 2, 4],
+        1,
+        :,
+    )
+    state.workspace.local_logweights .= T[
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -Inf,
+        log(T(8)),
+        0,
+        0,
+        0,
+    ]
+    return state
+end
+
+@testset "FirstOrderGRAMIS CAIS covariance centering oracle" begin
+    for T in (Float32, Float64), execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        state = gram_is_local_covariance_fixture(T)
+        locations = copy(state.run.locations)
+        factors = copy(state.run.factors)
+        lognormalizers = copy(state.run.lognormalizers)
+
+        @test @inferred(
+            GRAMISKernelIS._fit_local_covariances!(state, 1, execution)
+        ) === nothing
+
+        workspace = state.workspace
+        @test workspace.factor_status == fill(
+            GRAMISKernelIS._GRAMIS_COVARIANCE_READY,
+            3,
+        )
+        @test workspace.local_ess[1] == T(4)
+        @test workspace.local_ess[2] == T(3)
+        @test workspace.tempering_powers[1:2] == ones(T, 2)
+        @test workspace.normalized_weights[1:4] == fill(T(0.25), 4)
+        @test workspace.normalized_weights[5:8] == T[1 / 3, 1 / 3, 1 / 3, 0]
+        @test workspace.covariances[1, 1, 1] ≈ T(54) rtol = 8eps(T)
+        @test workspace.covariances[1, 1, 2] ≈ T(980 / 3) rtol = 8eps(T)
+
+        expected_power = T(0.5283203125)
+        @test workspace.tempering_powers[3] == expected_power
+        @test workspace.local_ess[3] >= T(3)
+        upper_power = T(0.52838134765625)
+        upper_ratio = T(8)^upper_power
+        upper_ess = abs2(upper_ratio + T(3)) / (abs2(upper_ratio) + T(3))
+        @test upper_ess < T(3)
+        @test workspace.covariances[1, 1, 3] ≈
+              T(2.1388893102660655) rtol = 64eps(T)
+
+        @test state.run.locations == locations
+        @test state.run.factors == factors
+        @test state.run.lognormalizers == lognormalizers
+    end
+end
+
+function gram_is_stability_fixture(::Type{T}, execution) where {T}
+    bank = ProposalBank([
+        FactorGaussian(T[0, 0], T[2 0; 1 3]),
+        FactorGaussian(T[10, 10], T[1 0; 0 1]),
+    ])
+    state = GRAMISKernelIS._prepare_method_state(FirstOrderGRAMIS(
+        bank;
+        rounds=1,
+        round_size=8,
+        repulsion_strength=zero(T),
+        covariance_ess_threshold=3,
+        tempering_tolerance=T(1.0e-8),
+        tempering_max_iterations=16,
+    ))
+    state.workspace.samples .= T[
+        -1 1 0 0 8 10 12 10
+        0 0 -1 1 10 8 10 12
+    ]
+    state.workspace.local_logweights .= T[
+        floatmax(T),
+        -floatmax(T),
+        -floatmax(T),
+        -floatmax(T),
+        0,
+        0,
+        0,
+        0,
+    ]
+    GRAMISKernelIS._fit_local_covariances!(state, 1, execution)
+    return state
+end
+
+@testset "FirstOrderGRAMIS bounded tempering stability" begin
+    serial = gram_is_stability_fixture(
+        Float64,
+        GRAMISKernelIS._SerialCPUExecution(),
+    )
+    threaded = gram_is_stability_fixture(
+        Float64,
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+
+    for state in (serial, threaded)
+        workspace = state.workspace
+        @test state.plan.counts[:, 1] == [4, 4]
+        @test state.covariance_ess_threshold[:, 1] == [3, 3]
+        @test workspace.factor_status == UInt8[
+            GRAMISKernelIS._GRAMIS_TEMPERING_FALLBACK,
+            GRAMISKernelIS._GRAMIS_COVARIANCE_READY,
+        ]
+        @test workspace.tempering_powers == [0.0, 1.0]
+        @test workspace.local_ess == [1.0, 4.0]
+        @test workspace.covariances[:, :, 1] == [4.0 2.0; 2.0 10.0]
+        @test workspace.covariances[:, :, 2] == [2.0 0.0; 0.0 2.0]
+        @test all(
+            covariance -> LinearAlgebra.issymmetric(covariance),
+            eachslice(workspace.covariances; dims=3),
+        )
+    end
+
+    @test serial.workspace.normalized_weights ==
+          threaded.workspace.normalized_weights
+    @test serial.workspace.local_ess == threaded.workspace.local_ess
+    @test serial.workspace.tempering_powers ==
+          threaded.workspace.tempering_powers
+    @test serial.workspace.factor_status == threaded.workspace.factor_status
+    @test serial.workspace.covariances == threaded.workspace.covariances
+end
+
+@testset "FirstOrderGRAMIS m - 1 raw ESS threshold" begin
+    T = Float64
+    bank = ProposalBank([
+        FactorGaussian(T[0, 0], T[1 0; 0 1]),
+        FactorGaussian(T[10, 10], T[1 0; 0 1]),
+    ])
+    state = GRAMISKernelIS._prepare_method_state(FirstOrderGRAMIS(
+        bank;
+        rounds=1,
+        round_size=10,
+        repulsion_strength=zero(T),
+        covariance_ess_threshold=4,
+    ))
+    state.workspace.samples .= 0
+    state.workspace.local_logweights .= [
+        0,
+        0,
+        0,
+        0,
+        -Inf,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ]
+
+    GRAMISKernelIS._fit_local_covariances!(
+        state,
+        1,
+        GRAMISKernelIS._SerialCPUExecution(),
+    )
+
+    @test state.plan.counts[:, 1] == [5, 5]
+    @test state.covariance_ess_threshold[:, 1] == [4, 4]
+    @test state.workspace.local_ess == [4.0, 5.0]
+    @test state.workspace.tempering_powers == [1.0, 1.0]
+    @test state.workspace.factor_status == fill(
+        GRAMISKernelIS._GRAMIS_COVARIANCE_READY,
+        2,
+    )
+end
+
+@testset "FirstOrderGRAMIS computes local group starts once" begin
+    counts = [3 5; 4 3; 5 4]
+    starts = zeros(Int, 3)
+
+    @test @inferred(GRAMISKernelIS._local_group_starts!(
+        starts,
+        counts,
+        2,
+        GRAMISKernelIS._SerialCPUExecution(),
+    )) === nothing
+    @test starts == [1, 6, 9]
+end
+
+@testset "FirstOrderGRAMIS Float32 accepted ESS matches published weights" begin
+    T = Float32
+    bank = ProposalBank([
+        FactorGaussian(T[0], reshape(T[1], 1, 1)),
+        FactorGaussian(T[10], reshape(T[1], 1, 1)),
+    ])
+    state = GRAMISKernelIS._prepare_method_state(FirstOrderGRAMIS(
+        bank;
+        rounds=1,
+        round_size=16,
+        repulsion_strength=zero(T),
+        covariance_ess_threshold=3,
+    ))
+    state.workspace.samples .= zero(T)
+    state.workspace.local_logweights .= T[
+        -2.2072423,
+        -2.450517,
+        0.959949,
+        -1.0785025,
+        2.3158128,
+        -2.0148082,
+        0.7158158,
+        -2.0185878,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ]
+
+    GRAMISKernelIS._fit_local_covariances!(
+        state,
+        1,
+        GRAMISKernelIS._SerialCPUExecution(),
+    )
+
+    workspace = state.workspace
+    accepted_weights = view(workspace.normalized_weights, 1:8)
+    accepted_power_ess = GRAMISKernelIS._gramis_power_ess(
+        workspace.local_logweights,
+        1,
+        8,
+        workspace.tempering_powers[1],
+        T,
+    )
+    @test workspace.factor_status[1] ==
+          GRAMISKernelIS._GRAMIS_COVARIANCE_READY
+    @test workspace.local_ess[1] >= T(3)
+    @test workspace.local_ess[1] == accepted_power_ess
+    @test sum(accepted_weights) ≈ one(T) rtol = 4eps(T)
+    maximum_index = argmax(view(workspace.local_logweights, 1:8))
+    for index in eachindex(accepted_weights)
+        expected_ratio = exp(
+            workspace.tempering_powers[1] *
+            (workspace.local_logweights[index] -
+             workspace.local_logweights[maximum_index]),
+        )
+        @test accepted_weights[index] / accepted_weights[maximum_index] ≈
+              expected_ratio rtol = 8eps(T)
+    end
 end

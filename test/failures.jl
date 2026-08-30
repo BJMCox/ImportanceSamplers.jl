@@ -1126,3 +1126,67 @@ end
               "intentional AMIS result copy failure"
     end
 end
+
+function gram_is_all_zero_local_state(all_groups)
+    T = Float64
+    bank = ProposalBank([
+        FactorGaussian(T[0, 0], T[2 0; 1 3]),
+        FactorGaussian(T[10, 10], T[1 0; 0.5 2]),
+    ])
+    state = ImportanceSamplers._prepare_method_state(FirstOrderGRAMIS(
+        bank;
+        rounds=1,
+        round_size=8,
+        repulsion_strength=zero(T),
+        covariance_ess_threshold=3,
+    ))
+    state.workspace.samples .= T[
+        -1 1 0 0 8 10 12 10
+        0 0 -1 1 10 8 10 12
+    ]
+    local_logweights = all_groups ?
+                       fill(T(-Inf), 8) :
+                       T[-Inf, -Inf, -Inf, -Inf, 0, 0, 0, 0]
+    state.workspace.local_logweights .= local_logweights
+    return state
+end
+
+@testset "FirstOrderGRAMIS all-zero local covariance fallback" begin
+    expected_covariances = (
+        [4.0 2.0; 2.0 10.0],
+        [1.0 0.5; 0.5 4.25],
+    )
+    for all_groups in (false, true)
+        state = gram_is_all_zero_local_state(all_groups)
+        candidate_locations = copy(state.candidate.locations)
+        candidate_factors = copy(state.candidate.factors)
+        candidate_lognormalizers = copy(state.candidate.lognormalizers)
+
+        ImportanceSamplers._fit_local_covariances!(
+            state,
+            1,
+            ImportanceSamplers._SerialCPUExecution(),
+        )
+
+        @test state.workspace.factor_status[1] ==
+              ImportanceSamplers._GRAMIS_ALL_ZERO_LOCAL
+        @test state.workspace.covariances[:, :, 1] == expected_covariances[1]
+        @test state.workspace.local_ess[1] == 0
+        @test state.workspace.tempering_powers[1] == 0
+        if all_groups
+            @test state.workspace.factor_status == fill(
+                ImportanceSamplers._GRAMIS_ALL_ZERO_LOCAL,
+                2,
+            )
+            @test state.workspace.covariances[:, :, 2] == expected_covariances[2]
+            @test state.workspace.local_ess == zeros(2)
+            @test state.workspace.tempering_powers == zeros(2)
+        else
+            @test state.workspace.factor_status[2] ==
+                  ImportanceSamplers._GRAMIS_COVARIANCE_READY
+        end
+        @test state.candidate.locations == candidate_locations
+        @test state.candidate.factors == candidate_factors
+        @test state.candidate.lognormalizers == candidate_lognormalizers
+    end
+end

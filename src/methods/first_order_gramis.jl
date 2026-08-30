@@ -236,10 +236,11 @@ function _first_order_gramis_default_threshold(sample_count)
     return 3 * quotient + cld(3 * remainder, 10)
 end
 
-struct _FirstOrderGRAMISWorkspace{S,L,N,C,G,A,P,R,F,E,W,B}
+struct _FirstOrderGRAMISWorkspace{S,L,N,O,C,G,A,P,R,F,E,W,B}
     samples::S
     local_logweights::L
     normalized_weights::N
+    local_starts::O
     covariances::C
     gradients::G
     active_mask::A
@@ -476,6 +477,7 @@ function _allocate_first_order_gramis_workspace(bank, plan, ::Type{L}) where {L}
         similar(prototype, T, dimension, capacity),
         similar(prototype, L, capacity),
         similar(prototype, T, capacity),
+        similar(prototype, Int, proposal_count),
         similar(prototype, T, dimension, dimension, proposal_count),
         similar(prototype, T, dimension, proposal_count),
         similar(prototype, Bool, proposal_count),

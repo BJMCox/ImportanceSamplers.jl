@@ -263,6 +263,7 @@ end
     @test size(workspace.samples) == (2, 17)
     @test size(workspace.local_logweights) == (17,)
     @test size(workspace.normalized_weights) == (17,)
+    @test size(workspace.local_starts) == (3,)
     @test size(workspace.covariances) == (2, 2, 3)
     @test size(workspace.gradients) == (2, 3)
     @test size(workspace.active_mask) == (3,)
