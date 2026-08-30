@@ -236,12 +236,19 @@ function _first_order_gramis_default_threshold(sample_count)
     return 3 * quotient + cld(3 * remainder, 10)
 end
 
-struct _FirstOrderGRAMISWorkspace{S,L,N,O,C,G,A,P,R,F,E,W,B}
+struct _FirstOrderGRAMISWorkspace{S,L,I,N,Q,O,C,G,A,P,R,F,E,W,B}
     samples::S
+    round_logweights::L
     local_logweights::L
+    generating_logdensities::L
+    round_proposal_ids::I
+    round_ids::I
     normalized_weights::N
+    solve_scratch::Q
     local_starts::O
     covariances::C
+    pooled_covariance::S
+    whitened_means::G
     gradients::G
     frozen_values::P
     candidate_values::P
@@ -250,6 +257,7 @@ struct _FirstOrderGRAMISWorkspace{S,L,N,O,C,G,A,P,R,F,E,W,B}
     steps::P
     repulsion::R
     factor_status::F
+    factor_info::I
     local_ess::E
     tempering_powers::W
     backtracking_trials::B
@@ -479,9 +487,16 @@ function _allocate_first_order_gramis_workspace(bank, plan, ::Type{L}) where {L}
     return _FirstOrderGRAMISWorkspace(
         similar(prototype, T, dimension, capacity),
         similar(prototype, L, capacity),
+        similar(prototype, L, capacity),
+        similar(prototype, L, capacity),
+        similar(prototype, Int, capacity),
+        similar(prototype, Int, capacity),
         similar(prototype, T, capacity),
+        _allocate_mis_solve_scratch(prototype, bank, capacity),
         similar(prototype, Int, proposal_count),
         similar(prototype, T, dimension, dimension, proposal_count),
+        similar(prototype, T, dimension, dimension),
+        similar(prototype, T, dimension, proposal_count),
         similar(prototype, T, dimension, proposal_count),
         similar(prototype, T, proposal_count),
         similar(prototype, T, proposal_count),
@@ -490,6 +505,7 @@ function _allocate_first_order_gramis_workspace(bank, plan, ::Type{L}) where {L}
         similar(prototype, T, proposal_count),
         similar(prototype, T, dimension, proposal_count),
         similar(prototype, UInt8, proposal_count),
+        similar(prototype, Int, proposal_count),
         similar(prototype, T, proposal_count),
         similar(prototype, T, proposal_count),
         similar(prototype, Int, proposal_count),

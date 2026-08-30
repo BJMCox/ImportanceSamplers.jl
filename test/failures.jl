@@ -1,6 +1,7 @@
 using Test
 using ImportanceSamplers
 import DensityInterface
+import KernelAbstractions
 import LinearAlgebra
 import MLDataDevices
 import Random
@@ -97,6 +98,176 @@ Base.getindex(array::AMISResultFailureArray, indices...) =
 Base.setindex!(array::AMISResultFailureArray, value, indices...) =
     setindex!(array.storage, value, indices...)
 Base.copy(::AMISResultFailureArray) = error("intentional AMIS result copy failure")
+
+struct GRAMISInvalidDiagnosticPrototype{A<:AbstractVector{Float64}} <:
+       AbstractVector{Float64}
+    storage::A
+end
+
+Base.size(array::GRAMISInvalidDiagnosticPrototype) = size(array.storage)
+Base.IndexStyle(::Type{<:GRAMISInvalidDiagnosticPrototype}) = IndexLinear()
+Base.getindex(array::GRAMISInvalidDiagnosticPrototype, index::Int) =
+    array.storage[index]
+Base.setindex!(array::GRAMISInvalidDiagnosticPrototype, value, index::Int) =
+    setindex!(array.storage, value, index)
+function Base.similar(
+    array::GRAMISInvalidDiagnosticPrototype,
+    ::Type{T},
+    dimensions::Int...,
+) where {T}
+    length(dimensions) == 2 && return Matrix{Any}(undef, dimensions...)
+    return similar(array.storage, T, dimensions...)
+end
+
+KernelAbstractions.get_backend(::GRAMISInvalidDiagnosticPrototype) =
+    KernelAbstractions.CPU()
+
+mutable struct GRAMISOneShotFailure
+    armed::Bool
+end
+
+struct GRAMISResultAllocationFailureArray{T,N,A<:AbstractArray{T,N}} <:
+       AbstractArray{T,N}
+    storage::A
+    failure::GRAMISOneShotFailure
+end
+
+Base.size(array::GRAMISResultAllocationFailureArray) = size(array.storage)
+Base.IndexStyle(::Type{<:GRAMISResultAllocationFailureArray}) = IndexCartesian()
+Base.getindex(array::GRAMISResultAllocationFailureArray, indices...) =
+    getindex(array.storage, indices...)
+Base.setindex!(array::GRAMISResultAllocationFailureArray, value, indices...) =
+    setindex!(array.storage, value, indices...)
+KernelAbstractions.get_backend(::GRAMISResultAllocationFailureArray) =
+    KernelAbstractions.CPU()
+function Base.similar(
+    array::GRAMISResultAllocationFailureArray,
+    ::Type{T},
+    dimensions::Int...,
+) where {T}
+    if array.failure.armed
+        array.failure.armed = false
+        error("intentional GRAMIS result allocation failure")
+    end
+    return similar(array.storage, T, dimensions...)
+end
+
+struct GRAMISCollectFailureSchedule{A<:AbstractVector{Int}} <:
+       AbstractVector{Int}
+    storage::A
+    failure::GRAMISOneShotFailure
+end
+
+Base.size(schedule::GRAMISCollectFailureSchedule) = size(schedule.storage)
+Base.IndexStyle(::Type{<:GRAMISCollectFailureSchedule}) = IndexLinear()
+Base.getindex(schedule::GRAMISCollectFailureSchedule, index::Int) =
+    schedule.storage[index]
+function Base.collect(schedule::GRAMISCollectFailureSchedule)
+    if schedule.failure.armed
+        schedule.failure.armed = false
+        error("intentional GRAMIS diagnostic assembly failure")
+    end
+    return collect(schedule.storage)
+end
+
+mutable struct GRAMISTransactionTarget{T}
+    fail::Bool
+    calls::Int
+end
+
+mutable struct GRAMISPhaseTarget{T}
+    calls::Int
+    fail_at::Int
+end
+
+mutable struct GRAMISProposalInjectionTarget{T}
+    calls::Int
+    inject_at::Int
+end
+
+function (target::GRAMISProposalInjectionTarget{T})(sample)::T where {T}
+    target.calls += 1
+    target.calls == target.inject_at && (sample[1] = T(NaN))
+    return zero(T)
+end
+
+function (target::GRAMISPhaseTarget{T})(sample)::T where {T}
+    target.calls += 1
+    target.calls == target.fail_at &&
+        error("intentional GRAMIS phase target failure")
+    return -T(0.5) * sum(abs2, sample)
+end
+
+mutable struct GRAMISPhaseGradient
+    calls::Int
+    fail_at::Int
+end
+
+function (gradient::GRAMISPhaseGradient)(destination, sample)
+    gradient.calls += 1
+    if gradient.calls == gradient.fail_at
+        fill!(destination, eltype(destination)(NaN))
+        return destination
+    end
+    destination .= -sample
+    return destination
+end
+
+mutable struct GRAMISWriteFailure
+    armed::Bool
+    writes::Int
+    fail_at::Int
+end
+
+struct GRAMISResultCopyFailureArray{T,N,A<:AbstractArray{T,N}} <:
+       AbstractArray{T,N}
+    storage::A
+    failure::GRAMISWriteFailure
+    output::Bool
+end
+
+Base.size(array::GRAMISResultCopyFailureArray) = size(array.storage)
+Base.IndexStyle(::Type{<:GRAMISResultCopyFailureArray}) = IndexCartesian()
+Base.getindex(array::GRAMISResultCopyFailureArray, indices...) =
+    getindex(array.storage, indices...)
+function Base.setindex!(
+    array::GRAMISResultCopyFailureArray,
+    value,
+    indices...,
+)
+    if array.output && array.failure.armed
+        array.failure.writes += 1
+        if array.failure.writes == array.failure.fail_at
+            array.failure.armed = false
+            error("intentional GRAMIS round-two diagnostic copy failure")
+        end
+    end
+    return setindex!(array.storage, value, indices...)
+end
+KernelAbstractions.get_backend(::GRAMISResultCopyFailureArray) =
+    KernelAbstractions.CPU()
+function Base.similar(
+    array::GRAMISResultCopyFailureArray,
+    ::Type{T},
+    dimensions::Int...,
+) where {T}
+    return GRAMISResultCopyFailureArray(
+        similar(array.storage, T, dimensions...),
+        array.failure,
+        true,
+    )
+end
+
+function (target::GRAMISTransactionTarget{T})(sample)::T where {T}
+    target.calls += 1
+    target.fail && error("intentional FirstOrderGRAMIS target failure")
+    return -T(0.5) * sum(abs2, sample)
+end
+
+function gram_is_transaction_gradient!(destination, sample)
+    destination .= -sample
+    return destination
+end
 
 function LinearAlgebra.mul!(
     destination::AMISMomentFailureMatrix,
@@ -1384,4 +1555,642 @@ end
         @test steps == zeros(T, 2)
         @test trials == fill(max_trials, 2)
     end
+end
+
+function gram_is_transaction_sampler(; invalid_diagnostics=false)
+    T = Float64
+    bank = ProposalBank([
+        FactorGaussian(T[-2], reshape(T[0.75], 1, 1)),
+        FactorGaussian(T[2], reshape(T[1.25], 1, 1)),
+    ])
+    target = GRAMISTransactionTarget{T}(false, 0)
+    sampler = prepare_sampler(
+        AMISFailureRNG(fill(T[-1, 0, 1, -1, 0, 1], 8)),
+        LogTarget(target; grad=gram_is_transaction_gradient!),
+        FirstOrderGRAMIS(
+            bank;
+            rounds=1,
+            round_size=6,
+            repulsion_strength=zero(T),
+            covariance_ess_threshold=2,
+        );
+        threaded=false,
+    )
+    invalid_diagnostics || return sampler, target
+
+    state = sampler.method_state
+    workspace = state.workspace
+    workspace_values = map(fieldnames(typeof(workspace))) do name
+        name === :local_ess ?
+        GRAMISInvalidDiagnosticPrototype(workspace.local_ess) :
+        getfield(workspace, name)
+    end
+    invalid_workspace = ImportanceSamplers._FirstOrderGRAMISWorkspace(
+        workspace_values...,
+    )
+    invalid_state = ImportanceSamplers._PreparedFirstOrderGRAMIS(
+        state.committed,
+        state.run,
+        state.candidate,
+        state.plan,
+        state.repulsion_strength,
+        state.covariance_rate,
+        state.covariance_ess_threshold,
+        state.covariance_regularization,
+        state.tempering_tolerance,
+        state.tempering_max_iterations,
+        state.repulsion_softening,
+        state.max_backtracking_trials,
+        state.serial_gradient,
+        state.threaded_gradient,
+        invalid_workspace,
+    )
+    invalid_sampler = ImportanceSamplers._PreparedImportanceSampler(
+        sampler.rng,
+        sampler.random_buffers,
+        sampler.target,
+        sampler.algorithm,
+        invalid_state,
+        sampler.device,
+        sampler.factor_execution,
+        sampler.threaded,
+        false,
+        false,
+    )
+    return invalid_sampler, target
+end
+
+function gram_is_two_round_phase_sampler(; diagnostic_copy_failure=false)
+    T = Float64
+    bank = ProposalBank([
+        FactorGaussian(T[-2], reshape(T[0.75], 1, 1)),
+        FactorGaussian(T[2], reshape(T[1.25], 1, 1)),
+    ])
+    target = GRAMISPhaseTarget{T}(0, typemax(Int))
+    gradient = GRAMISPhaseGradient(0, typemax(Int))
+    sampler = prepare_sampler(
+        AMISFailureRNG(fill(T[-1, 0, 1, -1, 0, 1], 16)),
+        LogTarget(target; grad=gradient),
+        FirstOrderGRAMIS(
+            bank;
+            rounds=2,
+            round_size=6,
+            repulsion_strength=zero(T),
+            covariance_ess_threshold=2,
+        );
+        threaded=false,
+    )
+    diagnostic_copy_failure || return sampler, target, gradient
+
+    state = sampler.method_state
+    write_failure = GRAMISWriteFailure(true, 0, 7)
+    workspace_values = map(fieldnames(typeof(state.workspace))) do name
+        value = getfield(state.workspace, name)
+        name in (:samples, :pooled_covariance) ?
+        GRAMISResultCopyFailureArray(value, write_failure, false) : value
+    end
+    workspace = ImportanceSamplers._FirstOrderGRAMISWorkspace(
+        workspace_values...,
+    )
+    return gram_is_rebuild_sampler(sampler, workspace), target, gradient
+end
+
+function gram_is_proposal_phase_sampler()
+    T = Float64
+    bank = ProposalBank([
+        FactorGaussian(T[-2], reshape(T[0.75], 1, 1)),
+        FactorGaussian(T[2], reshape(T[1.25], 1, 1)),
+    ])
+    target = GRAMISProposalInjectionTarget{T}(0, 19)
+    return prepare_sampler(
+        AMISFailureRNG(fill(T[-1, 0, 1, -1, 0, 1], 16)),
+        LogTarget(target; grad=gram_is_transaction_gradient!),
+        FirstOrderGRAMIS(
+            bank;
+            rounds=2,
+            round_size=6,
+            repulsion_strength=zero(T),
+            covariance_ess_threshold=2,
+        );
+        threaded=false,
+    )
+end
+
+function gram_is_population_bits(sampler)
+    proposal = current_proposal(sampler)
+    return map(proposal.proposals) do component
+        (
+            map(bitstring, component.location),
+            map(bitstring, component.scale.factor),
+            bitstring(component.lognormalizer),
+        )
+    end
+end
+
+function gram_is_pointer_roles_valid(sampler)
+    state = sampler.method_state
+    banks = (state.committed, state.run, state.candidate)
+    return banks[1] !== banks[2] && banks[1] !== banks[3] &&
+           banks[2] !== banks[3] &&
+           banks[1].locations !== banks[2].locations &&
+           banks[1].locations !== banks[3].locations &&
+           banks[2].locations !== banks[3].locations
+end
+
+function gram_is_rebuild_sampler(sampler, workspace)
+    state = sampler.method_state
+    rebuilt_state = ImportanceSamplers._PreparedFirstOrderGRAMIS(
+        state.committed,
+        state.run,
+        state.candidate,
+        state.plan,
+        state.repulsion_strength,
+        state.covariance_rate,
+        state.covariance_ess_threshold,
+        state.covariance_regularization,
+        state.tempering_tolerance,
+        state.tempering_max_iterations,
+        state.repulsion_softening,
+        state.max_backtracking_trials,
+        state.serial_gradient,
+        state.threaded_gradient,
+        workspace,
+    )
+    return ImportanceSamplers._PreparedImportanceSampler(
+        sampler.rng,
+        sampler.random_buffers,
+        sampler.target,
+        sampler.algorithm,
+        rebuilt_state,
+        sampler.device,
+        sampler.factor_execution,
+        sampler.threaded,
+        false,
+        sampler.executed,
+    )
+end
+
+function gram_is_rebuild_sampler(sampler, workspace, plan)
+    state = sampler.method_state
+    rebuilt_state = ImportanceSamplers._PreparedFirstOrderGRAMIS(
+        state.committed,
+        state.run,
+        state.candidate,
+        plan,
+        state.repulsion_strength,
+        state.covariance_rate,
+        state.covariance_ess_threshold,
+        state.covariance_regularization,
+        state.tempering_tolerance,
+        state.tempering_max_iterations,
+        state.repulsion_softening,
+        state.max_backtracking_trials,
+        state.serial_gradient,
+        state.threaded_gradient,
+        workspace,
+    )
+    return ImportanceSamplers._PreparedImportanceSampler(
+        sampler.rng,
+        sampler.random_buffers,
+        sampler.target,
+        sampler.algorithm,
+        rebuilt_state,
+        sampler.device,
+        sampler.factor_execution,
+        sampler.threaded,
+        false,
+        sampler.executed,
+    )
+end
+
+function gram_is_full_error_diagnostics(
+    failure,
+    round,
+    completed,
+    round_size,
+    cause_message,
+)
+    @test failure isa FirstOrderGRAMISRoundError
+    @test failure.round == round
+    @test failure.phase === :result_construction
+    @test failure.cause isa ErrorException
+    @test failure.cause.msg == cause_message
+    @test failure.diagnostics.round_size == round_size
+    @test failure.diagnostics.completed_rounds == completed
+    @test failure.diagnostics.covariance === nothing
+    @test failure.diagnostics.derivative === nothing
+    @test failure.diagnostics.transfers isa
+          ImportanceSamplers._ResultTransferCounter
+    @test failure.diagnostics.transfers.count == 0
+    @test failure.diagnostics.transfers.bytes == 0
+    @test failure.diagnostics.pre_call_state_preserved === true
+end
+
+@testset "FirstOrderGRAMIS CPU failure seams preserve zero transfers" begin
+    device = MLDataDevices.CPUDevice()
+    execution = ImportanceSamplers._SerialCPUExecution()
+
+    transfers = ImportanceSamplers._ResultTransferCounter(0, 0)
+    proposal_failure = caught_exception() do
+        ImportanceSamplers._add_first_order_gramis_repulsion!(
+            device,
+            reshape([NaN, 0.0], 1, 2),
+            zeros(1, 2),
+            transfers,
+            execution,
+        )
+    end
+    @test proposal_failure isa ImportanceSamplers._FirstOrderGRAMISProposalError
+    @test proposal_failure.proposal_slot == 1
+    @test proposal_failure.reason === :location_nonfinite
+    @test isnan(proposal_failure.value)
+    @test transfers.count == 0
+    @test transfers.bytes == 0
+
+    sampler, _ = gram_is_transaction_sampler()
+    candidate = sampler.method_state.candidate
+    candidate.factors[1, 1, 1] = NaN
+    transfers = ImportanceSamplers._ResultTransferCounter(0, 0)
+    factor_failure = caught_exception() do
+        ImportanceSamplers._validate_first_order_gramis_candidate_factors!(
+            device,
+            candidate,
+            zeros(UInt8, 2),
+            transfers,
+            execution,
+        )
+    end
+    @test factor_failure isa ImportanceSamplers._FirstOrderGRAMISProposalError
+    @test factor_failure.proposal_slot == 1
+    @test factor_failure.reason === :factor_nonfinite
+    @test isnan(factor_failure.value)
+    @test transfers.count == 0
+    @test transfers.bytes == 0
+
+    transfers = ImportanceSamplers._ResultTransferCounter(0, 0)
+    covariance_failure = caught_exception() do
+        ImportanceSamplers._throw_first_order_gramis_covariance_failure(
+            device,
+            [-1, 0],
+            transfers,
+            execution,
+        )
+    end
+    @test covariance_failure isa
+          ImportanceSamplers._FirstOrderGRAMISCovarianceError
+    @test covariance_failure.proposal_slot == 1
+    @test covariance_failure.info == -1
+    @test transfers.count == 0
+    @test transfers.bytes == 0
+end
+
+function gram_is_result_bits(result)
+    return (
+        samples=map(bitstring, result.samples),
+        logweights=map(bitstring, result.logweights),
+        provenance=deepcopy(result.provenance),
+        local_ess=map(bitstring, result.diagnostics.local_ess),
+        tempering_powers=map(bitstring, result.diagnostics.tempering_powers),
+        fallback_status=copy(result.diagnostics.fallback_status),
+        accepted_steps=map(bitstring, result.diagnostics.accepted_steps),
+        backtracking_trials=copy(result.diagnostics.backtracking_trials),
+        collision_counts=copy(result.diagnostics.collision_counts),
+    )
+end
+
+@testset "FirstOrderGRAMIS public round errors translate private phases" begin
+    sampler, _ = gram_is_transaction_sampler()
+    state = sampler.method_state
+    transfers = ImportanceSamplers._ResultTransferCounter(0, 0)
+    causes = (
+        (
+            ImportanceSamplers._FirstOrderGRAMISDerivativeError(
+                1,
+                :gradient_nonfinite,
+                NaN,
+            ),
+            :derivative,
+        ),
+        (
+            ImportanceSamplers._FirstOrderGRAMISRepulsionError(
+                1,
+                :force_nonfinite,
+                NaN,
+            ),
+            :repulsion,
+        ),
+        (ImportanceSamplers._FirstOrderGRAMISCovarianceError(1, 2), :covariance),
+        (
+            ImportanceSamplers._FirstOrderGRAMISProposalError(
+                1,
+                :location_nonfinite,
+                NaN,
+            ),
+            :proposal,
+        ),
+        (captured_sampler_execution_error(:target), :target),
+        (captured_sampler_execution_error(:proposal_logdensity), :denominator),
+        (captured_sampler_execution_error(:logweight), :weight),
+    )
+
+    for (cause, expected_phase) in causes
+        failure = caught_exception() do
+            ImportanceSamplers._capture_first_order_gramis_round(
+                state,
+                transfers,
+                1,
+                :backtracking,
+                0,
+            ) do
+                throw(cause)
+            end
+        end
+        @test failure isa FirstOrderGRAMISRoundError
+        @test failure.round == 1
+        @test failure.phase === expected_phase
+        @test failure.cause === cause
+        @test failure.diagnostics.round_size == 6
+        @test failure.diagnostics.completed_rounds == 0
+        @test failure.diagnostics.transfers === transfers
+        @test failure.diagnostics.pre_call_state_preserved === true
+    end
+end
+
+@testset "FirstOrderGRAMIS calls commit once and recover after failures" begin
+    sampler, target = gram_is_transaction_sampler()
+    initial = gram_is_population_bits(sampler)
+    target.fail = true
+    first_failure = caught_exception(() -> importance_sample!(sampler))
+    @test first_failure isa FirstOrderGRAMISRoundError
+    @test first_failure.phase === :target
+    @test first_failure.diagnostics.completed_rounds == 0
+    @test gram_is_population_bits(sampler) == initial
+    @test sampler.rng.index == 2
+
+    target.fail = false
+    first = importance_sample!(sampler)
+    committed = gram_is_population_bits(sampler)
+    @test committed != initial
+    retained_result = gram_is_result_bits(first)
+
+    target.fail = true
+    later_failure = caught_exception(() -> importance_sample!(sampler))
+    @test later_failure isa FirstOrderGRAMISRoundError
+    @test later_failure.phase === :target
+    @test gram_is_population_bits(sampler) == committed
+    @test sampler.rng.index == 4
+    @test gram_is_result_bits(first) == retained_result
+
+    target.fail = false
+    recovered = importance_sample!(sampler)
+    @test recovered isa WeightedSamples
+    @test length(recovered) == 6
+    @test sampler.rng.index == 5
+    @test !sampler.running
+end
+
+@testset "FirstOrderGRAMIS result construction failure rolls back" begin
+    sampler, _ = gram_is_transaction_sampler(; invalid_diagnostics=true)
+    before = gram_is_population_bits(sampler)
+    failure = caught_exception(() -> importance_sample!(sampler))
+
+    @test failure isa FirstOrderGRAMISRoundError
+    @test failure.phase === :result_construction
+    @test failure.cause isa ArgumentError
+    @test failure.diagnostics.completed_rounds == 1
+    @test failure.diagnostics.pre_call_state_preserved === true
+    @test gram_is_population_bits(sampler) == before
+    @test sampler.rng.index == 2
+    @test !sampler.running
+
+    invalid_workspace = sampler.method_state.workspace
+    workspace_values = map(fieldnames(typeof(invalid_workspace))) do name
+        name === :local_ess ?
+        invalid_workspace.local_ess.storage :
+        getfield(invalid_workspace, name)
+    end
+    valid_workspace = ImportanceSamplers._FirstOrderGRAMISWorkspace(
+        workspace_values...,
+    )
+    recovered_sampler = gram_is_rebuild_sampler(sampler, valid_workspace)
+    recovered = importance_sample!(recovered_sampler)
+    @test recovered isa WeightedSamples
+    @test gram_is_population_bits(recovered_sampler) != before
+    @test recovered_sampler.rng.index == 3
+end
+
+@testset "FirstOrderGRAMIS result allocation failures use the public contract" begin
+    base_sampler, _ = gram_is_transaction_sampler()
+    state = base_sampler.method_state
+    failure_switch = GRAMISOneShotFailure(true)
+    workspace_values = map(fieldnames(typeof(state.workspace))) do name
+        value = getfield(state.workspace, name)
+        name in (:samples, :pooled_covariance) ?
+        GRAMISResultAllocationFailureArray(value, failure_switch) : value
+    end
+    workspace = ImportanceSamplers._FirstOrderGRAMISWorkspace(
+        workspace_values...,
+    )
+    sampler = gram_is_rebuild_sampler(base_sampler, workspace)
+    before = gram_is_population_bits(sampler)
+
+    failure = caught_exception(() -> importance_sample!(sampler))
+    gram_is_full_error_diagnostics(
+        failure,
+        1,
+        0,
+        6,
+        "intentional GRAMIS result allocation failure",
+    )
+    @test occursin("result allocation", sprint(showerror, failure.cause))
+    @test gram_is_population_bits(sampler) == before
+    @test sampler.rng.index == 1
+    @test sampler.method_state.committed !== sampler.method_state.run
+    @test sampler.method_state.run !== sampler.method_state.candidate
+
+    recovered = importance_sample!(sampler)
+    @test recovered isa WeightedSamples
+    @test sampler.rng.index == 2
+    @test gram_is_population_bits(sampler) != before
+end
+
+@testset "FirstOrderGRAMIS diagnostic assembly failures use the public contract" begin
+    base_sampler, _ = gram_is_transaction_sampler()
+    state = base_sampler.method_state
+    plan = state.plan
+    schedule = GRAMISCollectFailureSchedule(
+        plan.schedule,
+        GRAMISOneShotFailure(true),
+    )
+    failing_plan = ImportanceSamplers._DeterministicAllocationPlan(
+        schedule,
+        plan.counts,
+        plan.assignments,
+        plan.logcoefficients,
+        plan.offsets,
+    )
+    sampler = gram_is_rebuild_sampler(base_sampler, state.workspace, failing_plan)
+    before = gram_is_population_bits(sampler)
+
+    failure = caught_exception(() -> importance_sample!(sampler))
+    gram_is_full_error_diagnostics(
+        failure,
+        1,
+        1,
+        6,
+        "intentional GRAMIS diagnostic assembly failure",
+    )
+    @test occursin("diagnostic assembly", sprint(showerror, failure.cause))
+    @test gram_is_population_bits(sampler) == before
+    @test sampler.rng.index == 2
+    @test sampler.method_state.committed !== sampler.method_state.run
+    @test sampler.method_state.run !== sampler.method_state.candidate
+
+    recovered = importance_sample!(sampler)
+    @test recovered isa WeightedSamples
+    @test sampler.rng.index == 3
+    @test gram_is_population_bits(sampler) != before
+end
+
+@testset "FirstOrderGRAMIS round-two failures preserve post-swap transactions" begin
+    cases = (
+        (name=:sampling, expected=:sampling, diagnostic=false),
+        (name=:target, expected=:target, diagnostic=false),
+        (name=:derivative, expected=:derivative, diagnostic=false),
+        (name=:covariance, expected=:covariance, diagnostic=false),
+        (name=:repulsion, expected=:repulsion, diagnostic=false),
+        (name=:diagnostics, expected=:diagnostics, diagnostic=true),
+    )
+
+    for case in cases
+        sampler, target, gradient = gram_is_two_round_phase_sampler(
+            ; diagnostic_copy_failure=case.diagnostic,
+        )
+        original_second_batch = copy(sampler.rng.batches[2])
+        original_covariance_rate = sampler.method_state.covariance_rate[2]
+        original_repulsion_strength = sampler.method_state.repulsion_strength[2]
+        if case.name === :sampling
+            sampler.rng.batches[2] = [0.0]
+        elseif case.name === :target
+            target.fail_at = 11
+        elseif case.name === :derivative
+            gradient.fail_at = 3
+        elseif case.name === :covariance
+            sampler.method_state.covariance_rate[2] = NaN
+        elseif case.name === :repulsion
+            sampler.method_state.repulsion_strength[2] = Inf
+        end
+
+        before = gram_is_population_bits(sampler)
+        failure = caught_exception(() -> importance_sample!(sampler))
+        @test failure isa FirstOrderGRAMISRoundError
+        @test failure.round == 2
+        @test failure.phase === case.expected
+        @test failure.diagnostics.round_size == 6
+        @test failure.diagnostics.completed_rounds ==
+              (case.name === :diagnostics ? 2 : 1)
+        @test failure.diagnostics.transfers isa
+              ImportanceSamplers._ResultTransferCounter
+        @test failure.diagnostics.transfers.count == 0
+        @test failure.diagnostics.transfers.bytes == 0
+        @test failure.diagnostics.pre_call_state_preserved === true
+        @test failure.cause !== nothing
+        if case.name === :covariance
+            @test failure.cause isa
+                  ImportanceSamplers._FirstOrderGRAMISCovarianceError
+            @test failure.cause.proposal_slot == 1
+            @test failure.cause.info == -1
+            @test failure.diagnostics.covariance !== nothing
+            @test failure.diagnostics.covariance.proposal_slot == 1
+            @test failure.diagnostics.covariance.info == -1
+            @test failure.diagnostics.derivative === nothing
+        elseif case.name === :derivative
+            @test failure.cause isa
+                  ImportanceSamplers._FirstOrderGRAMISDerivativeError
+            @test failure.cause.proposal_slot == 1
+            @test failure.cause.reason === :gradient_nonfinite
+            @test isnan(failure.cause.value)
+            @test failure.diagnostics.covariance === nothing
+            @test failure.diagnostics.derivative !== nothing
+            @test failure.diagnostics.derivative.proposal_slot == 1
+            @test failure.diagnostics.derivative.reason === :gradient_nonfinite
+            @test isnan(failure.diagnostics.derivative.value)
+        elseif case.name === :repulsion
+            @test failure.cause isa
+                  ImportanceSamplers._FirstOrderGRAMISRepulsionError
+            @test failure.cause.proposal_slot == 1
+            @test failure.cause.reason === :force_nonfinite
+            @test failure.cause.value == Inf
+            @test failure.diagnostics.covariance === nothing
+            @test failure.diagnostics.derivative === nothing
+        elseif case.name === :target
+            @test failure.cause isa SamplerExecutionError
+            @test failure.cause.phase === :target
+            @test failure.cause.sample_index == 1
+            @test failure.cause.captured.ex isa ErrorException
+            @test failure.cause.captured.ex.msg ==
+                  "intentional GRAMIS phase target failure"
+            @test failure.diagnostics.covariance === nothing
+            @test failure.diagnostics.derivative === nothing
+        elseif case.name === :sampling
+            @test failure.cause isa BoundsError
+            @test failure.cause.a === sampler.rng.batches[2]
+            @test failure.cause.i == 1:6
+            @test failure.diagnostics.covariance === nothing
+            @test failure.diagnostics.derivative === nothing
+        elseif case.name === :diagnostics
+            @test failure.cause isa ErrorException
+            @test failure.cause.msg ==
+                  "intentional GRAMIS round-two diagnostic copy failure"
+            @test failure.diagnostics.covariance === nothing
+            @test failure.diagnostics.derivative === nothing
+        else
+            @test failure.diagnostics.covariance === nothing
+            @test failure.diagnostics.derivative === nothing
+        end
+        @test gram_is_population_bits(sampler) == before
+        @test gram_is_pointer_roles_valid(sampler)
+        @test sampler.rng.index == (case.name === :sampling ? 2 : 3)
+
+        sampler.rng.batches[2] = original_second_batch
+        target.fail_at = typemax(Int)
+        gradient.fail_at = typemax(Int)
+        sampler.method_state.covariance_rate[2] = original_covariance_rate
+        sampler.method_state.repulsion_strength[2] = original_repulsion_strength
+        recovered = importance_sample!(sampler)
+        @test recovered isa WeightedSamples
+        @test length(recovered) == 12
+        @test gram_is_population_bits(sampler) != before
+        @test gram_is_pointer_roles_valid(sampler)
+        @test sampler.rng.index == (case.name === :sampling ? 4 : 5)
+    end
+
+
+    sampler = gram_is_proposal_phase_sampler()
+    before = gram_is_population_bits(sampler)
+    failure = caught_exception(() -> importance_sample!(sampler))
+    @test failure isa FirstOrderGRAMISRoundError
+    @test failure.round == 2
+    @test failure.phase === :proposal
+    @test failure.cause isa ImportanceSamplers._FirstOrderGRAMISProposalError
+    @test failure.cause.proposal_slot == 1
+    @test failure.cause.reason === :location_nonfinite
+    @test isnan(failure.cause.value)
+    @test failure.diagnostics.round_size == 6
+    @test failure.diagnostics.completed_rounds == 1
+    @test failure.diagnostics.covariance === nothing
+    @test failure.diagnostics.derivative === nothing
+    @test failure.diagnostics.transfers.count == 0
+    @test failure.diagnostics.transfers.bytes == 0
+    @test failure.diagnostics.pre_call_state_preserved === true
+    @test gram_is_population_bits(sampler) == before
+    @test gram_is_pointer_roles_valid(sampler)
+    @test sampler.rng.index == 3
+
+    recovered = importance_sample!(sampler)
+    @test recovered isa WeightedSamples
+    @test length(recovered) == 12
+    @test gram_is_population_bits(sampler) != before
+    @test gram_is_pointer_roles_valid(sampler)
+    @test sampler.rng.index == 5
 end

@@ -21,6 +21,83 @@ end
 
 struct FirstOrderGRAMISNonGaussian end
 
+mutable struct FirstOrderGRAMISPrefilledRNG{T} <: Random.AbstractRNG
+    batches::Vector{Vector{T}}
+    next_batch::Int
+end
+
+FirstOrderGRAMISPrefilledRNG(batches::Vector{Vector{T}}) where {T} =
+    FirstOrderGRAMISPrefilledRNG{T}(batches, 1)
+
+function Random.randn!(rng::FirstOrderGRAMISPrefilledRNG, destination::AbstractArray)
+    batch = rng.batches[rng.next_batch]
+    length(batch) == length(destination) || throw(
+        DimensionMismatch("prefilled GRAMIS normal batch has the wrong length"),
+    )
+    copyto!(destination, 1, batch, 1, length(destination))
+    rng.next_batch += 1
+    return destination
+end
+
+struct FirstOrderGRAMISShiftedTarget{T}
+    center::T
+end
+
+function (target::FirstOrderGRAMISShiftedTarget{T})(sample) where {T}
+    offset = only(sample) - target.center
+    return -T(0.5) * abs2(offset)
+end
+
+function first_order_gramis_shifted_gradient!(destination, sample)
+    destination[1] = eltype(destination)(0.5) - only(sample)
+    return destination
+end
+
+mutable struct FirstOrderGRAMISCountingShiftedTarget{T}
+    center::T
+    calls::Int
+end
+
+
+function (target::FirstOrderGRAMISCountingShiftedTarget{T})(sample) where {T}
+    target.calls += 1
+    offset = only(sample) - target.center
+    return -T(0.5) * abs2(offset)
+end
+
+mutable struct FirstOrderGRAMISCountingGradient
+    calls::Int
+end
+
+
+function (gradient::FirstOrderGRAMISCountingGradient)(destination, sample)
+    gradient.calls += 1
+    destination[1] = eltype(destination)(0.5) - only(sample)
+    return destination
+end
+
+function first_order_gramis_two_proposal_bank(::Type{T}=Float64) where {T}
+    return ProposalBank([
+        FactorGaussian(T[-2], reshape(T[0.75], 1, 1)),
+        FactorGaussian(T[2], reshape(T[1.25], 1, 1)),
+    ])
+end
+
+struct FirstOrderGRAMISMeanOnlyTarget{T}
+    left::T
+    right::T
+end
+
+function (target::FirstOrderGRAMISMeanOnlyTarget{T})(sample) where {T}
+    value = only(sample)
+    return value == target.left || value == target.right ? zero(T) : T(-Inf)
+end
+
+function first_order_gramis_zero_gradient!(destination, sample)
+    fill!(destination, zero(eltype(destination)))
+    return destination
+end
+
 function first_order_gramis_bank(::Type{T}=Float64) where {T}
     return ProposalBank([
         SphericalGaussian(T[-2, 0], T(0.75)),

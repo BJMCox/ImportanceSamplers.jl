@@ -86,6 +86,10 @@ function _logweight_summary(
         eltype(logweights),
         Val(:logweight_maximum),
     )
+    maximum_logweight == eltype(logweights)(-Inf) && return (
+        ess=zero(eltype(logweights)),
+        lognormalizer=eltype(logweights)(-Inf),
+    )
     scaled_sum = mapreduce(
         value -> exp(value - maximum_logweight),
         +,

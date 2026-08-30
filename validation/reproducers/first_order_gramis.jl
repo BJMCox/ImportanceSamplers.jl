@@ -1,6 +1,8 @@
 using ImportanceSamplers
 using LinearAlgebra
+using Random
 using Test
+import DensityInterface
 
 const IS = ImportanceSamplers
 const FIRST_ORDER_GRAMIS_REPRODUCER_COMMAND =
@@ -195,6 +197,235 @@ function validate_first_order_gramis_repulsion()
     )
 end
 
+mutable struct CausalPrefilledRNG{T} <: Random.AbstractRNG
+    batches::Vector{Vector{T}}
+    next_batch::Int
+end
+
+function Random.randn!(rng::CausalPrefilledRNG, destination::AbstractArray)
+    batch = rng.batches[rng.next_batch]
+    length(batch) == length(destination) || throw(
+        DimensionMismatch("causal normal batch has the wrong length"),
+    )
+    copyto!(destination, 1, batch, 1, length(destination))
+    rng.next_batch += 1
+    return destination
+end
+
+struct CausalTarget end
+
+(::CausalTarget)(sample) = -0.5 * abs2(only(sample))
+
+function causal_gradient!(destination, sample)
+    destination[1] = -only(sample)
+    return destination
+end
+
+function causal_bank(::Type{T}) where {T}
+    return ProposalBank([
+        FactorGaussian(T[-0.2], reshape(T[1], 1, 1)),
+        FactorGaussian(T[0.2], reshape(T[1], 1, 1)),
+    ])
+end
+
+function causal_logaddexp(left, right)
+    maximum_value = max(left, right)
+    return maximum_value + log(
+        exp(left - maximum_value) + exp(right - maximum_value),
+    )
+end
+
+function causal_gaussian_logdensity(mean, factor, sample)
+    return -0.5log(2pi) - log(factor) - 0.5abs2((sample - mean) / factor)
+end
+
+function causal_mixture_logdensity(population, sample, counts)
+    total = sum(counts)
+    terms = map(eachindex(counts)) do slot
+        log(counts[slot] / total) + causal_gaussian_logdensity(
+            population.locations[slot],
+            population.factors[slot],
+            sample,
+        )
+    end
+    return causal_logaddexp(terms...)
+end
+
+function literal_causal_transition(population, normals, assignments)
+    T = eltype(normals)
+    samples = map(eachindex(normals)) do index
+        slot = assignments[index]
+        population.locations[slot] + population.factors[slot] * normals[index]
+    end
+    counts = [count(==(slot), assignments) for slot in 1:2]
+    denominators = map(samples) do sample
+        causal_mixture_logdensity(population, sample, counts)
+    end
+    target_values = map(sample -> -T(0.5) * abs2(sample), samples)
+    returned_logweights = target_values .- denominators
+    local_logweights = map(eachindex(samples)) do index
+        slot = assignments[index]
+        target_values[index] - causal_gaussian_logdensity(
+            population.locations[slot],
+            population.factors[slot],
+            samples[index],
+        )
+    end
+
+    covariance_rate = T(0.4)
+    regularization = T(0.01)
+    candidate_factors = similar(population.factors)
+    for slot in 1:2
+        indices = findall(==(slot), assignments)
+        shifted = exp.(local_logweights[indices] .-
+                       maximum(local_logweights[indices]))
+        weights = shifted ./ sum(shifted)
+        ess = inv(sum(abs2, weights))
+        @test ess >= T(2)
+        estimate = sum(weights .* abs2.(samples[indices] .-
+                                       population.locations[slot]))
+        old_variance = abs2(population.factors[slot])
+        blended = (one(T) - covariance_rate) * old_variance +
+                  covariance_rate * estimate + regularization * old_variance
+        candidate_factors[slot] = sqrt(blended)
+    end
+
+    gradient_locations = similar(population.locations)
+    for slot in 1:2
+        frozen = population.locations[slot]
+        move = abs2(population.factors[slot]) * (-frozen)
+        gradient_locations[slot] = frozen
+        for trial in 1:4
+            candidate = frozen + ldexp(one(T), 1 - trial) * move
+            if -T(0.5) * abs2(candidate) >= -T(0.5) * abs2(frozen)
+                gradient_locations[slot] = candidate
+                break
+            end
+        end
+    end
+
+    pooled_factor = sqrt(sum(abs2, population.factors) / T(2))
+    whitened = population.locations ./ pooled_factor
+    repulsion_strength = T(0.05)
+    softening = T(0.5)
+    candidate_locations = similar(population.locations)
+    for slot in 1:2
+        peer = 3 - slot
+        denominator = hypot(
+            softening,
+            whitened[slot] - whitened[peer],
+        )
+        repulsion = repulsion_strength *
+                    (population.locations[slot] - population.locations[peer]) /
+                    denominator
+        candidate_locations[slot] = gradient_locations[slot] + repulsion
+    end
+    candidate = (
+        locations=candidate_locations,
+        factors=candidate_factors,
+        lognormalizers=-T(0.5) * log(T(2pi)) .- log.(candidate_factors),
+    )
+    return (; candidate, samples, denominators, returned_logweights)
+end
+
+function test_causal_population(actual, expected, tolerance)
+    for slot in eachindex(actual.proposals)
+        proposal = actual.proposals[slot]
+        @test only(proposal.location) ≈ expected.locations[slot] rtol = tolerance
+        @test only(proposal.scale.factor) ≈ expected.factors[slot] rtol = tolerance
+        @test proposal.lognormalizer ≈ expected.lognormalizers[slot] rtol = tolerance
+    end
+end
+
+function validate_first_order_gramis_causal_rounds()
+    T = Float64
+    target_value = CausalTarget()
+    target = LogTarget(target_value; grad=causal_gradient!)
+    bank = causal_bank(T)
+    first_normals = T[-0.5, 0, 0.5, -0.5, 0, 0.5]
+    second_normals = T[-0.75, -0.25, 0.25, 0.75, -0.75, -0.25, 0.25, 0.75]
+    q1 = (
+        locations=T[-0.2, 0.2],
+        factors=ones(T, 2),
+        lognormalizers=fill(-T(0.5) * log(T(2pi)), 2),
+    )
+    round1 = literal_causal_transition(q1, first_normals, [1, 1, 1, 2, 2, 2])
+    q2 = round1.candidate
+    round2 = literal_causal_transition(
+        q2,
+        second_normals,
+        [1, 1, 1, 1, 2, 2, 2, 2],
+    )
+    q3 = round2.candidate
+    one_round = prepare_sampler(
+        CausalPrefilledRNG([first_normals], 1),
+        target,
+        FirstOrderGRAMIS(
+            bank;
+            rounds=1,
+            round_size=6,
+            repulsion_strength=T(0.05),
+            covariance_ess_threshold=2,
+            covariance_rate=T(0.4),
+            covariance_regularization=T(0.01),
+            repulsion_softening=T(0.5),
+            max_backtracking_trials=4,
+        );
+        factor_execution=BatchedFactorExecution(),
+        threaded=false,
+    )
+    importance_sample!(one_round)
+    observed_q2 = current_proposal(one_round)
+    test_causal_population(observed_q2, q2, T(64) * eps(T))
+
+    two_round = prepare_sampler(
+        CausalPrefilledRNG([
+            first_normals,
+            second_normals,
+        ], 1),
+        target,
+        FirstOrderGRAMIS(
+            bank;
+            rounds=2,
+            round_size=[6, 8],
+            repulsion_strength=T(0.05),
+            covariance_ess_threshold=2,
+            covariance_rate=T(0.4),
+            covariance_regularization=T(0.01),
+            repulsion_softening=T(0.5),
+            max_backtracking_trials=4,
+        );
+        factor_execution=BatchedFactorExecution(),
+        threaded=false,
+    )
+    result = importance_sample!(two_round)
+    observed_q3 = current_proposal(two_round)
+    test_causal_population(observed_q3, q3, T(128) * eps(T))
+    expected_samples = vcat(round1.samples, round2.samples)
+    expected_logweights = vcat(
+        round1.returned_logweights,
+        round2.returned_logweights,
+    )
+    @test vec(result.samples) ≈ expected_samples rtol = T(64) * eps(T)
+    @test result.logweights ≈ expected_logweights rtol = T(64) * eps(T)
+    q3_denominators = map(round2.samples) do sample
+        causal_mixture_logdensity(q3, sample, [4, 4])
+    end
+    returned_denominators = round2.denominators
+    @test any(!isapprox(left, right; rtol=64eps(T), atol=0) for
+              (left, right) in zip(q3_denominators, returned_denominators))
+    @test result.provenance.round == vcat(fill(1, 6), fill(2, 8))
+    return (
+        sampled_populations=(:q1, :q2),
+        retained_population=:q3,
+        denominator_populations=(:q1, :q2),
+        status=:passed,
+    )
+end
+
 if abspath(PROGRAM_FILE) == @__FILE__
-    display(validate_first_order_gramis_repulsion())
+    display((
+        repulsion=validate_first_order_gramis_repulsion(),
+        causal_rounds=validate_first_order_gramis_causal_rounds(),
+    ))
 end

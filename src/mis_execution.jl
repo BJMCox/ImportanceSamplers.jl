@@ -408,10 +408,11 @@ function _launch_factor_batch_mis_round!(
     fill!(logdenominators, eltype(logdenominators)(-Inf))
     logcoefficients = _factor_batch_logcoefficients(bank, denominator)
     isnothing(logcoefficients) && error("unsupported factor-batch denominator")
+    round_solve_scratch = view(solve_scratch, :, 1:sample_count)
     for proposal_slot in axes(bank.locations, 2)
         _launch_factor_batch_logmixture!(
             logdenominators,
-            solve_scratch,
+            round_solve_scratch,
             samples,
             bank,
             proposal_slot,

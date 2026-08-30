@@ -971,6 +971,9 @@ end
                 Random.Xoshiro(0x5640 + index),
                 DMPMCTarget{Float64}(),
                 algorithm;
+                factor_execution=index == 2 ?
+                                 BatchedFactorExecution() :
+                                 FusedFactorExecution(),
                 threaded=false,
             ),
         )
@@ -979,6 +982,8 @@ end
         @test length(result.logweights) == 12
         @test count(==(1), result.provenance.round) == 5
         @test count(==(2), result.provenance.round) == 7
+        @test result.diagnostics.factor_execution_policy ===
+              (index == 2 ? :batched : :fused)
     end
 end
 

@@ -273,10 +273,17 @@ end
     end
 
     @test size(workspace.samples) == (2, 17)
+    @test size(workspace.round_logweights) == (17,)
     @test size(workspace.local_logweights) == (17,)
+    @test size(workspace.generating_logdensities) == (17,)
+    @test size(workspace.round_proposal_ids) == (17,)
+    @test size(workspace.round_ids) == (17,)
     @test size(workspace.normalized_weights) == (17,)
+    @test size(workspace.solve_scratch) == (2, 17)
     @test size(workspace.local_starts) == (3,)
     @test size(workspace.covariances) == (2, 2, 3)
+    @test size(workspace.pooled_covariance) == (2, 2)
+    @test size(workspace.whitened_means) == (2, 3)
     @test size(workspace.gradients) == (2, 3)
     @test size(workspace.frozen_values) == (3,)
     @test size(workspace.candidate_values) == (3,)
@@ -285,6 +292,7 @@ end
     @test size(workspace.steps) == (3,)
     @test size(workspace.repulsion) == (2, 3)
     @test size(workspace.factor_status) == (3,)
+    @test size(workspace.factor_info) == (3,)
     @test size(workspace.local_ess) == (3,)
     @test size(workspace.tempering_powers) == (3,)
     @test size(workspace.backtracking_trials) == (3,)
@@ -330,4 +338,265 @@ end
     workspace.covariances[1, 1, 1] = 5.0e6
     @test independent_snapshot.proposals[1].location == snapshot_location
     @test independent_snapshot.proposals[1].scale.factor == snapshot_factor
+end
+
+function first_order_gramis_logaddexp(left, right)
+    maximum_value = max(left, right)
+    return maximum_value + log(exp(left - maximum_value) + exp(right - maximum_value))
+end
+
+function first_order_gramis_mixture_logdensity(bank, sample, counts)
+    total = sum(counts)
+    value = -Inf
+    for (proposal, count) in zip(bank.proposals, counts)
+        term = log(count / total) +
+               GRAMISIS.DensityInterface.logdensityof(proposal, sample)
+        value = value == -Inf ? term : first_order_gramis_logaddexp(value, term)
+    end
+    return value
+end
+
+function first_order_gramis_round_summary(logweights)
+    maximum_logweight = maximum(logweights)
+    scaled = exp.(logweights .- maximum_logweight)
+    return (
+        ess=sum(scaled)^2 / sum(abs2, scaled),
+        lognormalizer=maximum_logweight + log(sum(scaled)) - log(length(logweights)),
+    )
+end
+
+@testset "FirstOrderGRAMIS two-round execution is causal and retains only q3" begin
+    T = Float64
+    bank = first_order_gramis_two_proposal_bank(T)
+    target_value = FirstOrderGRAMISShiftedTarget(T(0.5))
+    target = LogTarget(target_value; grad=first_order_gramis_shifted_gradient!)
+    first_normals = T[-1, 0, 1, -1, 0, 1]
+    second_normals = T[-1.5, -0.5, 0.5, 1.5, -1.5, -0.5, 0.5, 1.5]
+
+    one_round = prepare_sampler(
+        FirstOrderGRAMISPrefilledRNG([copy(first_normals)]),
+        target,
+        FirstOrderGRAMIS(
+            bank;
+            rounds=1,
+            round_size=6,
+            repulsion_strength=zero(T),
+            covariance_ess_threshold=2,
+        );
+        factor_execution=BatchedFactorExecution(),
+        threaded=false,
+    )
+    q1 = current_proposal(one_round)
+    first_result = importance_sample!(one_round)
+    q2 = current_proposal(one_round)
+
+    counted_target = FirstOrderGRAMISCountingShiftedTarget(T(0.5), 0)
+    counted_gradient = FirstOrderGRAMISCountingGradient(0)
+    two_round = prepare_sampler(
+        FirstOrderGRAMISPrefilledRNG([
+            first_normals,
+            second_normals,
+        ]),
+        LogTarget(counted_target; grad=counted_gradient),
+        FirstOrderGRAMIS(
+            bank;
+            rounds=2,
+            round_size=[6, 8],
+            repulsion_strength=zero(T),
+            covariance_ess_threshold=2,
+        );
+        factor_execution=BatchedFactorExecution(),
+        threaded=false,
+    )
+    result = @inferred importance_sample!(two_round)
+    q3 = current_proposal(two_round)
+
+    @test result isa WeightedSamples
+    @test size(result.samples) == (1, 14)
+    @test length(result.logweights) == 14
+    @test result.provenance.round == vcat(fill(1, 6), fill(2, 8))
+    @test result.provenance.proposal_id == vcat(
+        [1, 1, 1, 2, 2, 2],
+        [1, 1, 1, 1, 2, 2, 2, 2],
+    )
+    @test result.samples[:, 1:6] == first_result.samples
+
+    round_two_assignments = view(two_round.method_state.plan.assignments, 1:8, 2)
+    expected_round_two = Matrix{T}(undef, 1, 8)
+    for sample_index in 1:8
+        proposal = q2.proposals[round_two_assignments[sample_index]]
+        expected_round_two[1, sample_index] = proposal.location[1] +
+                                              proposal.scale.factor[1, 1] *
+                                              second_normals[sample_index]
+    end
+    @test result.samples[:, 7:14] ≈ expected_round_two rtol = 8eps(T)
+
+    for round in 1:2
+        indices = round == 1 ? (1:6) : (7:14)
+        frozen = round == 1 ? q1 : q2
+        counts = round == 1 ? [3, 3] : [4, 4]
+        expected_logweights = map(indices) do sample_index
+            sample = view(result.samples, :, sample_index)
+            target_value(sample) -
+            first_order_gramis_mixture_logdensity(frozen, sample, counts)
+        end
+        @test result.logweights[indices] ≈ expected_logweights rtol = 16eps(T)
+        summary = first_order_gramis_round_summary(expected_logweights)
+        @test result.diagnostics.round_ess[round] ≈ summary.ess rtol = 16eps(T)
+        @test result.diagnostics.round_lognormalizers[round] ≈
+              summary.lognormalizer rtol = 16eps(T)
+    end
+
+    q3_denominators = map(7:14) do sample_index
+        sample = view(result.samples, :, sample_index)
+        first_order_gramis_mixture_logdensity(q3, sample, [4, 4])
+    end
+    returned_denominators = map(7:14) do sample_index
+        sample = view(result.samples, :, sample_index)
+        target_value(sample) - result.logweights[sample_index]
+    end
+    @test any(!isapprox(left, right; rtol=64eps(T), atol=0) for
+              (left, right) in zip(q3_denominators, returned_denominators))
+
+    diagnostics = result.diagnostics
+    @test diagnostics.method === :first_order_gramis
+    @test diagnostics.round_sizes == [6, 8]
+    @test size(diagnostics.local_ess) == (2, 2)
+    @test size(diagnostics.tempering_powers) == (2, 2)
+    @test size(diagnostics.fallback_status) == (2, 2)
+    @test size(diagnostics.accepted_steps) == (2, 2)
+    @test size(diagnostics.backtracking_trials) == (2, 2)
+    @test size(diagnostics.collision_counts) == (2, 2)
+    @test isempty(diagnostics.minimum_whitened_pair_distance.round)
+    @test isempty(diagnostics.minimum_whitened_pair_distance.value)
+    @test diagnostics.target_evaluations ==
+          14 + 2 * 2 + sum(diagnostics.backtracking_trials)
+    @test diagnostics.gradient_evaluations == 2 * 2
+    @test counted_target.calls == diagnostics.target_evaluations
+    @test counted_gradient.calls == diagnostics.gradient_evaluations
+    @test diagnostics.proposal_evaluations == 2 * 14
+    @test diagnostics.denominator_evaluations == 14
+    @test diagnostics.failures == 0
+    @test diagnostics.transfers.count == 0
+    @test diagnostics.transfers.bytes == 0
+end
+
+@testset "FirstOrderGRAMIS successful results remain independent across calls" begin
+    algorithm = FirstOrderGRAMIS(
+        first_order_gramis_two_proposal_bank();
+        rounds=2,
+        round_size=[6, 8],
+        repulsion_strength=[0.0, 0.1],
+        covariance_ess_threshold=2,
+    )
+    sampler = prepare_sampler(
+        Random.Xoshiro(0x7461736b3130),
+        LogTarget(
+            FirstOrderGRAMISShiftedTarget(0.5);
+            grad=first_order_gramis_shifted_gradient!,
+        ),
+        algorithm;
+        threaded=false,
+    )
+    first = importance_sample!(sampler)
+    retained = deepcopy((
+        samples=first.samples,
+        logweights=first.logweights,
+        provenance=first.provenance,
+        local_ess=first.diagnostics.local_ess,
+        tempering_powers=first.diagnostics.tempering_powers,
+        fallback_status=first.diagnostics.fallback_status,
+        accepted_steps=first.diagnostics.accepted_steps,
+        backtracking_trials=first.diagnostics.backtracking_trials,
+        collision_counts=first.diagnostics.collision_counts,
+    ))
+    second = importance_sample!(sampler)
+
+    @test first.samples == retained.samples
+    @test first.logweights == retained.logweights
+    @test first.provenance == retained.provenance
+    for field in keys(retained)[4:end]
+        @test getproperty(first.diagnostics, field) == getproperty(retained, field)
+        @test getproperty(first.diagnostics, field) !==
+              getproperty(second.diagnostics, field)
+    end
+    @test first.samples !== second.samples
+    @test first.logweights !== second.logweights
+    @test first.provenance.round !== second.provenance.round
+    @test second.diagnostics.round_sizes == [6, 8]
+    @test second.diagnostics.minimum_whitened_pair_distance.round == [2]
+    @test length(second.diagnostics.minimum_whitened_pair_distance.value) == 1
+end
+
+@testset "FirstOrderGRAMIS repeated calls reuse learned state and restart rounds" begin
+    T = Float64
+    bank = first_order_gramis_two_proposal_bank(T)
+    batches = [
+        T[-1, 0, 1, -1, 0, 1],
+        T[-2, -1, 0, 0, 1, 2],
+    ]
+    sampler = prepare_sampler(
+        FirstOrderGRAMISPrefilledRNG(deepcopy(batches)),
+        LogTarget(
+            FirstOrderGRAMISShiftedTarget(T(0.5));
+            grad=first_order_gramis_shifted_gradient!,
+        ),
+        FirstOrderGRAMIS(
+            bank;
+            rounds=1,
+            round_size=6,
+            repulsion_strength=zero(T),
+            covariance_ess_threshold=2,
+        );
+        threaded=false,
+    )
+    first = importance_sample!(sampler)
+    q2 = current_proposal(sampler)
+    second = importance_sample!(sampler)
+
+    expected = Matrix{T}(undef, 1, 6)
+    assignments = view(sampler.method_state.plan.assignments, 1:6, 1)
+    for sample_index in 1:6
+        proposal = q2.proposals[assignments[sample_index]]
+        expected[1, sample_index] = proposal.location[1] +
+                                    proposal.scale.factor[1, 1] *
+                                    batches[2][sample_index]
+    end
+    @test second.samples ≈ expected rtol = 8eps(T)
+    @test first.provenance.round == fill(1, 6)
+    @test second.provenance.round == fill(1, 6)
+    @test first.diagnostics.round_sizes == [6]
+    @test second.diagnostics.round_sizes == [6]
+end
+
+@testset "FirstOrderGRAMIS successful local fallbacks remain nonfailures" begin
+    T = Float64
+    sampler = prepare_sampler(
+        FirstOrderGRAMISPrefilledRNG([fill(one(T), 6)]),
+        LogTarget(
+            FirstOrderGRAMISMeanOnlyTarget(T(-2), T(2));
+            grad=first_order_gramis_zero_gradient!,
+        ),
+        FirstOrderGRAMIS(
+            first_order_gramis_two_proposal_bank(T);
+            rounds=1,
+            round_size=6,
+            repulsion_strength=zero(T),
+            covariance_ess_threshold=2,
+        );
+        threaded=false,
+    )
+    result = importance_sample!(sampler)
+
+    @test all(==(-Inf), result.logweights)
+    @test result.diagnostics.round_ess == T[0]
+    @test result.diagnostics.round_lognormalizers == T[-Inf]
+    @test result.diagnostics.fallback_status == fill(
+        GRAMISIS._GRAMIS_ALL_ZERO_LOCAL,
+        2,
+        1,
+    )
+    @test result.diagnostics.fallbacks.all_zero_local_weights == 2
+    @test result.diagnostics.fallbacks.tempering == 0
+    @test result.diagnostics.failures == 0
 end

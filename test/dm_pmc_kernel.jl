@@ -280,13 +280,16 @@ end
         concentrated = DMPMCKernelIS._logweight_summary(
             T[floatmax(T), -floatmax(T)],
         )
+        all_zero = DMPMCKernelIS._logweight_summary(T[-Inf, -Inf])
 
         @test equal_positive.ess === T(2)
         @test equal_negative.ess === T(2)
         @test concentrated.ess === one(T)
+        @test all_zero.ess === zero(T)
         @test isfinite(equal_positive.lognormalizer)
         @test isfinite(equal_negative.lognormalizer)
         @test isfinite(concentrated.lognormalizer)
+        @test all_zero.lognormalizer === T(-Inf)
     end
 end
 
