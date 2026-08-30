@@ -266,7 +266,7 @@ function _importance_sample_cpu!(
             ) ? _launch_factor_batch_mis_round! : _launch_mis_round!
             launch(
                 round_samples,
-                _MISRoundOutput(round_logweights, round_proposal_ids),
+                _MISRoundOutput(round_logweights, round_proposal_ids, nothing),
                 buffers.failure_scratch.record.storage,
                 buffers.normals,
                 target_evaluator,

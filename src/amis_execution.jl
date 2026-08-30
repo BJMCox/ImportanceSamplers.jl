@@ -339,6 +339,7 @@ function _launch_prefilled_amis_factor_batch!(
                 execution,
                 new_round_ids,
                 new_round_ids,
+                nothing,
             )
         end
 
@@ -357,6 +358,7 @@ function _launch_prefilled_amis_factor_batch!(
             execution,
             current_round_ids,
             current_round_ids,
+            nothing,
         )
 
         KernelAbstractions.synchronize(backend)
