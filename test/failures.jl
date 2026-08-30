@@ -1190,3 +1190,198 @@ end
         @test state.candidate.lognormalizers == candidate_lognormalizers
     end
 end
+
+struct GRAMISDerivativeFailureValue{T}
+    value::T
+end
+
+struct GRAMISDerivativeFailureGradient{T}
+    value::T
+end
+
+(target::GRAMISDerivativeFailureValue)(sample) = target.value
+
+function (gradient::GRAMISDerivativeFailureGradient)(destination, sample)
+    fill!(destination, gradient.value)
+    return destination
+end
+
+function gram_is_failure_derivative(::Type{T}, value, gradient_value, execution) where {T}
+    locations = reshape(T[1, 2], 1, :)
+    proposal = FactorGaussian(T[0], reshape(T[1], 1, 1))
+    prepared = ImportanceSamplers._prepare_target(
+        LogTarget(
+            GRAMISDerivativeFailureValue{T}(T(value));
+            grad=GRAMISDerivativeFailureGradient{T}(T(gradient_value)),
+        ),
+        proposal,
+    )
+    target = ImportanceSamplers._bind_resolved_target(
+        prepared,
+        view(locations, :, 1),
+    )
+    worker_count = execution isa ImportanceSamplers._SerialCPUExecution ?
+                   1 : length(Threads.threadpooltids(:default))
+    gradient = ImportanceSamplers._prepare_bound_gradient(
+        prepared,
+        view(locations, :, 1),
+        worker_count,
+    )
+    values = zeros(T, 2)
+    gradients = zeros(T, 1, 2)
+    failure = caught_exception() do
+        ImportanceSamplers._evaluate_frozen_gradients!(
+            values,
+            gradients,
+            target,
+            gradient,
+            locations,
+            execution,
+        )
+    end
+    return (; failure, locations)
+end
+
+@testset "FirstOrderGRAMIS derivative failures are typed" begin
+    for T in (Float32, Float64), execution in (
+        ImportanceSamplers._SerialCPUExecution(),
+        ImportanceSamplers._ThreadedCPUExecution(),
+    )
+        for value in (T(-Inf), T(NaN), T(Inf))
+            result = gram_is_failure_derivative(T, value, zero(T), execution)
+            @test result.failure isa
+                  ImportanceSamplers._FirstOrderGRAMISDerivativeError
+            if result.failure isa
+               ImportanceSamplers._FirstOrderGRAMISDerivativeError
+                @test result.failure.proposal_slot == 1
+                @test result.failure.reason === :frozen_value_nonfinite
+            end
+            @test result.locations == reshape(T[1, 2], 1, :)
+        end
+
+        for gradient_value in (T(-Inf), T(NaN), T(Inf))
+            result = gram_is_failure_derivative(
+                T,
+                zero(T),
+                gradient_value,
+                execution,
+            )
+            @test result.failure isa
+                  ImportanceSamplers._FirstOrderGRAMISDerivativeError
+            if result.failure isa
+               ImportanceSamplers._FirstOrderGRAMISDerivativeError
+                @test result.failure.proposal_slot == 1
+                @test result.failure.reason === :gradient_nonfinite
+            end
+            @test result.locations == reshape(T[1, 2], 1, :)
+        end
+
+        moves = zeros(T, 1, 2)
+        gradients = fill(T(2), 1, 2)
+        factors = reshape(fill(floatmax(T), 2), 1, 1, 2)
+        failure = caught_exception() do
+            ImportanceSamplers._precondition_gradients!(
+                moves,
+                gradients,
+                factors,
+                execution,
+            )
+        end
+        @test failure isa ImportanceSamplers._FirstOrderGRAMISDerivativeError
+        if failure isa ImportanceSamplers._FirstOrderGRAMISDerivativeError
+            @test failure.proposal_slot == 1
+            @test failure.reason === :move_nonfinite
+        end
+    end
+end
+
+@testset "FirstOrderGRAMIS rejects -Inf and fails on invalid candidate values" begin
+    for T in (Float32, Float64), execution in (
+        ImportanceSamplers._SerialCPUExecution(),
+        ImportanceSamplers._ThreadedCPUExecution(),
+    )
+        locations = reshape(T[0, 10], 1, :)
+        moves = ones(T, 1, 2)
+        frozen_values = zeros(T, 2)
+        candidate_locations = similar(locations)
+        candidate_values = similar(frozen_values)
+        active_mask = similar(frozen_values, Bool)
+        steps = similar(frozen_values)
+        trials = similar(frozen_values, Int)
+
+        ImportanceSamplers._backtrack_means!(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            steps,
+            trials,
+            GRAMISDerivativeFailureValue{T}(T(-Inf)),
+            frozen_values,
+            locations,
+            moves,
+            2,
+            execution,
+        )
+        @test candidate_locations == locations
+        @test candidate_values == frozen_values
+        @test steps == zeros(T, 2)
+        @test trials == fill(2, 2)
+
+        for candidate_value in (T(NaN), T(Inf))
+            failure = caught_exception() do
+                ImportanceSamplers._backtrack_means!(
+                    candidate_locations,
+                    candidate_values,
+                    active_mask,
+                    steps,
+                    trials,
+                    GRAMISDerivativeFailureValue{T}(candidate_value),
+                    frozen_values,
+                    locations,
+                    moves,
+                    2,
+                    execution,
+                )
+            end
+            @test failure isa ImportanceSamplers._FirstOrderGRAMISDerivativeError
+            if failure isa ImportanceSamplers._FirstOrderGRAMISDerivativeError
+                @test failure.proposal_slot == 1
+                @test failure.reason === :candidate_value_nonfinite
+            end
+        end
+    end
+end
+
+@testset "FirstOrderGRAMIS zero step is exhaustion-only" begin
+    for T in (Float32, Float64)
+        max_trials = T === Float32 ? 150 : 1075
+        locations = reshape(T[0, 10], 1, :)
+        moves = ones(T, 1, 2)
+        frozen_values = zeros(T, 2)
+        candidate_locations = similar(locations)
+        candidate_values = similar(frozen_values)
+        active_mask = similar(frozen_values, Bool)
+        steps = similar(frozen_values)
+        trials = similar(frozen_values, Int)
+
+        ImportanceSamplers._backtrack_means!(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            steps,
+            trials,
+            GRAMISDerivativeFailureValue{T}(T(-Inf)),
+            frozen_values,
+            locations,
+            moves,
+            max_trials,
+            ImportanceSamplers._SerialCPUExecution(),
+        )
+
+        @test !iszero(ldexp(one(T), 1 - max_trials))
+        @test candidate_locations == locations
+        @test candidate_values == frozen_values
+        @test steps == zeros(T, 2)
+        @test trials == fill(max_trials, 2)
+    end
+end

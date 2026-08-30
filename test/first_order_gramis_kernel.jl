@@ -124,6 +124,77 @@ function (target::GRAMISFrozenRoundTarget{T})(sample)::T where {T}
     return -abs2(value) / T(3) + value / T(5) - T(0.7)
 end
 
+struct GRAMISCountedFrozenValue{T}
+    calls::Threads.Atomic{Int}
+end
+
+struct GRAMISCountedFrozenGradient{T}
+    calls::Threads.Atomic{Int}
+end
+
+struct GRAMISBacktrackingTarget{T}
+    calls::Vector{Threads.Atomic{Int}}
+end
+
+struct GRAMISRoundOneValue{T}
+    calls::Threads.Atomic{Int}
+end
+
+struct GRAMISRoundOneGradient
+    calls::Threads.Atomic{Int}
+end
+
+struct GRAMISReadCountingArray{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
+    storage::A
+    reads::Base.RefValue{Int}
+end
+
+Base.size(array::GRAMISReadCountingArray) = size(array.storage)
+Base.IndexStyle(::Type{<:GRAMISReadCountingArray}) = IndexCartesian()
+
+function Base.getindex(
+    array::GRAMISReadCountingArray{T,N},
+    indices::Vararg{Int,N},
+) where {T,N}
+    array.reads[] += 1
+    return array.storage[indices...]
+end
+
+function (target::GRAMISCountedFrozenValue{T})(sample)::T where {T}
+    Threads.atomic_add!(target.calls, 1)
+    return -abs2(sample[1]) / T(2) - abs2(sample[2]) / T(4)
+end
+
+function (gradient::GRAMISCountedFrozenGradient{T})(destination, sample) where {T}
+    Threads.atomic_add!(gradient.calls, 1)
+    destination[1] = -sample[1]
+    destination[2] = -sample[2] / T(2)
+    return destination
+end
+
+function (target::GRAMISBacktrackingTarget{T})(sample)::T where {T}
+    value = only(sample)
+    proposal_slot = floor(Int, value / T(10)) + 1
+    Threads.atomic_add!(target.calls[proposal_slot], 1)
+    if proposal_slot == 1
+        return zero(T)
+    elseif proposal_slot == 2
+        return value <= T(10.25) ? zero(T) : -one(T)
+    end
+    return -one(T)
+end
+
+function (target::GRAMISRoundOneValue{T})(sample)::T where {T}
+    Threads.atomic_add!(target.calls, 1)
+    return -abs2(only(sample)) / T(2)
+end
+
+function (gradient::GRAMISRoundOneGradient)(destination, sample)
+    Threads.atomic_add!(gradient.calls, 1)
+    destination[1] = -sample[1]
+    return destination
+end
+
 function run_gram_is_frozen_round(
     ::Type{T},
     execution,
@@ -977,4 +1048,341 @@ end
         @test gram_is_proposal_state_snapshot(state.committed) == frozen.committed
         @test gram_is_proposal_state_snapshot(state.run) == frozen.run
     end
+end
+
+@testset "FirstOrderGRAMIS preconditions gradients with the frozen covariance" begin
+    for T in (Float32, Float64), execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        factors = zeros(T, 2, 2, 2)
+        factors[:, :, 1] .= T[2 0; 1 3]
+        factors[:, :, 2] .= T[1 0; -2 4]
+        gradients = T[4 -3; -2 5]
+        moves = fill(T(99), 2, 2)
+
+        @test @inferred(GRAMISKernelIS._precondition_gradients!(
+            moves,
+            gradients,
+            factors,
+            execution,
+        )) === nothing
+
+        # Literal products by Sigma = L * L', not solves by Sigma or L.
+        @test moves == T[12 -13; -12 106]
+        @test gradients == T[4 -3; -2 5]
+        @test factors[:, :, 1] == T[2 0; 1 3]
+        @test factors[:, :, 2] == T[1 0; -2 4]
+    end
+end
+
+@testset "FirstOrderGRAMIS preconditioning uses two triangular passes" begin
+    proposal_count = 3
+    for dimension in (2, 5, 9)
+        factors = zeros(Float64, dimension, dimension, proposal_count)
+        gradients = Matrix{Float64}(undef, dimension, proposal_count)
+        for proposal_slot in 1:proposal_count
+            for column in 1:dimension, row in column:dimension
+                factors[row, column, proposal_slot] =
+                    (row + 2column + proposal_slot) / 10
+            end
+            gradients[:, proposal_slot] .=
+                (1:dimension) .- (dimension + proposal_slot) / 3
+        end
+        reads = Ref(0)
+        counted_factors = GRAMISReadCountingArray(factors, reads)
+        moves = similar(gradients)
+
+        GRAMISKernelIS._precondition_gradients!(
+            moves,
+            gradients,
+            counted_factors,
+            GRAMISKernelIS._SerialCPUExecution(),
+        )
+
+        for proposal_slot in 1:proposal_count
+            factor = factors[:, :, proposal_slot]
+            @test moves[:, proposal_slot] ≈
+                  factor * (factor' * gradients[:, proposal_slot])
+        end
+        @test reads[] == proposal_count * dimension * (dimension + 1)
+    end
+end
+
+@testset "FirstOrderGRAMIS evaluates each frozen gradient once" begin
+    for T in (Float32, Float64), execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        locations = T[1 3; -2 4]
+        values = fill(T(99), 2)
+        gradients = fill(T(98), 2, 2)
+        value_operation = GRAMISCountedFrozenValue{T}(Threads.Atomic{Int}(0))
+        gradient_operation =
+            GRAMISCountedFrozenGradient{T}(Threads.Atomic{Int}(0))
+        prepared = GRAMISKernelIS._prepare_target(
+            LogTarget(value_operation; grad=gradient_operation),
+            FactorGaussian(T[0, 0], Matrix{T}(LinearAlgebra.I, 2, 2)),
+        )
+        bound_value = GRAMISKernelIS._bind_resolved_target(
+            prepared,
+            view(locations, :, 1),
+        )
+        worker_count = execution isa GRAMISKernelIS._SerialCPUExecution ?
+                       1 : length(Threads.threadpooltids(:default))
+        bound_gradient = GRAMISKernelIS._prepare_bound_gradient(
+            prepared,
+            view(locations, :, 1),
+            worker_count,
+        )
+
+        @test @inferred(GRAMISKernelIS._evaluate_frozen_gradients!(
+            values,
+            gradients,
+            bound_value,
+            bound_gradient,
+            locations,
+            execution,
+        )) === nothing
+
+        @test values == T[-1.5, -8.5]
+        @test gradients == T[-1 -3; 1 -2]
+        @test value_operation.calls[] == 2
+        @test gradient_operation.calls[] == 2
+        @test locations == T[1 3; -2 4]
+    end
+end
+
+@testset "FirstOrderGRAMIS backtracking boundaries and inactive proposals" begin
+    for T in (Float32, Float64), execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        locations = reshape(T[0, 10, 20], 1, :)
+        moves = ones(T, 1, 3)
+        frozen_values = zeros(T, 3)
+        candidate_locations = fill(T(99), 1, 3)
+        candidate_values = fill(T(98), 3)
+        active_mask = fill(false, 3)
+        steps = fill(T(97), 3)
+        trials = fill(96, 3)
+        target = GRAMISBacktrackingTarget{T}([
+            Threads.Atomic{Int}(0) for _ in 1:3
+        ])
+
+        @test @inferred(GRAMISKernelIS._backtrack_means!(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            steps,
+            trials,
+            target,
+            frozen_values,
+            locations,
+            moves,
+            3,
+            execution,
+        )) === nothing
+
+        @test candidate_locations == reshape(T[1, 10.25, 20], 1, :)
+        @test candidate_values == zeros(T, 3)
+        @test active_mask == fill(false, 3)
+        @test steps == T[1, 0.25, 0]
+        @test trials == [1, 3, 3]
+        @test getindex.(target.calls) == [1, 3, 3]
+        @test locations == reshape(T[0, 10, 20], 1, :)
+        @test moves == ones(T, 1, 3)
+    end
+end
+
+@testset "FirstOrderGRAMIS prepared-state gradient forwarding" begin
+    for T in (Float32, Float64), execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        bank = ProposalBank([
+            FactorGaussian(T[-1], reshape(T[1], 1, 1)),
+            FactorGaussian(T[1], reshape(T[1], 1, 1)),
+        ])
+        algorithm = FirstOrderGRAMIS(
+            bank;
+            rounds=1,
+            round_size=6,
+            repulsion_strength=zero(T),
+            max_backtracking_trials=4,
+        )
+        value_operation = GRAMISRoundOneValue{T}(Threads.Atomic{Int}(0))
+        gradient_operation = GRAMISRoundOneGradient(Threads.Atomic{Int}(0))
+        prepared = GRAMISKernelIS._prepare_target(
+            LogTarget(value_operation; grad=gradient_operation),
+            first(bank.proposals),
+        )
+        state = GRAMISKernelIS._prepare_method_state(algorithm, prepared)
+        target = GRAMISKernelIS._bind_resolved_target(
+            prepared,
+            view(state.run.locations, :, 1),
+        )
+
+        @test @inferred(GRAMISKernelIS._evaluate_frozen_gradients!(
+            state,
+            target,
+            execution,
+        )) === nothing
+        @test @inferred(GRAMISKernelIS._precondition_gradients!(
+            state,
+            execution,
+        )) === nothing
+        @test @inferred(GRAMISKernelIS._backtrack_means!(
+            state,
+            target,
+            execution,
+        )) === nothing
+
+        @test state.workspace.frozen_values == fill(T(-0.5), 2)
+        @test state.workspace.gradients == reshape(T[1, -1], 1, :)
+        @test state.workspace.moves == reshape(T[1, -1], 1, :)
+        @test state.candidate.locations == zeros(T, 1, 2)
+        @test state.workspace.candidate_values == zeros(T, 2)
+        @test state.workspace.steps == ones(T, 2)
+        @test state.workspace.backtracking_trials == ones(Int, 2)
+        @test value_operation.calls[] == 4
+        @test gradient_operation.calls[] == 2
+    end
+end
+
+@testset "FirstOrderGRAMIS leaves non-CPU state execution unavailable" begin
+    T = Float64
+    bank = ProposalBank([
+        FactorGaussian(T[-1], reshape(T[1], 1, 1)),
+        FactorGaussian(T[1], reshape(T[1], 1, 1)),
+    ])
+    algorithm = FirstOrderGRAMIS(
+        bank;
+        rounds=1,
+        round_size=6,
+        repulsion_strength=zero(T),
+    )
+    value_operation = GRAMISRoundOneValue{T}(Threads.Atomic{Int}(0))
+    gradient_operation = GRAMISRoundOneGradient(Threads.Atomic{Int}(0))
+    prepared = GRAMISKernelIS._prepare_target(
+        LogTarget(value_operation; grad=gradient_operation),
+        first(bank.proposals),
+    )
+    state = GRAMISKernelIS._prepare_method_state(algorithm, prepared)
+    target = GRAMISKernelIS._bind_resolved_target(
+        prepared,
+        view(state.run.locations, :, 1),
+    )
+    execution = GRAMISKernelIS._KernelExecution(
+        GRAMISKernelIS._SerialCPUExecution(),
+    )
+
+    @test !applicable(
+        GRAMISKernelIS._evaluate_frozen_gradients!,
+        state,
+        target,
+        execution,
+    )
+    @test !applicable(GRAMISKernelIS._precondition_gradients!, state, execution)
+    @test !applicable(
+        GRAMISKernelIS._backtrack_means!,
+        state,
+        target,
+        execution,
+    )
+end
+
+function gram_is_gradient_move_allocation_counts()
+    T = Float64
+    execution = GRAMISKernelIS._SerialCPUExecution()
+    locations = reshape(T[-1, 1], 1, :)
+    values = zeros(T, 2)
+    gradients = zeros(T, 1, 2)
+    factors = ones(T, 1, 1, 2)
+    moves = zeros(T, 1, 2)
+    candidate_locations = similar(locations)
+    candidate_values = similar(values)
+    active_mask = similar(values, Bool)
+    steps = similar(values)
+    trials = similar(values, Int)
+    value_operation = GRAMISRoundOneValue{T}(Threads.Atomic{Int}(0))
+    gradient_operation = GRAMISRoundOneGradient(Threads.Atomic{Int}(0))
+    prepared = GRAMISKernelIS._prepare_target(
+        LogTarget(value_operation; grad=gradient_operation),
+        FactorGaussian(T[0], reshape(T[1], 1, 1)),
+    )
+    target = GRAMISKernelIS._bind_resolved_target(
+        prepared,
+        view(locations, :, 1),
+    )
+    gradient = GRAMISKernelIS._prepare_bound_gradient(
+        prepared,
+        view(locations, :, 1),
+        1,
+    )
+
+    GRAMISKernelIS._evaluate_frozen_gradients!(
+        values,
+        gradients,
+        target,
+        gradient,
+        locations,
+        execution,
+    )
+    GRAMISKernelIS._precondition_gradients!(
+        moves,
+        gradients,
+        factors,
+        execution,
+    )
+    GRAMISKernelIS._backtrack_means!(
+        candidate_locations,
+        candidate_values,
+        active_mask,
+        steps,
+        trials,
+        target,
+        values,
+        locations,
+        moves,
+        4,
+        execution,
+    )
+
+    gradient_allocations = @allocated GRAMISKernelIS._evaluate_frozen_gradients!(
+        values,
+        gradients,
+        target,
+        gradient,
+        locations,
+        execution,
+    )
+    preconditioner_allocations = @allocated GRAMISKernelIS._precondition_gradients!(
+        moves,
+        gradients,
+        factors,
+        execution,
+    )
+    backtracking_allocations = @allocated GRAMISKernelIS._backtrack_means!(
+        candidate_locations,
+        candidate_values,
+        active_mask,
+        steps,
+        trials,
+        target,
+        values,
+        locations,
+        moves,
+        4,
+        execution,
+    )
+    return (
+        gradient_allocations,
+        preconditioner_allocations,
+        backtracking_allocations,
+    )
+end
+
+@testset "FirstOrderGRAMIS serial gradient move reuses workspaces" begin
+    @test gram_is_gradient_move_allocation_counts() == (0, 0, 0)
 end

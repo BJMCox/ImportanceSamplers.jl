@@ -86,6 +86,536 @@ function _first_order_gramis_sample_round!(
     return nothing
 end
 
+struct _FirstOrderGRAMISDerivativeError{T} <: Exception
+    proposal_slot::Int
+    reason::Symbol
+    value::T
+end
+
+function Base.showerror(io::IO, error::_FirstOrderGRAMISDerivativeError)
+    print(
+        io,
+        "FirstOrderGRAMIS derivative failure for proposal ",
+        error.proposal_slot,
+        ": ",
+        error.reason,
+        " (",
+        error.value,
+        ')',
+    )
+end
+
+@noinline function _throw_first_order_gramis_derivative_error(
+    proposal_slot,
+    reason,
+    value,
+)
+    throw(_FirstOrderGRAMISDerivativeError(proposal_slot, reason, value))
+end
+
+function _validate_frozen_derivatives!(values, gradients)
+    @inbounds for proposal_slot in eachindex(values)
+        value = values[proposal_slot]
+        isfinite(value) || _throw_first_order_gramis_derivative_error(
+            proposal_slot,
+            :frozen_value_nonfinite,
+            value,
+        )
+        for row in axes(gradients, 1)
+            gradient = gradients[row, proposal_slot]
+            isfinite(gradient) || _throw_first_order_gramis_derivative_error(
+                proposal_slot,
+                :gradient_nonfinite,
+                gradient,
+            )
+        end
+    end
+    return nothing
+end
+
+function _validate_preconditioned_moves!(moves)
+    @inbounds for proposal_slot in axes(moves, 2), row in axes(moves, 1)
+        move = moves[row, proposal_slot]
+        isfinite(move) || _throw_first_order_gramis_derivative_error(
+            proposal_slot,
+            :move_nonfinite,
+            move,
+        )
+    end
+    return nothing
+end
+
+function _validate_backtracking_candidates!(candidate_values, trials, trial)
+    @inbounds for proposal_slot in eachindex(candidate_values, trials)
+        trials[proposal_slot] == trial || continue
+        value = candidate_values[proposal_slot]
+        (isfinite(value) || value == -Inf) ||
+            _throw_first_order_gramis_derivative_error(
+                proposal_slot,
+                :candidate_value_nonfinite,
+                value,
+            )
+    end
+    return nothing
+end
+
+@inline function _precondition_gradient_slot!(
+    moves,
+    gradients,
+    factors,
+    proposal_slot,
+)
+    dimension = size(gradients, 1)
+    T = eltype(gradients)
+    for factor_column in 1:dimension
+        projected_gradient = zero(T)
+        for gradient_row in factor_column:dimension
+            projected_gradient += @inbounds(
+                factors[gradient_row, factor_column, proposal_slot] *
+                gradients[gradient_row, proposal_slot]
+            )
+        end
+        @inbounds moves[factor_column, proposal_slot] = projected_gradient
+    end
+    for row in dimension:-1:1
+        move = zero(T)
+        for factor_column in 1:row
+            move += @inbounds(
+                factors[row, factor_column, proposal_slot] *
+                moves[factor_column, proposal_slot]
+            )
+        end
+        @inbounds moves[row, proposal_slot] = move
+    end
+    return nothing
+end
+
+function _precondition_gradients!(
+    moves,
+    gradients,
+    factors,
+    ::_SerialCPUExecution,
+)
+    @inbounds for proposal_slot in axes(gradients, 2)
+        _precondition_gradient_slot!(moves, gradients, factors, proposal_slot)
+    end
+    _validate_preconditioned_moves!(moves)
+    return nothing
+end
+
+function _precondition_gradients!(
+    moves,
+    gradients,
+    factors,
+    ::_ThreadedCPUExecution,
+)
+    Threads.@threads :dynamic for proposal_slot in axes(gradients, 2)
+        _precondition_gradient_slot!(moves, gradients, factors, proposal_slot)
+    end
+    _validate_preconditioned_moves!(moves)
+    return nothing
+end
+
+@inline function _evaluate_frozen_gradient_slot!(
+    values,
+    gradients,
+    target,
+    bound_gradient,
+    locations,
+    proposal_slot,
+)
+    location = view(locations, :, proposal_slot)
+    gradient = view(gradients, :, proposal_slot)
+    @inbounds values[proposal_slot] = target(location)
+    _gradient!(gradient, bound_gradient, location)
+    return nothing
+end
+
+function _evaluate_frozen_gradients!(
+    values,
+    gradients,
+    target,
+    bound_gradient,
+    locations,
+    ::_SerialCPUExecution,
+)
+    @inbounds for proposal_slot in axes(locations, 2)
+        _evaluate_frozen_gradient_slot!(
+            values,
+            gradients,
+            target,
+            bound_gradient,
+            locations,
+            proposal_slot,
+        )
+    end
+    _validate_frozen_derivatives!(values, gradients)
+    return nothing
+end
+
+_first_order_gramis_bound_gradient(
+    method_state::_PreparedFirstOrderGRAMIS,
+    ::_SerialCPUExecution,
+) = method_state.serial_gradient
+
+_first_order_gramis_bound_gradient(
+    method_state::_PreparedFirstOrderGRAMIS,
+    ::_ThreadedCPUExecution,
+) = method_state.threaded_gradient
+
+function _evaluate_frozen_gradients!(
+    method_state::_PreparedFirstOrderGRAMIS,
+    target,
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
+)
+    workspace = method_state.workspace
+    return _evaluate_frozen_gradients!(
+        workspace.frozen_values,
+        workspace.gradients,
+        target,
+        _first_order_gramis_bound_gradient(method_state, execution),
+        method_state.run.locations,
+        execution,
+    )
+end
+
+function _precondition_gradients!(
+    method_state::_PreparedFirstOrderGRAMIS,
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
+)
+    workspace = method_state.workspace
+    return _precondition_gradients!(
+        workspace.moves,
+        workspace.gradients,
+        method_state.run.factors,
+        execution,
+    )
+end
+
+function _evaluate_frozen_gradients!(
+    values,
+    gradients,
+    target,
+    bound_gradient,
+    locations,
+    ::_ThreadedCPUExecution,
+)
+    Threads.@threads :dynamic for proposal_slot in axes(locations, 2)
+        _evaluate_frozen_gradient_slot!(
+            values,
+            gradients,
+            target,
+            bound_gradient,
+            locations,
+            proposal_slot,
+        )
+    end
+    _validate_frozen_derivatives!(values, gradients)
+    return nothing
+end
+
+@inline function _initialize_backtracking_slot!(
+    candidate_locations,
+    candidate_values,
+    active_mask,
+    steps,
+    trials,
+    frozen_values,
+    locations,
+    proposal_slot,
+)
+    copyto!(
+        view(candidate_locations, :, proposal_slot),
+        view(locations, :, proposal_slot),
+    )
+    @inbounds candidate_values[proposal_slot] = frozen_values[proposal_slot]
+    @inbounds active_mask[proposal_slot] = true
+    @inbounds steps[proposal_slot] = zero(eltype(steps))
+    @inbounds trials[proposal_slot] = 0
+    return nothing
+end
+
+@inline function _backtracking_trial_slot!(
+    candidate_locations,
+    candidate_values,
+    active_mask,
+    steps,
+    trials,
+    target,
+    frozen_values,
+    locations,
+    moves,
+    step,
+    trial,
+    proposal_slot,
+)
+    @inbounds active_mask[proposal_slot] || return nothing
+    @inbounds for row in axes(locations, 1)
+        candidate_locations[row, proposal_slot] =
+            locations[row, proposal_slot] + step * moves[row, proposal_slot]
+    end
+    candidate = view(candidate_locations, :, proposal_slot)
+    candidate_value = target(candidate)
+    @inbounds candidate_values[proposal_slot] = candidate_value
+    @inbounds trials[proposal_slot] = trial
+    if isfinite(candidate_value) &&
+       candidate_value >= @inbounds(frozen_values[proposal_slot])
+        @inbounds steps[proposal_slot] = step
+        @inbounds active_mask[proposal_slot] = false
+    end
+    return nothing
+end
+
+@inline function _finish_backtracking_slot!(
+    candidate_locations,
+    candidate_values,
+    active_mask,
+    frozen_values,
+    locations,
+    proposal_slot,
+)
+    @inbounds active_mask[proposal_slot] || return nothing
+    copyto!(
+        view(candidate_locations, :, proposal_slot),
+        view(locations, :, proposal_slot),
+    )
+    @inbounds candidate_values[proposal_slot] = frozen_values[proposal_slot]
+    @inbounds active_mask[proposal_slot] = false
+    return nothing
+end
+
+function _initialize_backtracking!(
+    candidate_locations,
+    candidate_values,
+    active_mask,
+    steps,
+    trials,
+    frozen_values,
+    locations,
+    ::_SerialCPUExecution,
+)
+    @inbounds for proposal_slot in axes(locations, 2)
+        _initialize_backtracking_slot!(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            steps,
+            trials,
+            frozen_values,
+            locations,
+            proposal_slot,
+        )
+    end
+    return nothing
+end
+
+function _initialize_backtracking!(
+    candidate_locations,
+    candidate_values,
+    active_mask,
+    steps,
+    trials,
+    frozen_values,
+    locations,
+    ::_ThreadedCPUExecution,
+)
+    Threads.@threads :dynamic for proposal_slot in axes(locations, 2)
+        _initialize_backtracking_slot!(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            steps,
+            trials,
+            frozen_values,
+            locations,
+            proposal_slot,
+        )
+    end
+    return nothing
+end
+
+function _backtracking_trial!(
+    candidate_locations,
+    candidate_values,
+    active_mask,
+    steps,
+    trials,
+    target,
+    frozen_values,
+    locations,
+    moves,
+    step,
+    trial,
+    ::_SerialCPUExecution,
+)
+    @inbounds for proposal_slot in axes(locations, 2)
+        _backtracking_trial_slot!(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            steps,
+            trials,
+            target,
+            frozen_values,
+            locations,
+            moves,
+            step,
+            trial,
+            proposal_slot,
+        )
+    end
+    return nothing
+end
+
+function _backtracking_trial!(
+    candidate_locations,
+    candidate_values,
+    active_mask,
+    steps,
+    trials,
+    target,
+    frozen_values,
+    locations,
+    moves,
+    step,
+    trial,
+    ::_ThreadedCPUExecution,
+)
+    Threads.@threads :dynamic for proposal_slot in axes(locations, 2)
+        _backtracking_trial_slot!(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            steps,
+            trials,
+            target,
+            frozen_values,
+            locations,
+            moves,
+            step,
+            trial,
+            proposal_slot,
+        )
+    end
+    return nothing
+end
+
+function _finish_backtracking!(
+    candidate_locations,
+    candidate_values,
+    active_mask,
+    frozen_values,
+    locations,
+    ::_SerialCPUExecution,
+)
+    @inbounds for proposal_slot in axes(locations, 2)
+        _finish_backtracking_slot!(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            frozen_values,
+            locations,
+            proposal_slot,
+        )
+    end
+    return nothing
+end
+
+function _finish_backtracking!(
+    candidate_locations,
+    candidate_values,
+    active_mask,
+    frozen_values,
+    locations,
+    ::_ThreadedCPUExecution,
+)
+    Threads.@threads :dynamic for proposal_slot in axes(locations, 2)
+        _finish_backtracking_slot!(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            frozen_values,
+            locations,
+            proposal_slot,
+        )
+    end
+    return nothing
+end
+
+function _backtrack_means!(
+    candidate_locations,
+    candidate_values,
+    active_mask,
+    steps,
+    trials,
+    target,
+    frozen_values,
+    locations,
+    moves,
+    max_trials,
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
+)
+    _validate_preconditioned_moves!(moves)
+    _initialize_backtracking!(
+        candidate_locations,
+        candidate_values,
+        active_mask,
+        steps,
+        trials,
+        frozen_values,
+        locations,
+        execution,
+    )
+    for trial in 1:max_trials
+        step = ldexp(one(eltype(steps)), 1 - trial)
+        _backtracking_trial!(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            steps,
+            trials,
+            target,
+            frozen_values,
+            locations,
+            moves,
+            step,
+            trial,
+            execution,
+        )
+        _validate_backtracking_candidates!(candidate_values, trials, trial)
+    end
+    _finish_backtracking!(
+        candidate_locations,
+        candidate_values,
+        active_mask,
+        frozen_values,
+        locations,
+        execution,
+    )
+    return nothing
+end
+
+function _backtrack_means!(
+    method_state::_PreparedFirstOrderGRAMIS,
+    target,
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
+)
+    workspace = method_state.workspace
+    return _backtrack_means!(
+        method_state.candidate.locations,
+        workspace.candidate_values,
+        workspace.active_mask,
+        workspace.steps,
+        workspace.backtracking_trials,
+        target,
+        workspace.frozen_values,
+        method_state.run.locations,
+        workspace.moves,
+        method_state.max_backtracking_trials,
+        execution,
+    )
+end
+
 const _GRAMIS_COVARIANCE_READY = UInt8(0)
 const _GRAMIS_ALL_ZERO_LOCAL = UInt8(1)
 const _GRAMIS_TEMPERING_FALLBACK = UInt8(2)

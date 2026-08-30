@@ -186,6 +186,18 @@ end
         end
         @test_throws ArgumentError prepare_controls(covariance_ess_threshold=2)
         @test_throws ArgumentError prepare_controls(covariance_ess_threshold=5)
+
+        last_nonzero_trial = T === Float32 ? 150 : 1075
+        first_zero_trial = last_nonzero_trial + 1
+        boundary_state = prepare_controls(
+            max_backtracking_trials=last_nonzero_trial,
+        ).method_state
+        @test boundary_state.max_backtracking_trials == last_nonzero_trial
+        @test !iszero(ldexp(one(T), 1 - last_nonzero_trial))
+        @test iszero(ldexp(one(T), 1 - first_zero_trial))
+        @test_throws ArgumentError prepare_controls(
+            max_backtracking_trials=first_zero_trial,
+        )
     end
 
     @test_throws ArgumentError FirstOrderGRAMIS(
@@ -266,6 +278,9 @@ end
     @test size(workspace.local_starts) == (3,)
     @test size(workspace.covariances) == (2, 2, 3)
     @test size(workspace.gradients) == (2, 3)
+    @test size(workspace.frozen_values) == (3,)
+    @test size(workspace.candidate_values) == (3,)
+    @test size(workspace.moves) == (2, 3)
     @test size(workspace.active_mask) == (3,)
     @test size(workspace.steps) == (3,)
     @test size(workspace.repulsion) == (2, 3)
@@ -274,6 +289,10 @@ end
     @test size(workspace.tempering_powers) == (3,)
     @test size(workspace.backtracking_trials) == (3,)
     @test size(workspace.collision_counts) == (3,)
+    @test workspace.frozen_values !== workspace.candidate_values
+    @test workspace.moves !== workspace.gradients
+    @test workspace.moves !== workspace.repulsion
+    @test workspace.moves !== candidate.locations
 
     for type in (typeof(state), typeof(workspace), typeof(committed))
         @test isconcretetype(type)

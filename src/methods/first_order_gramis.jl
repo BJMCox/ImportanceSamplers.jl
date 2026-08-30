@@ -243,6 +243,9 @@ struct _FirstOrderGRAMISWorkspace{S,L,N,O,C,G,A,P,R,F,E,W,B}
     local_starts::O
     covariances::C
     gradients::G
+    frozen_values::P
+    candidate_values::P
+    moves::G
     active_mask::A
     steps::P
     repulsion::R
@@ -480,6 +483,9 @@ function _allocate_first_order_gramis_workspace(bank, plan, ::Type{L}) where {L}
         similar(prototype, Int, proposal_count),
         similar(prototype, T, dimension, dimension, proposal_count),
         similar(prototype, T, dimension, proposal_count),
+        similar(prototype, T, proposal_count),
+        similar(prototype, T, proposal_count),
+        similar(prototype, T, dimension, proposal_count),
         similar(prototype, Bool, proposal_count),
         similar(prototype, T, proposal_count),
         similar(prototype, T, dimension, proposal_count),
@@ -560,6 +566,11 @@ function _prepare_first_order_gramis_state(
     max_backtracking_trials = _first_order_gramis_positive_int(
         algorithm.max_backtracking_trials,
         "max_backtracking_trials",
+    )
+    iszero(ldexp(one(T), 1 - max_backtracking_trials)) && throw(
+        ArgumentError(
+            "max_backtracking_trials requests a final step that underflows to zero in $T",
+        ),
     )
     workspace = _allocate_first_order_gramis_workspace(committed, plan, L)
     return _PreparedFirstOrderGRAMIS(
