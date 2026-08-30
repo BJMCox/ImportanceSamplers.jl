@@ -446,6 +446,15 @@ function caught_device_error(f)
     return nothing
 end
 
+function first_order_gramis_device_target(sample, context)
+    return context.shift[1] - sum(abs2, sample) / 2
+end
+
+function first_order_gramis_device_gradient!(destination, sample, context)
+    destination .= -sample
+    return destination
+end
+
 @testset "broad device Function rules do not opt closures in" begin
     ordinary = let captured = [0.75]
         (sample, p) -> p.shift[1] + captured[1] - abs2(sample) / 2
@@ -468,6 +477,45 @@ end
     )
     @test accelerator_error isa SamplerDeviceError
     @test accelerator_error.reason === :opaque_host_closure
+end
+
+@testset "FirstOrderGRAMIS target ownership and accelerator gate" begin
+    bank = ProposalBank([
+        SphericalGaussian([-2.0, 0.0], 0.75),
+        DiagonalGaussian([0.0, 2.0], [1.25, 0.5]),
+        FactorGaussian([2.0, 0.0], [1.0 0.0; 0.25 1.5]),
+    ])
+    algorithm = FirstOrderGRAMIS(
+        bank;
+        rounds=3,
+        round_size=[15, 16, 17],
+        repulsion_strength=[0.1, 0.2, 0.3],
+    )
+    context = DerivativeTransferContext([0.25])
+    source = prepare_sampler(
+        Random.Xoshiro(0x4752414d4953),
+        LogTarget(
+            first_order_gramis_device_target;
+            grad=first_order_gramis_device_gradient!,
+        ),
+        context,
+        algorithm;
+        threaded=true,
+    )
+    @test source.target === source.method_state.serial_gradient.target
+    @test source.target === source.method_state.threaded_gradient.target
+    @test source.target.context === context
+    @test source.method_state.serial_gradient.target.context === context
+    @test source.method_state.threaded_gradient.target.context === context
+
+    device = KernelArgumentTestAccelerator()
+    expected_rng = copy(source.rng)
+    DERIVATIVE_CONTEXT_TRANSFERS[] = 0
+    transfer_error = caught_device_error(() -> device(source))
+    @test transfer_error isa SamplerDeviceError
+    @test transfer_error.reason === :first_order_gramis_accelerator_unavailable
+    @test DERIVATIVE_CONTEXT_TRANSFERS[] == 0
+    @test rand(source.rng, UInt64) == rand(expected_rng, UInt64)
 end
 
 @testset "explicit prepared device transfer" begin

@@ -14,6 +14,7 @@ test_files = if isempty(ARGS)
         "amis_kernel",
         "dm_pmc",
         "dm_pmc_kernel",
+        "first_order_gramis",
         "device_api",
         "target_derivatives",
         "plain_is",

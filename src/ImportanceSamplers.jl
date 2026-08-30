@@ -26,6 +26,7 @@ export AbstractImportanceSampler,
     DeterministicMixturePMC,
     DMPMCRoundError,
     FactorGaussian,
+    FirstOrderGRAMIS,
     FusedFactorExecution,
     ImportanceSampling,
     IdentityTransform,
@@ -68,6 +69,7 @@ include("execution.jl")
 include("methods/static_mis.jl")
 include("methods/dm_pmc.jl")
 include("methods/amis.jl")
+include("methods/first_order_gramis.jl")
 include("native_execution.jl")
 include("mis_execution.jl")
 include("amis_execution.jl")

@@ -22,8 +22,28 @@ end
 
 _resolve_adaptive_schedule(rounds, round_size::Int) = fill(round_size, rounds)
 _resolve_adaptive_schedule(rounds, round_size::Vector{Int}) = copy(round_size)
-_adaptive_sample_budget(rounds, round_size::Int) = rounds * round_size
-_adaptive_sample_budget(rounds, round_size::Vector{Int}) = sum(round_size)
+
+function _adaptive_sample_budget(rounds, round_size::Int)
+    return try
+        Base.checked_mul(rounds, round_size)
+    catch error
+        error isa OverflowError || rethrow()
+        throw(ArgumentError("total adaptive sample count exceeds Int"))
+    end
+end
+
+function _adaptive_sample_budget(rounds, round_size::Vector{Int})
+    total = 0
+    for count in round_size
+        total = try
+            Base.checked_add(total, count)
+        catch error
+            error isa OverflowError || rethrow()
+            throw(ArgumentError("total adaptive sample count exceeds Int"))
+        end
+    end
+    return total
+end
 
 """
     DeterministicMixturePMC(bank; rounds, round_size)
@@ -370,6 +390,13 @@ end
 function _deterministic_allocation_plan(bank, active_masses, schedule)
     active_count = length(bank.proposal_ids)
     rounds = length(schedule)
+    sample_budget = _adaptive_sample_budget(rounds, schedule)
+    try
+        Base.checked_add(1, sample_budget)
+    catch error
+        error isa OverflowError || rethrow()
+        throw(ArgumentError("adaptive allocation offsets exceed Int"))
+    end
     counts = Matrix{Int}(undef, active_count, rounds)
     assignments = zeros(Int, maximum(schedule), rounds)
     logcoefficients = Matrix{eltype(active_masses)}(undef, active_count, rounds)

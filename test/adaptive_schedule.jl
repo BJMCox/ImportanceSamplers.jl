@@ -8,6 +8,11 @@ const IS = ImportanceSamplers
     @test IS._validate_adaptive_schedule(3, [2, 3, 5]) == [2, 3, 5]
     @test IS._resolve_adaptive_schedule(3, 7) == [7, 7, 7]
     @test IS._resolve_adaptive_schedule(3, [2, 3, 5]) == [2, 3, 5]
+    @test_throws ArgumentError IS._adaptive_sample_budget(2, typemax(Int))
+    @test_throws ArgumentError IS._adaptive_sample_budget(
+        2,
+        [typemax(Int), 1],
+    )
     @test_throws ArgumentError IS._validate_adaptive_schedule(0, 1)
     @test_throws ArgumentError IS._validate_adaptive_schedule(2, 0)
     @test_throws DimensionMismatch IS._validate_adaptive_schedule(2, [1])
@@ -16,6 +21,27 @@ end
 @testset "deterministic allocation plan characterization" begin
     proposal_ids = [7, 2, 9]
     bank = (; proposal_ids)
+
+    @test_throws ArgumentError IS._deterministic_allocation_plan(
+        (; proposal_ids=[1]),
+        [1.0],
+        [typemax(Int), 1],
+    )
+    terminal_offset_error = try
+        IS._deterministic_allocation_plan(
+            (; proposal_ids=[1]),
+            [1.0],
+            [typemax(Int)],
+        )
+        nothing
+    catch error
+        error
+    end
+    @test terminal_offset_error isa ArgumentError
+    @test occursin(
+        "adaptive allocation offsets exceed Int",
+        sprint(showerror, terminal_offset_error),
+    )
 
     for T in (Float32, Float64)
         equal_schedule = [3, 4, 5, 6]
