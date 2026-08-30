@@ -198,7 +198,7 @@ function _dm_pmc_with_location(proposal::_GaussianProposal, location)
     )
 end
 
-struct _DMPMCAllocationPlan{S,C,A,L,O}
+struct _DeterministicAllocationPlan{S,C,A,L,O}
     schedule::S
     counts::C
     assignments::A
@@ -367,7 +367,7 @@ function _dm_pmc_round_counts(
     return counts
 end
 
-function _dm_pmc_allocation_plan(bank, active_masses, schedule)
+function _deterministic_allocation_plan(bank, active_masses, schedule)
     active_count = length(bank.proposal_ids)
     rounds = length(schedule)
     counts = Matrix{Int}(undef, active_count, rounds)
@@ -405,7 +405,7 @@ function _dm_pmc_allocation_plan(bank, active_masses, schedule)
         offsets[round + 1] = offsets[round] + round_size
     end
 
-    return _DMPMCAllocationPlan(
+    return _DeterministicAllocationPlan(
         schedule,
         counts,
         assignments,
@@ -418,7 +418,7 @@ function _prepare_dm_pmc_state(algorithm::DeterministicMixturePMC)
     schedule = _resolve_adaptive_schedule(algorithm.rounds, algorithm.round_size)
     bank = _prepare_dm_pmc_bank(algorithm.bank)
     active_masses = algorithm.bank.masses[bank.proposal_ids]
-    plan = _dm_pmc_allocation_plan(bank, active_masses, schedule)
+    plan = _deterministic_allocation_plan(bank, active_masses, schedule)
     return bank, plan
 end
 
@@ -502,7 +502,7 @@ function _prepare_transferred_method_state(
     method_state::_PreparedDMPMC,
 )
     plan = method_state.plan
-    transferred_plan = _DMPMCAllocationPlan(
+    transferred_plan = _DeterministicAllocationPlan(
         Tuple(plan.schedule),
         _copy_to_device(device, plan.counts),
         _copy_to_device(device, plan.assignments),
@@ -567,7 +567,7 @@ function _preflight_accelerator_method(
 
     round_kernel = _mis_round_launch_kernel!(backend)
     denominator =
-        _DMPMCRoundDenominator(plan.logcoefficients, representative_round)
+        _RealizedMixtureDenominator(plan.logcoefficients, representative_round)
     for argument in (
         round_views.samples,
         round_views.logweights,

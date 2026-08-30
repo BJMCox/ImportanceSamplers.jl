@@ -64,6 +64,30 @@ end
     return value, generating_logdensity, reason
 end
 
+struct _RealizedMixtureDenominator{L}
+    logcoefficients::L
+    round::Int
+end
+Adapt.@adapt_structure _RealizedMixtureDenominator
+
+_factor_batch_logcoefficients(bank, denominator::_RealizedMixtureDenominator) =
+    view(denominator.logcoefficients, :, denominator.round)
+
+@inline _mis_term_bounds(bank, ::_RealizedMixtureDenominator, generating_slot) =
+    (1, _active_proposal_count(bank))
+
+@inline function _mis_denominator_term(
+    ::Type{T},
+    bank,
+    denominator::_RealizedMixtureDenominator,
+    term_index,
+) where {T}
+    return term_index, convert(
+        T,
+        @inbounds(denominator.logcoefficients[term_index, denominator.round]),
+    )
+end
+
 @inline _append_logmixture(lognumerator, logcoefficient, logdensity) =
     LogExpFunctions.logaddexp(lognumerator, logcoefficient + logdensity)
 

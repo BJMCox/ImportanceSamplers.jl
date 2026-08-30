@@ -35,30 +35,6 @@ struct _DMPMCWorkspace{S,W,I,Q,C,A,L}
     candidate_locations::L
 end
 
-struct _DMPMCRoundDenominator{L}
-    logcoefficients::L
-    round::Int
-end
-Adapt.@adapt_structure _DMPMCRoundDenominator
-
-_factor_batch_logcoefficients(bank, denominator::_DMPMCRoundDenominator) =
-    view(denominator.logcoefficients, :, denominator.round)
-
-@inline _mis_term_bounds(bank, ::_DMPMCRoundDenominator, generating_slot) =
-    (1, _active_proposal_count(bank))
-
-@inline function _mis_denominator_term(
-    ::Type{T},
-    bank,
-    denominator::_DMPMCRoundDenominator,
-    term_index,
-) where {T}
-    return term_index, convert(
-        T,
-        @inbounds(denominator.logcoefficients[term_index, denominator.round]),
-    )
-end
-
 _dm_pmc_binding_sample(
     bank::_PackedDiagonalGaussianBank{L,S,N,M,C,I,<:_ScalarGaussianLayout},
 ) where {L,S,N,M,C,I} = zero(eltype(bank.locations))
@@ -280,7 +256,7 @@ function _importance_sample_cpu!(
             Random.randn!(sampler.rng, buffers.normals)
         end
         _capture_dm_pmc_round(round, :sample_and_weight, round_size, round - 1) do
-            denominator = _DMPMCRoundDenominator(plan.logcoefficients, round)
+            denominator = _RealizedMixtureDenominator(plan.logcoefficients, round)
             launch = _use_factor_batch_mis_path(
                 sampler.device,
                 bank,

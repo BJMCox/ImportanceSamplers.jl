@@ -120,7 +120,7 @@ function prefilled_trajectory!(sampler, normal_batches, uniform_batches)
             target_evaluator,
             bank,
             assignments,
-            IS._DMPMCRoundDenominator(plan.logcoefficients, round),
+            IS._RealizedMixtureDenominator(plan.logcoefficients, round),
             workspace.solve_scratch,
             execution,
         )
@@ -540,7 +540,7 @@ function factor_batch_case(device, ::Type{T}) where {T}
         threaded=true,
     ) |> device
     state = prepared.method_state
-    denominator = IS._DMPMCRoundDenominator(state.plan.logcoefficients, 1)
+    denominator = IS._RealizedMixtureDenominator(state.plan.logcoefficients, 1)
     first_logcoefficients = Array(view(state.plan.logcoefficients, :, 1))
     @test IS._use_factor_batch_mis_path(
         prepared.device,

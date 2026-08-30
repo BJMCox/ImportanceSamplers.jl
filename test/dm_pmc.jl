@@ -97,7 +97,7 @@ end
     ]
 
     @test state isa DMPMCIS._PreparedDMPMC
-    @test plan isa DMPMCIS._DMPMCAllocationPlan
+    @test plan isa DMPMCIS._DeterministicAllocationPlan
     @test plan.schedule == [13, 14, 13]
     @test plan.schedule !== algorithm.round_size
     @test state.bank.proposal_ids == [1, 3, 2]
@@ -164,7 +164,7 @@ end
     packed = DMPMCIS._prepare_dm_pmc_bank(bank)
     masses = DMPMCCountingMasses(bank.masses[packed.proposal_ids])
     schedule = [13, 14, 13, 14]
-    plan = DMPMCIS._dm_pmc_allocation_plan(packed, masses, schedule)
+    plan = DMPMCIS._deterministic_allocation_plan(packed, masses, schedule)
 
     @test masses.reads[] == length(masses)
     @test vec(sum(plan.counts; dims=1)) == schedule
