@@ -221,6 +221,17 @@ end
         result = importance_sample!(sampler)
         @test result.diagnostics.transfers.count <= 192
         @test result.diagnostics.transfers.bytes <= 4_096
+        if !iszero(strength)
+            @test IS._backend_state_resident(
+                sampler.device,
+                IS._transferred_backend_state(
+                    sampler.algorithm,
+                    sampler.method_state,
+                    sampler.target,
+                    sampler.random_buffers,
+                ),
+            )
+        end
     end
     @test CUDA.device() == caller_device
 end

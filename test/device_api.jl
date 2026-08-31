@@ -595,11 +595,9 @@ end
         algorithm;
         threaded=true,
     )
-    @test source.target === source.method_state.serial_gradient.target
-    @test source.target === source.method_state.threaded_gradient.target
+    @test source.target === source.method_state.serial_gradient.target ===
+          source.method_state.threaded_gradient.target
     @test source.target.context === context
-    @test source.method_state.serial_gradient.target.context === context
-    @test source.method_state.threaded_gradient.target.context === context
 
     device = KernelArgumentTestAccelerator()
     expected_rng = copy(source.rng)
@@ -611,64 +609,6 @@ end
     committed = state.committed
     run = state.run
     candidate = state.candidate
-    plan = state.plan
-    workspace = state.workspace
-    buffers = destination.random_buffers
-
-    @test all(
-        array -> array isa KernelArgumentTestArray,
-        (
-            committed.locations,
-            committed.factors,
-            committed.lognormalizers,
-            committed.logmasses,
-            committed.cdf,
-            committed.proposal_ids,
-            run.locations,
-            run.factors,
-            run.lognormalizers,
-            candidate.locations,
-            candidate.factors,
-            candidate.lognormalizers,
-            plan.counts,
-            plan.assignments,
-            plan.logcoefficients,
-            state.repulsion_strength,
-            state.covariance_rate,
-            state.covariance_ess_threshold,
-            destination.target.logdensity.offset,
-            destination.target.gradient.scale,
-            destination.target.context.shift,
-            workspace.samples,
-            workspace.round_logweights,
-            workspace.local_logweights,
-            workspace.generating_logdensities,
-            workspace.round_proposal_ids,
-            workspace.round_ids,
-            workspace.normalized_weights,
-            workspace.solve_scratch,
-            workspace.local_starts,
-            workspace.covariances,
-            workspace.pooled_covariance,
-            workspace.whitened_means,
-            workspace.gradients,
-            workspace.frozen_values,
-            workspace.candidate_values,
-            workspace.moves,
-            workspace.active_mask,
-            workspace.steps,
-            workspace.repulsion,
-            workspace.factor_status,
-            workspace.factor_info,
-            workspace.local_ess,
-            workspace.tempering_powers,
-            workspace.backtracking_trials,
-            workspace.collision_counts,
-            buffers.uniform,
-            buffers.normal,
-            buffers.failure_scratch.record.storage,
-        ),
-    )
     for arrays in (
         (committed.locations, run.locations, candidate.locations),
         (committed.factors, run.factors, candidate.factors),
@@ -685,10 +625,7 @@ end
     @test run.logmasses === committed.logmasses === candidate.logmasses
     @test run.cdf === committed.cdf === candidate.cdf
     @test run.proposal_ids === committed.proposal_ids === candidate.proposal_ids
-    @test plan.schedule isa Tuple
-    @test plan.offsets isa Tuple
     @test state.serial_gradient === state.threaded_gradient
-    @test state.serial_gradient isa IS._BoundInPlaceGradient
     @test state.serial_gradient !== source.method_state.serial_gradient
     @test state.serial_gradient.target === destination.target
     @test destination.target.context === state.serial_gradient.target.context

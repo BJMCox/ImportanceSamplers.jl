@@ -1593,6 +1593,36 @@ end
     @test state.workspace.backtracking_trials == ones(Int, 2)
 end
 
+@testset "population Cholesky computes strided factors" begin
+    backend = GRAMISKernelIS.KernelAbstractions.CPU()
+    workgroupsize = GRAMISKernelIS._GRAMIS_CHOLESKY_WORKGROUP_SIZE
+    kernel = GRAMISKernelIS._factor_population_kernel!(backend, workgroupsize)
+    for T in (Float32, Float64), dimension in (2, workgroupsize + 3)
+        seed = reshape(T.(1:(dimension^2)), dimension, dimension) /
+               T(dimension + 3)
+        covariance = seed * transpose(seed) +
+                     T(dimension + 1) * LinearAlgebra.I
+        expected = Matrix(LinearAlgebra.cholesky(
+            LinearAlgebra.Hermitian(covariance),
+        ).L)
+        factors = fill(T(NaN), dimension, dimension, 1)
+        info = fill(Int32(-1), 1)
+        kernel(
+            factors,
+            reshape(covariance, dimension, dimension, 1),
+            info,
+            fill(GRAMISKernelIS._GRAMIS_COVARIANCE_READY, 1);
+            ndrange=workgroupsize,
+        )
+        GRAMISKernelIS.KernelAbstractions.synchronize(backend)
+
+        @test info == Int32[0]
+        @test factors[:, :, 1] ≈ expected rtol = T === Float32 ? 3f-4 : 3e-12
+        @test LinearAlgebra.triu(factors[:, :, 1], 1) ==
+              zeros(T, dimension, dimension)
+    end
+end
+
 @testset "population Cholesky reports failures and preserves fallbacks" begin
     backend = GRAMISKernelIS.KernelAbstractions.CPU()
     workgroupsize = GRAMISKernelIS._GRAMIS_CHOLESKY_WORKGROUP_SIZE
