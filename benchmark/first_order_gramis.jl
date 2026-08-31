@@ -335,6 +335,7 @@ end
 function gram_is_kernel_family(name)
     lowered = lowercase(name)
     occursin("backtracking", lowered) && return :backtracking
+    occursin("tempering", lowered) && return :tempering
     (occursin("mis_round", lowered) || occursin("local_weights", lowered) ||
      occursin("rand", lowered)) && return :sampling
     (occursin("covariance", lowered) || occursin("factor_population", lowered) ||
@@ -382,6 +383,7 @@ function gram_is_profile_record(profile)
     end
     families = (
         :sampling,
+        :tempering,
         :covariance,
         :derivative,
         :backtracking,
