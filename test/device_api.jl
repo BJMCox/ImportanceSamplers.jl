@@ -146,6 +146,11 @@ Adapt.adapt_structure(
 
 struct KernelArgumentTestBackend <: KernelAbstractions.GPU end
 
+const KERNEL_ARGUMENT_TEST_COOPERATIVE_FUNCTION =
+    typeof(IS.gpu__cooperative_local_weights_kernel!)
+const KERNEL_ARGUMENT_TEST_COOPERATIVE_LAUNCHES = NamedTuple[]
+const KERNEL_ARGUMENT_TEST_SYNCHRONIZATIONS = Ref(0)
+
 struct KernelArgumentTestArray{T,N} <: AbstractArray{T,N}
     storage::Array{T,N}
 end
@@ -153,6 +158,8 @@ end
 Base.size(array::KernelArgumentTestArray) = size(array.storage)
 Base.getindex(array::KernelArgumentTestArray, indices...) =
     getindex(array.storage, indices...)
+Base.setindex!(array::KernelArgumentTestArray, value, indices...) =
+    setindex!(array.storage, value, indices...)
 Base.IndexStyle(::Type{<:KernelArgumentTestArray}) = IndexLinear()
 Base.copy(array::KernelArgumentTestArray) = KernelArgumentTestArray(copy(array.storage))
 const KERNEL_ARGUMENT_TEST_INT_SIMILAR_LENGTHS = Int[]
@@ -167,6 +174,24 @@ end
 
 KernelAbstractions.get_backend(::KernelArgumentTestArray) =
     KernelArgumentTestBackend()
+
+function (kernel::KernelAbstractions.Kernel{
+        KernelArgumentTestBackend,
+        KernelAbstractions.NDIteration.StaticSize{(256,)},
+        KernelAbstractions.NDIteration.DynamicSize,
+        KERNEL_ARGUMENT_TEST_COOPERATIVE_FUNCTION,
+    })(args...; ndrange=nothing, workgroupsize=nothing)
+    push!(
+        KERNEL_ARGUMENT_TEST_COOPERATIVE_LAUNCHES,
+        (; ndrange, workgroupsize),
+    )
+    return nothing
+end
+
+function KernelAbstractions.synchronize(::KernelArgumentTestBackend)
+    KERNEL_ARGUMENT_TEST_SYNCHRONIZATIONS[] += 1
+    return nothing
+end
 
 struct KernelArgumentTestDeviceArray{T,N} <: AbstractArray{T,N}
     pointer::Ptr{T}
@@ -632,6 +657,8 @@ end
     DERIVATIVE_VALUE_TRANSFERS[] = 0
     DERIVATIVE_GRADIENT_TRANSFERS[] = 0
     DERIVATIVE_CONTEXT_TRANSFERS[] = 0
+    empty!(KERNEL_ARGUMENT_TEST_COOPERATIVE_LAUNCHES)
+    KERNEL_ARGUMENT_TEST_SYNCHRONIZATIONS[] = 0
     destination = device(source)
     state = destination.method_state
     committed = state.committed
@@ -668,6 +695,10 @@ end
     @test DERIVATIVE_VALUE_TRANSFERS[] == 1
     @test DERIVATIVE_GRADIENT_TRANSFERS[] == 1
     @test DERIVATIVE_CONTEXT_TRANSFERS[] == 1
+    @test KERNEL_ARGUMENT_TEST_COOPERATIVE_LAUNCHES == [
+        (ndrange=256, workgroupsize=256),
+    ]
+    @test KERNEL_ARGUMENT_TEST_SYNCHRONIZATIONS[] == 1
     @test destination.device === device
     rand(expected_rng, UInt64)
     @test rand(source.rng, UInt64) == rand(expected_rng, UInt64)

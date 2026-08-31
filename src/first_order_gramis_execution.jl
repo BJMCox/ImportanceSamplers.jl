@@ -2055,7 +2055,7 @@ end
     squared_totals = @localmem eltype(normalized_weights) (
         _GRAMIS_REDUCTION_WORKGROUP_SIZE,
     )
-    tempering_state = @localmem eltype(normalized_weights) (4,)
+    tempering_state = @localmem eltype(normalized_weights) (6,)
     group_state = @localmem eltype(starts) (3,)
     if @inbounds(lane[1]) == 1
         @inbounds group_state[1] = proposal_slot
@@ -2189,25 +2189,10 @@ end
                     if ess >= T(@inbounds(thresholds[group_state[1], round]))
                         @inbounds tempering_state[1] = tempering_state[4]
                         @inbounds tempering_state[3] = ess
+                        @inbounds tempering_state[5] = maxima[1]
+                        @inbounds tempering_state[6] = totals[1]
                     else
                         @inbounds tempering_state[2] = tempering_state[4]
-                    end
-                end
-                @synchronize()
-                if @inbounds(tempering_state[1]) ==
-                   @inbounds(tempering_state[4])
-                    for sample_index in (@inbounds(group_state[2]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[3]))
-                        scaled = @inbounds(tempering_state[4]) * T(
-                            @inbounds local_logweights[sample_index]
-                        )
-                        @inbounds normalized_weights[sample_index] =
-                            exp(scaled - maxima[1]) * inv(totals[1])
-                    end
-                    if @inbounds(lane[1]) == 1
-                        @inbounds local_ess[group_state[1]] =
-                            tempering_state[3]
-                        @inbounds tempering_powers[group_state[1]] =
-                            tempering_state[1]
                     end
                 end
                 @synchronize()
@@ -2215,8 +2200,21 @@ end
                 @inbounds(tempering_state[1]) <= tolerance && break
             end
 
-            if @inbounds(lane[1]) == 1 &&
-               @inbounds(tempering_state[1]) == zero(T)
+            if @inbounds(tempering_state[1]) > zero(T)
+                for sample_index in (@inbounds(group_state[2]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[3]))
+                    scaled = @inbounds(tempering_state[1]) * T(
+                        @inbounds local_logweights[sample_index]
+                    )
+                    @inbounds normalized_weights[sample_index] = exp(
+                        scaled - @inbounds(tempering_state[5]),
+                    ) * inv(@inbounds(tempering_state[6]))
+                end
+                if @inbounds(lane[1]) == 1
+                    @inbounds local_ess[group_state[1]] = tempering_state[3]
+                    @inbounds tempering_powers[group_state[1]] =
+                        tempering_state[1]
+                end
+            elseif @inbounds(lane[1]) == 1
                 @inbounds tempering_powers[group_state[1]] = zero(T)
                 @inbounds status[group_state[1]] = _GRAMIS_TEMPERING_FALLBACK
             end

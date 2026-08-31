@@ -172,12 +172,27 @@ struct GRAMISOperationCountingMatrix{T,A<:Matrix{T}} <: AbstractMatrix{T}
     solves::Base.RefValue{Int}
 end
 
+struct GRAMISWriteCountingVector{T,A<:Vector{T}} <: AbstractVector{T}
+    storage::A
+    writes::Base.RefValue{Int}
+end
+
 Base.size(array::GRAMISReadCountingArray) = size(array.storage)
 Base.IndexStyle(::Type{<:GRAMISReadCountingArray}) = IndexCartesian()
 Base.size(array::GRAMISAtomicReadVector) = size(array.storage)
 Base.IndexStyle(::Type{<:GRAMISAtomicReadVector}) = IndexLinear()
 Base.size(matrix::GRAMISOperationCountingMatrix) = size(matrix.storage)
 Base.IndexStyle(::Type{<:GRAMISOperationCountingMatrix}) = IndexLinear()
+Base.size(vector::GRAMISWriteCountingVector) = size(vector.storage)
+Base.IndexStyle(::Type{<:GRAMISWriteCountingVector}) = IndexLinear()
+Base.getindex(vector::GRAMISWriteCountingVector, index::Int) =
+    vector.storage[index]
+
+function Base.setindex!(vector::GRAMISWriteCountingVector, value, index::Int)
+    vector.writes[] += 1
+    vector.storage[index] = value
+    return value
+end
 
 Base.getindex(matrix::GRAMISOperationCountingMatrix, index::Int) =
     matrix.storage[index]
@@ -683,8 +698,15 @@ function gram_is_local_weight_kernel_result(
     thresholds;
     max_iterations=64,
     cooperative=false,
+    count_writes=false,
 ) where {T}
-    normalized_weights = fill(T(NaN), length(local_logweights))
+    normalized_storage = fill(T(NaN), length(local_logweights))
+    normalized_weight_writes = Ref(0)
+    normalized_weights = count_writes ?
+                         GRAMISWriteCountingVector(
+        normalized_storage,
+        normalized_weight_writes,
+    ) : normalized_storage
     proposal_count = size(counts, 1)
     local_ess = fill(T(NaN), proposal_count)
     tempering_powers = fill(T(NaN), proposal_count)
@@ -731,11 +753,16 @@ function gram_is_local_weight_kernel_result(
         )
     end
     GRAMISKernelIS.KernelAbstractions.synchronize(backend)
-    return (; normalized_weights, local_ess, tempering_powers, status)
+    return (
+        normalized_weights=normalized_storage,
+        local_ess,
+        tempering_powers,
+        status,
+        normalized_weight_writes=normalized_weight_writes[],
+    )
 end
 
 @testset "FirstOrderGRAMIS cooperative local-weight mathematics" begin
-    @test isdefined(GRAMISKernelIS, :_cooperative_local_weights_kernel!)
     for (T, L) in (
         (Float32, Float32),
         (Float64, Float64),
@@ -810,6 +837,44 @@ end
         @test sum(fallback_cooperative.normalized_weights) ≈ one(T) rtol =
             T(4.0e-6)
     end
+
+    active = Float64[0, -4, -8, -12]
+    write_counted = gram_is_local_weight_kernel_result(
+        Float64,
+        active,
+        ones(Int, 1, 1),
+        fill(4, 1, 1),
+        fill(3, 1, 1);
+        cooperative=true,
+        count_writes=true,
+    )
+    @test write_counted.normalized_weight_writes == 3 * length(active)
+
+    irregular = collect(range(0.0, -12.0; length=263))
+    irregular_reference = gram_is_local_weight_kernel_result(
+        Float32,
+        irregular,
+        ones(Int, 1, 1),
+        fill(length(irregular), 1, 1),
+        fill(200, 1, 1),
+    )
+    irregular_cooperative = gram_is_local_weight_kernel_result(
+        Float32,
+        irregular,
+        ones(Int, 1, 1),
+        fill(length(irregular), 1, 1),
+        fill(200, 1, 1);
+        cooperative=true,
+    )
+    @test irregular_cooperative.status == irregular_reference.status
+    @test irregular_cooperative.tempering_powers ≈
+          irregular_reference.tempering_powers rtol = 4.0f-5
+    @test irregular_cooperative.local_ess ≈ irregular_reference.local_ess rtol =
+        4.0f-5
+    @test irregular_cooperative.normalized_weights ≈
+          irregular_reference.normalized_weights rtol = 4.0f-5
+    @test sum(irregular_cooperative.normalized_weights) ≈ 1.0f0 rtol = 4.0f-5
+    @test only(irregular_cooperative.local_ess) >= 200.0f0
 end
 
 @testset "FirstOrderGRAMIS CAIS covariance centering oracle" begin

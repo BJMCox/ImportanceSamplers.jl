@@ -133,8 +133,9 @@ function gram_is_cuda_local_weights(
     ::Type{T},
     local_logweights;
     max_iterations=64,
+    sample_count=4,
+    threshold=3,
 ) where {T}
-    sample_count = 4
     proposal_count = length(local_logweights) ÷ sample_count
     counts = fill(sample_count, proposal_count, 1)
     starts = IS._first_order_gramis_group_starts(counts)
@@ -145,7 +146,7 @@ function gram_is_cuda_local_weights(
     device_logweights = CuArray(local_logweights)
     device_starts = CuArray(starts)
     device_counts = CuArray(counts)
-    thresholds = CUDA.fill(3, proposal_count, 1)
+    thresholds = CUDA.fill(threshold, proposal_count, 1)
     backend = IS.KernelAbstractions.get_backend(normalized_weights)
     kernel = IS._cooperative_local_weights_kernel!(
         backend,
@@ -374,6 +375,7 @@ CUDA.allowscalar(false)
             T === Float32 ? GRAMIS_CUDA_CHOLESKY_RTOL.Float32 :
             GRAMIS_CUDA_CHOLESKY_RTOL.Float64
     end
+
     @test CUDA.device() == caller_device
 end
 
@@ -478,6 +480,18 @@ const GRAMIS_CUDA_MULTI_DEVICE_RESTORATION =
         @test fallback.tempering_powers == zeros(T, 1)
         @test sum(fallback.normalized_weights) ≈ one(T) rtol = T(4.0e-6)
     end
+
+    irregular = collect(range(0.0, -12.0; length=263))
+    mixed = gram_is_cuda_local_weights(
+        Float32,
+        irregular;
+        sample_count=length(irregular),
+        threshold=200,
+    )
+    @test mixed.status == UInt8[IS._GRAMIS_COVARIANCE_READY]
+    @test 0.0f0 < only(mixed.tempering_powers) < 1.0f0
+    @test sum(mixed.normalized_weights) ≈ 1.0f0 rtol = 4.0f-5
+    @test only(mixed.local_ess) >= 200.0f0
     @test CUDA.device() == caller_device
 end
 

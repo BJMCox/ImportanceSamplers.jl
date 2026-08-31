@@ -7,8 +7,7 @@ const GRAMISLaunchIS = ImportanceSamplers
 const GRAMISLaunchKA = GRAMISLaunchIS.KernelAbstractions
 
 const GRAMIS_COOPERATIVE_LOCAL_WEIGHTS_FUNCTION =
-    isdefined(GRAMISLaunchIS, :cpu__cooperative_local_weights_kernel!) ?
-    typeof(GRAMISLaunchIS.cpu__cooperative_local_weights_kernel!) : nothing
+    typeof(GRAMISLaunchIS.cpu__cooperative_local_weights_kernel!)
 const GRAMIS_GROUP_STARTS_FUNCTION =
     isdefined(GRAMISLaunchIS, :cpu__local_group_starts_kernel!) ?
     typeof(GRAMISLaunchIS.cpu__local_group_starts_kernel!) : nothing
@@ -118,8 +117,12 @@ end
         covariance_fit=dimension * dimension * proposal_count,
         covariance_blend=proposal_count,
     )
-    @test GRAMIS_GROUP_STARTS_FUNCTION === nothing
-    @test GRAMIS_COOPERATIVE_LOCAL_WEIGHTS_FUNCTION !== nothing
+    if !isnothing(GRAMIS_GROUP_STARTS_FUNCTION)
+        @test count(
+            record -> record.function_type === GRAMIS_GROUP_STARTS_FUNCTION,
+            GRAMIS_LAUNCH_RECORDS,
+        ) == 0
+    end
     @test count(
         record -> record.function_type ===
                   GRAMIS_COOPERATIVE_LOCAL_WEIGHTS_FUNCTION,

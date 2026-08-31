@@ -806,6 +806,53 @@ function _preflight_first_order_gramis_kernel_arguments(
     return nothing
 end
 
+function _preflight_first_order_gramis_cooperative_kernel!(method_state)
+    workspace = method_state.workspace
+    backend = KernelAbstractions.get_backend(workspace.normalized_weights)
+    normalized_weights = similar(workspace.normalized_weights, 1)
+    local_ess = similar(workspace.local_ess, 1)
+    tempering_powers = similar(workspace.tempering_powers, 1)
+    status = similar(workspace.factor_status, 1)
+    local_logweights = similar(workspace.local_logweights, 1)
+    starts = similar(workspace.local_starts, 1, 1)
+    counts = similar(method_state.plan.counts, 1, 1)
+    thresholds = similar(method_state.covariance_ess_threshold, 1, 1)
+    for array in (
+        normalized_weights,
+        local_ess,
+        tempering_powers,
+        status,
+        local_logweights,
+    )
+        fill!(array, zero(eltype(array)))
+    end
+    fill!(starts, 1)
+    fill!(counts, 1)
+    fill!(thresholds, one(eltype(thresholds)))
+
+    kernel = _cooperative_local_weights_kernel!(
+        backend,
+        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    kernel(
+        normalized_weights,
+        local_ess,
+        tempering_powers,
+        status,
+        local_logweights,
+        starts,
+        counts,
+        thresholds,
+        1,
+        method_state.tempering_tolerance,
+        method_state.tempering_max_iterations;
+        ndrange=_GRAMIS_REDUCTION_WORKGROUP_SIZE,
+        workgroupsize=_GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
 function _preflight_accelerator_method(
     device,
     target,
@@ -863,19 +910,26 @@ function _preflight_accelerator_method(
         ),
     )
 
-    covariance_kernels = (
-        _cooperative_local_weights_kernel!(
-            backend,
-            _GRAMIS_REDUCTION_WORKGROUP_SIZE,
-        ),
-        _fit_local_covariances_kernel!(backend),
-        _blend_local_covariances_kernel!(backend),
+    cooperative_kernel = _cooperative_local_weights_kernel!(
+        backend,
+        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
     )
     covariance_arguments = _first_order_gramis_covariance_kernel_arguments(
         method_state,
         1,
     )
-    for (kernel, arguments) in zip(covariance_kernels, covariance_arguments)
+    _preflight_first_order_gramis_kernel_arguments(
+        device,
+        cooperative_kernel,
+        covariance_arguments[1],
+    )
+    _preflight_first_order_gramis_cooperative_kernel!(method_state)
+
+    covariance_kernels = (
+        _fit_local_covariances_kernel!(backend),
+        _blend_local_covariances_kernel!(backend),
+    )
+    for (kernel, arguments) in zip(covariance_kernels, covariance_arguments[2:3])
         _preflight_first_order_gramis_kernel_arguments(
             device,
             kernel,
