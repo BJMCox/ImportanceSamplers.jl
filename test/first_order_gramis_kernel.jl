@@ -161,9 +161,9 @@ struct GRAMISRoundOneGradient
     calls::Threads.Atomic{Int}
 end
 
-struct GRAMISReadCountingArray{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
+struct GRAMISReadCountingArray{T,N,A<:AbstractArray{T,N},R} <: AbstractArray{T,N}
     storage::A
-    reads::Base.RefValue{Int}
+    reads::R
 end
 
 struct GRAMISOperationCountingMatrix{T,A<:Matrix{T}} <: AbstractMatrix{T}
@@ -247,9 +247,12 @@ function Base.getindex(
     array::GRAMISReadCountingArray{T,N},
     indices::Vararg{Int,N},
 ) where {T,N}
-    array.reads[] += 1
+    gram_is_count_read!(array.reads)
     return array.storage[indices...]
 end
+
+gram_is_count_read!(reads::Base.RefValue{Int}) = (reads[] += 1)
+gram_is_count_read!(reads::Threads.Atomic{Int}) = Threads.atomic_add!(reads, 1)
 
 function Base.getindex(array::GRAMISAtomicReadVector, index::Int)
     Threads.atomic_add!(array.reads, 1)
@@ -975,7 +978,7 @@ end
     state = read_state
     workspace = state.workspace
     backend = GRAMISKernelIS.KernelAbstractions.CPU()
-    centre_reads = Ref(0)
+    centre_reads = Threads.Atomic{Int}(0)
     centre_arguments = GRAMISKernelIS._first_order_gramis_covariance_centre_arguments(
         state,
         1,
@@ -995,7 +998,7 @@ end
     GRAMISKernelIS.KernelAbstractions.synchronize(backend)
     @test centre_reads[] == 8
 
-    covariance_reads = Ref(0)
+    covariance_reads = Threads.Atomic{Int}(0)
     covariance_arguments =
         GRAMISKernelIS._first_order_gramis_accelerator_covariance_arguments(
             state,
