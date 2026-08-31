@@ -32,7 +32,7 @@ end
 )
     return min(
         1_024,
-        max(1, cld(ndrange, Threads.nthreads(:default))),
+        max(1, fld(ndrange, Threads.nthreads(:default))),
     )
 end
 

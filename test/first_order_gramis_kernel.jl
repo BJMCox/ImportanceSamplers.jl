@@ -830,8 +830,20 @@ end
     cpu_backend = GRAMISKernelIS.KernelAbstractions.get_backend(zeros(1))
     accelerator_backend = Val(:accelerator)
 
-    for ndrange in (1, max(2, pool_threads), 4_096, 65_536)
-        expected = min(1_024, max(1, cld(ndrange, pool_threads)))
+    boundary_ranges = unique(filter(
+        >(0),
+        (
+            pool_threads - 1,
+            pool_threads,
+            pool_threads + 1,
+            2pool_threads - 1,
+            16,
+            4_096,
+            65_536,
+        ),
+    ))
+    for ndrange in boundary_ranges
+        expected = min(1_024, max(1, fld(ndrange, pool_threads)))
         workgroupsize = @inferred(
             GRAMISKernelIS._first_order_gramis_workgroupsize(
                 threaded,
