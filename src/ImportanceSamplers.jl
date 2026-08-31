@@ -5,8 +5,8 @@ import Adapt
 import DensityInterface
 import DifferentiationInterface
 import KernelAbstractions
-import KernelAbstractions: @groupsize, @index, @kernel, @localmem, @synchronize,
-    @uniform
+import KernelAbstractions: @groupsize, @index, @kernel, @localmem, @private,
+    @synchronize, @uniform
 import LinearAlgebra
 import LogDensityProblems
 import LogExpFunctions

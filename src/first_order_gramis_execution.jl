@@ -1759,6 +1759,28 @@ end
 const _GRAMIS_COVARIANCE_READY = UInt8(0)
 const _GRAMIS_ALL_ZERO_LOCAL = UInt8(1)
 const _GRAMIS_TEMPERING_FALLBACK = UInt8(2)
+const _GRAMIS_REDUCTION_WORKGROUP_SIZE = 256
+const _GRAMIS_REDUCTION_OFFSETS = (128, 64, 32, 16, 8, 4, 2, 1)
+
+function _first_order_gramis_local_weight_arguments(
+    method_state::_PreparedFirstOrderGRAMIS,
+    round,
+)
+    workspace = method_state.workspace
+    return (
+        workspace.normalized_weights,
+        workspace.local_ess,
+        workspace.tempering_powers,
+        workspace.factor_status,
+        workspace.local_logweights,
+        workspace.local_starts,
+        method_state.plan.counts,
+        method_state.covariance_ess_threshold,
+        round,
+        method_state.tempering_tolerance,
+        method_state.tempering_max_iterations,
+    )
+end
 
 function _first_order_gramis_covariance_kernel_arguments(
     method_state::_PreparedFirstOrderGRAMIS,
@@ -1767,30 +1789,7 @@ function _first_order_gramis_covariance_kernel_arguments(
     workspace = method_state.workspace
     bank = method_state.run
     return (
-        (workspace.local_starts, method_state.plan.counts, round),
-        (
-            workspace.normalized_weights,
-            workspace.local_ess,
-            workspace.tempering_powers,
-            workspace.factor_status,
-            workspace.local_logweights,
-            workspace.local_starts,
-            method_state.plan.counts,
-            round,
-        ),
-        (
-            workspace.normalized_weights,
-            workspace.local_ess,
-            workspace.tempering_powers,
-            workspace.factor_status,
-            workspace.local_logweights,
-            workspace.local_starts,
-            method_state.plan.counts,
-            method_state.covariance_ess_threshold,
-            round,
-            method_state.tempering_tolerance,
-            method_state.tempering_max_iterations,
-        ),
+        _first_order_gramis_local_weight_arguments(method_state, round),
         (
             workspace.covariances,
             workspace.normalized_weights,
@@ -1824,30 +1823,9 @@ end
     method_state.workspace.factor_status,
 )
 
-@kernel function _local_group_starts_kernel!(starts, counts, round)
-    first_sample = 1
-    for proposal_slot in eachindex(starts)
-        @inbounds starts[proposal_slot] = first_sample
-        first_sample += @inbounds counts[proposal_slot, round]
-    end
-end
-
-function _local_group_starts!(starts, counts, round, execution)
-    backend = KernelAbstractions.get_backend(starts)
-    kernel = _local_group_starts_kernel!(backend)
-    kernel(
-        starts,
-        counts,
-        round;
-        ndrange=1,
-        workgroupsize=_first_order_gramis_workgroupsize(execution, backend, 1),
-    )
-    KernelAbstractions.synchronize(backend)
-    return nothing
-end
-
 @inline function _gramis_local_group(starts, counts, proposal_slot, round)
-    return @inbounds(starts[proposal_slot]), @inbounds(counts[proposal_slot, round])
+    return @inbounds(starts[proposal_slot, round]),
+    @inbounds(counts[proposal_slot, round])
 end
 
 @kernel function _local_weight_summary_kernel!(
@@ -1905,17 +1883,16 @@ end
 function _local_weight_summary!(
     method_state::_PreparedFirstOrderGRAMIS,
     round,
-    execution,
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
 )
     workspace = method_state.workspace
     backend = KernelAbstractions.get_backend(workspace.normalized_weights)
     proposal_count = size(method_state.run.locations, 2)
     kernel = _local_weight_summary_kernel!(backend)
+    arguments = _first_order_gramis_local_weight_arguments(method_state, round)
     kernel(
-        _first_order_gramis_covariance_kernel_arguments(
-            method_state,
-            round,
-        )[2]...;
+        arguments[1:7]...,
+        round;
         ndrange=proposal_count,
         workgroupsize=_first_order_gramis_workgroupsize(
             execution,
@@ -2028,23 +2005,242 @@ end
 function _tempering_power!(
     method_state::_PreparedFirstOrderGRAMIS,
     round,
-    execution,
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
 )
     workspace = method_state.workspace
     backend = KernelAbstractions.get_backend(workspace.normalized_weights)
     proposal_count = size(method_state.run.locations, 2)
     kernel = _tempering_power_kernel!(backend)
     kernel(
-        _first_order_gramis_covariance_kernel_arguments(
-            method_state,
-            round,
-        )[3]...;
+        _first_order_gramis_local_weight_arguments(method_state, round)...;
         ndrange=proposal_count,
         workgroupsize=_first_order_gramis_workgroupsize(
             execution,
             backend,
             proposal_count,
         ),
+    )
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
+@kernel function _cooperative_local_weights_kernel!(
+    normalized_weights,
+    local_ess,
+    tempering_powers,
+    status,
+    local_logweights,
+    starts,
+    counts,
+    thresholds,
+    round,
+    tolerance,
+    max_iterations,
+)
+    proposal_slot = @index(Group, Linear)
+    lane_index = @index(Local, Linear)
+    lane = @private Int (1,)
+    @inbounds lane[1] = lane_index
+    @uniform lane_count = @groupsize()[1]
+    @uniform T = eltype(normalized_weights)
+    maxima = @localmem eltype(normalized_weights) (
+        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    raw_maxima = @localmem eltype(local_logweights) (
+        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    totals = @localmem eltype(normalized_weights) (
+        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    squared_totals = @localmem eltype(normalized_weights) (
+        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    tempering_state = @localmem eltype(normalized_weights) (4,)
+    group_state = @localmem eltype(starts) (3,)
+    if @inbounds(lane[1]) == 1
+        @inbounds group_state[1] = proposal_slot
+        @inbounds group_state[2] = starts[proposal_slot, round]
+        @inbounds group_state[3] =
+            group_state[2] + counts[proposal_slot, round] - 1
+    end
+    @synchronize()
+
+    lane_maximum = eltype(local_logweights)(-Inf)
+    for sample_index in (@inbounds(group_state[2]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[3]))
+        lane_maximum = max(
+            lane_maximum,
+            @inbounds(local_logweights[sample_index]),
+        )
+    end
+    @inbounds raw_maxima[lane[1]] = lane_maximum
+    @synchronize()
+    for reduction_offset in _GRAMIS_REDUCTION_OFFSETS
+        if @inbounds(lane[1]) <= reduction_offset
+            @inbounds raw_maxima[lane[1]] = max(
+                raw_maxima[lane[1]],
+                raw_maxima[lane[1] + reduction_offset],
+            )
+        end
+        @synchronize()
+    end
+
+    if @inbounds(lane[1]) == 1 &&
+       @inbounds(raw_maxima[1]) == eltype(local_logweights)(-Inf)
+        @inbounds local_ess[group_state[1]] = zero(T)
+        @inbounds tempering_powers[group_state[1]] = zero(T)
+        @inbounds status[group_state[1]] = _GRAMIS_ALL_ZERO_LOCAL
+    end
+    @synchronize()
+    if @inbounds(raw_maxima[1]) != eltype(local_logweights)(-Inf)
+        lane_total = zero(T)
+        lane_squared_total = zero(T)
+        for sample_index in (@inbounds(group_state[2]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[3]))
+            weight = T(exp(
+                @inbounds(local_logweights[sample_index]) -
+                @inbounds(raw_maxima[1]),
+            ))
+            @inbounds normalized_weights[sample_index] = weight
+            lane_total += weight
+            lane_squared_total += abs2(weight)
+        end
+        @inbounds totals[lane[1]] = lane_total
+        @inbounds squared_totals[lane[1]] = lane_squared_total
+        @synchronize()
+        for reduction_offset in _GRAMIS_REDUCTION_OFFSETS
+            if @inbounds(lane[1]) <= reduction_offset
+                @inbounds totals[lane[1]] += totals[lane[1] + reduction_offset]
+                @inbounds squared_totals[lane[1]] +=
+                    squared_totals[lane[1] + reduction_offset]
+            end
+            @synchronize()
+        end
+
+        for sample_index in (@inbounds(group_state[2]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[3]))
+            @inbounds normalized_weights[sample_index] *= inv(totals[1])
+        end
+        if @inbounds(lane[1]) == 1
+            @inbounds local_ess[group_state[1]] =
+                abs2(totals[1]) / squared_totals[1]
+            @inbounds tempering_powers[group_state[1]] = one(T)
+            @inbounds status[group_state[1]] = _GRAMIS_COVARIANCE_READY
+        end
+        @synchronize()
+
+        if @inbounds(local_ess[group_state[1]]) <
+           T(@inbounds(thresholds[group_state[1], round]))
+            if @inbounds(lane[1]) == 1
+                @inbounds tempering_state[1] = zero(T)
+                @inbounds tempering_state[2] = one(T)
+                @inbounds tempering_state[3] = zero(T)
+            end
+            @synchronize()
+
+            for _ in 1:max_iterations
+                if @inbounds(lane[1]) == 1
+                    @inbounds tempering_state[4] =
+                        (tempering_state[1] + tempering_state[2]) / T(2)
+                end
+                @synchronize()
+                lane_maximum = T(-Inf)
+                for sample_index in (@inbounds(group_state[2]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[3]))
+                    scaled = @inbounds(tempering_state[4]) * T(
+                        @inbounds local_logweights[sample_index]
+                    )
+                    lane_maximum = max(lane_maximum, scaled)
+                end
+                @inbounds maxima[lane[1]] = lane_maximum
+                @synchronize()
+                for reduction_offset in _GRAMIS_REDUCTION_OFFSETS
+                    if @inbounds(lane[1]) <= reduction_offset
+                        @inbounds maxima[lane[1]] = max(
+                            maxima[lane[1]],
+                            maxima[lane[1] + reduction_offset],
+                        )
+                    end
+                    @synchronize()
+                end
+
+                lane_total = zero(T)
+                lane_squared_total = zero(T)
+                for sample_index in (@inbounds(group_state[2]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[3]))
+                    scaled = @inbounds(tempering_state[4]) * T(
+                        @inbounds local_logweights[sample_index]
+                    )
+                    shifted_weight = exp(scaled - @inbounds(maxima[1]))
+                    lane_total += shifted_weight
+                    lane_squared_total += abs2(shifted_weight)
+                end
+                @inbounds totals[lane[1]] = lane_total
+                @inbounds squared_totals[lane[1]] = lane_squared_total
+                @synchronize()
+                for reduction_offset in _GRAMIS_REDUCTION_OFFSETS
+                    if @inbounds(lane[1]) <= reduction_offset
+                        @inbounds totals[lane[1]] +=
+                            totals[lane[1] + reduction_offset]
+                        @inbounds squared_totals[lane[1]] +=
+                            squared_totals[lane[1] + reduction_offset]
+                    end
+                    @synchronize()
+                end
+
+                if @inbounds(lane[1]) == 1
+                    ess = abs2(@inbounds(totals[1])) /
+                          @inbounds(squared_totals[1])
+                    if ess >= T(@inbounds(thresholds[group_state[1], round]))
+                        @inbounds tempering_state[1] = tempering_state[4]
+                        @inbounds tempering_state[3] = ess
+                    else
+                        @inbounds tempering_state[2] = tempering_state[4]
+                    end
+                end
+                @synchronize()
+                if @inbounds(tempering_state[1]) ==
+                   @inbounds(tempering_state[4])
+                    for sample_index in (@inbounds(group_state[2]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[3]))
+                        scaled = @inbounds(tempering_state[4]) * T(
+                            @inbounds local_logweights[sample_index]
+                        )
+                        @inbounds normalized_weights[sample_index] =
+                            exp(scaled - maxima[1]) * inv(totals[1])
+                    end
+                    if @inbounds(lane[1]) == 1
+                        @inbounds local_ess[group_state[1]] =
+                            tempering_state[3]
+                        @inbounds tempering_powers[group_state[1]] =
+                            tempering_state[1]
+                    end
+                end
+                @synchronize()
+                @inbounds(tempering_state[2]) -
+                @inbounds(tempering_state[1]) <= tolerance && break
+            end
+
+            if @inbounds(lane[1]) == 1 &&
+               @inbounds(tempering_state[1]) == zero(T)
+                @inbounds tempering_powers[group_state[1]] = zero(T)
+                @inbounds status[group_state[1]] = _GRAMIS_TEMPERING_FALLBACK
+            end
+            @synchronize()
+        end
+    end
+end
+
+function _cooperative_local_weights!(
+    method_state::_PreparedFirstOrderGRAMIS,
+    round,
+    ::_KernelExecution,
+)
+    workspace = method_state.workspace
+    backend = KernelAbstractions.get_backend(workspace.normalized_weights)
+    proposal_count = size(method_state.run.locations, 2)
+    kernel = _cooperative_local_weights_kernel!(
+        backend,
+        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    kernel(
+        _first_order_gramis_local_weight_arguments(method_state, round)...;
+        ndrange=_GRAMIS_REDUCTION_WORKGROUP_SIZE * proposal_count,
+        workgroupsize=_GRAMIS_REDUCTION_WORKGROUP_SIZE,
     )
     KernelAbstractions.synchronize(backend)
     return nothing
@@ -2121,21 +2317,30 @@ end
     end
 end
 
+function _prepare_local_covariance_weights!(
+    method_state::_PreparedFirstOrderGRAMIS,
+    round,
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
+)
+    _local_weight_summary!(method_state, round, execution)
+    _tempering_power!(method_state, round, execution)
+    return nothing
+end
+
+function _prepare_local_covariance_weights!(
+    method_state::_PreparedFirstOrderGRAMIS,
+    round,
+    execution::_KernelExecution,
+)
+    return _cooperative_local_weights!(method_state, round, execution)
+end
+
 function _fit_local_covariances!(
     method_state::_PreparedFirstOrderGRAMIS,
     round,
     execution,
 )
-    covariance_arguments = _first_order_gramis_covariance_kernel_arguments(
-        method_state,
-        round,
-    )
-    _local_group_starts!(
-        covariance_arguments[1]...,
-        execution,
-    )
-    _local_weight_summary!(method_state, round, execution)
-    _tempering_power!(method_state, round, execution)
+    _prepare_local_covariance_weights!(method_state, round, execution)
 
     workspace = method_state.workspace
     backend = KernelAbstractions.get_backend(workspace.covariances)
@@ -2145,7 +2350,7 @@ function _fit_local_covariances!(
         _first_order_gramis_covariance_kernel_arguments(
             method_state,
             round,
-        )[4]...;
+        )[2]...;
         ndrange=covariance_entries,
         workgroupsize=_first_order_gramis_workgroupsize(
             execution,
@@ -2211,7 +2416,7 @@ function _blend_local_covariances!(
         _first_order_gramis_covariance_kernel_arguments(
             method_state,
             round,
-        )[5]...;
+        )[3]...;
         ndrange=proposal_count,
         workgroupsize=_first_order_gramis_workgroupsize(
             execution,

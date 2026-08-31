@@ -478,6 +478,18 @@ function _resolve_first_order_gramis_thresholds(
     return thresholds
 end
 
+function _first_order_gramis_group_starts(counts)
+    starts = similar(counts)
+    for round in axes(counts, 2)
+        first_sample = 1
+        for proposal in axes(counts, 1)
+            starts[proposal, round] = first_sample
+            first_sample += counts[proposal, round]
+        end
+    end
+    return starts
+end
+
 function _allocate_first_order_gramis_workspace(bank, plan, ::Type{L}) where {L}
     T = eltype(bank.locations)
     dimension, proposal_count = size(bank.locations)
@@ -492,7 +504,7 @@ function _allocate_first_order_gramis_workspace(bank, plan, ::Type{L}) where {L}
         similar(prototype, Int, capacity),
         similar(prototype, T, capacity),
         _allocate_mis_solve_scratch(prototype, bank, capacity),
-        similar(prototype, Int, proposal_count),
+        _first_order_gramis_group_starts(plan.counts),
         similar(prototype, T, dimension, dimension, proposal_count),
         similar(prototype, T, dimension, dimension),
         similar(prototype, T, dimension, proposal_count),
@@ -852,9 +864,10 @@ function _preflight_accelerator_method(
     )
 
     covariance_kernels = (
-        _local_group_starts_kernel!(backend),
-        _local_weight_summary_kernel!(backend),
-        _tempering_power_kernel!(backend),
+        _cooperative_local_weights_kernel!(
+            backend,
+            _GRAMIS_REDUCTION_WORKGROUP_SIZE,
+        ),
         _fit_local_covariances_kernel!(backend),
         _blend_local_covariances_kernel!(backend),
     )

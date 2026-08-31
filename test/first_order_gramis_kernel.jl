@@ -675,6 +675,143 @@ function gram_is_local_covariance_fixture(::Type{T}) where {T}
     return state
 end
 
+function gram_is_local_weight_kernel_result(
+    ::Type{T},
+    local_logweights,
+    starts,
+    counts,
+    thresholds;
+    max_iterations=64,
+    cooperative=false,
+) where {T}
+    normalized_weights = fill(T(NaN), length(local_logweights))
+    proposal_count = size(counts, 1)
+    local_ess = fill(T(NaN), proposal_count)
+    tempering_powers = fill(T(NaN), proposal_count)
+    status = fill(UInt8(0xff), proposal_count)
+    backend = GRAMISKernelIS.KernelAbstractions.CPU()
+    arguments = (
+        normalized_weights,
+        local_ess,
+        tempering_powers,
+        status,
+        local_logweights,
+        starts,
+        counts,
+        thresholds,
+        1,
+        T(1.0e-6),
+        max_iterations,
+    )
+    if cooperative
+        kernel = GRAMISKernelIS._cooperative_local_weights_kernel!(
+            backend,
+            GRAMISKernelIS._GRAMIS_REDUCTION_WORKGROUP_SIZE,
+        )
+        kernel(
+            arguments...;
+            ndrange=GRAMISKernelIS._GRAMIS_REDUCTION_WORKGROUP_SIZE *
+                    proposal_count,
+            workgroupsize=GRAMISKernelIS._GRAMIS_REDUCTION_WORKGROUP_SIZE,
+        )
+    else
+        summary_kernel = GRAMISKernelIS._local_weight_summary_kernel!(backend)
+        summary_kernel(
+            arguments[1:7]...,
+            arguments[9];
+            ndrange=proposal_count,
+            workgroupsize=proposal_count,
+        )
+        GRAMISKernelIS.KernelAbstractions.synchronize(backend)
+        tempering_kernel = GRAMISKernelIS._tempering_power_kernel!(backend)
+        tempering_kernel(
+            arguments...;
+            ndrange=proposal_count,
+            workgroupsize=proposal_count,
+        )
+    end
+    GRAMISKernelIS.KernelAbstractions.synchronize(backend)
+    return (; normalized_weights, local_ess, tempering_powers, status)
+end
+
+@testset "FirstOrderGRAMIS cooperative local-weight mathematics" begin
+    @test isdefined(GRAMISKernelIS, :_cooperative_local_weights_kernel!)
+    for (T, L) in (
+        (Float32, Float32),
+        (Float64, Float64),
+        (Float32, Float64),
+    )
+        raw_ready = L[0, 0, 0, 0]
+        active = L[0, -4, -8, -12]
+        all_zero = fill(L(-Inf), 4)
+        local_logweights = vcat(raw_ready, active, all_zero)
+        starts = reshape(Int[1, 5, 9], :, 1)
+        counts = fill(4, 3, 1)
+        thresholds = fill(3, 3, 1)
+        reference = gram_is_local_weight_kernel_result(
+            T,
+            local_logweights,
+            starts,
+            counts,
+            thresholds,
+        )
+        cooperative = gram_is_local_weight_kernel_result(
+            T,
+            local_logweights,
+            starts,
+            counts,
+            thresholds;
+            cooperative=true,
+        )
+
+        @test cooperative.status == reference.status == UInt8[
+            GRAMISKernelIS._GRAMIS_COVARIANCE_READY,
+            GRAMISKernelIS._GRAMIS_COVARIANCE_READY,
+            GRAMISKernelIS._GRAMIS_ALL_ZERO_LOCAL,
+        ]
+        @test cooperative.tempering_powers ≈ reference.tempering_powers rtol =
+            T(4.0e-6)
+        @test cooperative.local_ess ≈ reference.local_ess rtol = T(4.0e-6)
+        @test cooperative.normalized_weights[1:8] ≈
+              reference.normalized_weights[1:8] rtol = T(4.0e-6)
+        @test cooperative.tempering_powers[1] == one(T)
+        @test zero(T) < cooperative.tempering_powers[2] < one(T)
+        @test cooperative.tempering_powers[3] == zero(T)
+        @test sum(cooperative.normalized_weights[1:4]) ≈ one(T) rtol =
+            T(4.0e-6)
+        @test sum(cooperative.normalized_weights[5:8]) ≈ one(T) rtol =
+            T(4.0e-6)
+        @test cooperative.local_ess[1] == T(4)
+        @test cooperative.local_ess[2] >= T(3)
+        @test cooperative.local_ess[3] == zero(T)
+
+        fallback_reference = gram_is_local_weight_kernel_result(
+            T,
+            active,
+            ones(Int, 1, 1),
+            fill(4, 1, 1),
+            fill(3, 1, 1);
+            max_iterations=1,
+        )
+        fallback_cooperative = gram_is_local_weight_kernel_result(
+            T,
+            active,
+            ones(Int, 1, 1),
+            fill(4, 1, 1),
+            fill(3, 1, 1);
+            max_iterations=1,
+            cooperative=true,
+        )
+        @test fallback_cooperative.status == fallback_reference.status ==
+              UInt8[GRAMISKernelIS._GRAMIS_TEMPERING_FALLBACK]
+        @test fallback_cooperative.tempering_powers == zeros(T, 1)
+        @test fallback_cooperative.local_ess ≈ fallback_reference.local_ess rtol =
+            T(4.0e-6)
+        @test sum(fallback_cooperative.normalized_weights) ≈ one(T) rtol =
+            T(4.0e-6)
+    end
+end
+
 @testset "FirstOrderGRAMIS CAIS covariance centering oracle" begin
     for T in (Float32, Float64), execution in (
         GRAMISKernelIS._SerialCPUExecution(),

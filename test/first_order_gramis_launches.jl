@@ -6,48 +6,61 @@ import Random
 const GRAMISLaunchIS = ImportanceSamplers
 const GRAMISLaunchKA = GRAMISLaunchIS.KernelAbstractions
 
-const GRAMIS_LAUNCH_FUNCTIONS = (
+const GRAMIS_COOPERATIVE_LOCAL_WEIGHTS_FUNCTION =
+    isdefined(GRAMISLaunchIS, :cpu__cooperative_local_weights_kernel!) ?
+    typeof(GRAMISLaunchIS.cpu__cooperative_local_weights_kernel!) : nothing
+const GRAMIS_GROUP_STARTS_FUNCTION =
+    isdefined(GRAMISLaunchIS, :cpu__local_group_starts_kernel!) ?
+    typeof(GRAMISLaunchIS.cpu__local_group_starts_kernel!) : nothing
+const GRAMIS_RECORDED_LAUNCH_FUNCTIONS = (
     local_weights=typeof(GRAMISLaunchIS.cpu__first_order_gramis_local_weights_kernel!),
-    group_starts=typeof(GRAMISLaunchIS.cpu__local_group_starts_kernel!),
+    group_starts=GRAMIS_GROUP_STARTS_FUNCTION,
     local_summary=typeof(GRAMISLaunchIS.cpu__local_weight_summary_kernel!),
     tempering=typeof(GRAMISLaunchIS.cpu__tempering_power_kernel!),
+    cooperative_local_weights=GRAMIS_COOPERATIVE_LOCAL_WEIGHTS_FUNCTION,
     covariance_fit=typeof(GRAMISLaunchIS.cpu__fit_local_covariances_kernel!),
     covariance_blend=typeof(GRAMISLaunchIS.cpu__blend_local_covariances_kernel!),
 )
 const GRAMIS_LAUNCH_RECORDS = NamedTuple[]
 const GRAMIS_RECORD_LAUNCHES = Ref(false)
 
-for function_type in values(GRAMIS_LAUNCH_FUNCTIONS)
-    @eval function (kernel::GRAMISLaunchKA.Kernel{
-            GRAMISLaunchKA.CPU,
-            GRAMISLaunchKA.NDIteration.DynamicSize,
-            GRAMISLaunchKA.NDIteration.DynamicSize,
-            $function_type,
-        })(
-        args...;
-        ndrange=nothing,
-        workgroupsize=nothing,
-    )
-        GRAMIS_RECORD_LAUNCHES[] && push!(
-            GRAMIS_LAUNCH_RECORDS,
-            (; function_type=$function_type, ndrange, workgroupsize),
+for (name, function_type) in pairs(GRAMIS_RECORDED_LAUNCH_FUNCTIONS)
+    isnothing(function_type) && continue
+    workgroupsize_type = name === :cooperative_local_weights ?
+                         GRAMISLaunchKA.NDIteration.StaticSize{(256,)} :
+                         GRAMISLaunchKA.NDIteration.DynamicSize
+    @eval begin
+        function (kernel::GRAMISLaunchKA.Kernel{
+                GRAMISLaunchKA.CPU,
+                $workgroupsize_type,
+                GRAMISLaunchKA.NDIteration.DynamicSize,
+                $function_type,
+            })(
+            args...;
+            ndrange=nothing,
+            workgroupsize=nothing,
         )
-        ndrange, workgroupsize, iterspace, dynamic =
-            GRAMISLaunchKA.launch_config(
-            kernel,
-            ndrange,
-            workgroupsize,
-        )
-        isempty(GRAMISLaunchKA.blocks(iterspace)) && return nothing
-        GRAMISLaunchKA.__run(
-            kernel,
-            ndrange,
-            iterspace,
-            args,
-            dynamic,
-            kernel.backend.static,
-        )
-        return nothing
+            GRAMIS_RECORD_LAUNCHES[] && push!(
+                GRAMIS_LAUNCH_RECORDS,
+                (; function_type=$function_type, ndrange, workgroupsize),
+            )
+            ndrange, workgroupsize, iterspace, dynamic =
+                GRAMISLaunchKA.launch_config(
+                kernel,
+                ndrange,
+                workgroupsize,
+            )
+            isempty(GRAMISLaunchKA.blocks(iterspace)) && return nothing
+            GRAMISLaunchKA.__run(
+                kernel,
+                ndrange,
+                iterspace,
+                args,
+                dynamic,
+                kernel.backend.static,
+            )
+            return nothing
+        end
     end
 end
 
@@ -98,15 +111,22 @@ end
 
     @test length(result) == round_size
     pool_threads = Threads.nthreads(:default)
-    expected_ranges = (
+    cpu_expected_ranges = (
         local_weights=round_size,
-        group_starts=1,
         local_summary=proposal_count,
         tempering=proposal_count,
         covariance_fit=dimension * dimension * proposal_count,
         covariance_blend=proposal_count,
     )
-    for (name, function_type) in pairs(GRAMIS_LAUNCH_FUNCTIONS)
+    @test GRAMIS_GROUP_STARTS_FUNCTION === nothing
+    @test GRAMIS_COOPERATIVE_LOCAL_WEIGHTS_FUNCTION !== nothing
+    @test count(
+        record -> record.function_type ===
+                  GRAMIS_COOPERATIVE_LOCAL_WEIGHTS_FUNCTION,
+        GRAMIS_LAUNCH_RECORDS,
+    ) == 0
+    for (name, ndrange) in pairs(cpu_expected_ranges)
+        function_type = getproperty(GRAMIS_RECORDED_LAUNCH_FUNCTIONS, name)
         matching = filter(
             record -> record.function_type === function_type,
             GRAMIS_LAUNCH_RECORDS,
@@ -114,8 +134,7 @@ end
         @test length(matching) == 1
         length(matching) == 1 || continue
         record = only(matching)
-        ndrange = expected_ranges[name]
-        expected_workgroupsize = min(
+        expected_workgroupsize = name === :cooperative_local_weights ? 256 : min(
             1_024,
             max(1, fld(ndrange, pool_threads)),
         )
@@ -124,5 +143,38 @@ end
         record.workgroupsize == expected_workgroupsize || continue
         @test cld(ndrange, record.workgroupsize) >=
               min(pool_threads, ndrange)
+    end
+
+    empty!(GRAMIS_LAUNCH_RECORDS)
+    GRAMIS_RECORD_LAUNCHES[] = true
+    try
+        GRAMISLaunchIS._prepare_local_covariance_weights!(
+            sampler.method_state,
+            1,
+            GRAMISLaunchIS._KernelExecution(
+                GRAMISLaunchIS._ThreadedCPUExecution(),
+            ),
+        )
+    finally
+        GRAMIS_RECORD_LAUNCHES[] = false
+    end
+
+    for name in (:local_summary, :tempering)
+        function_type = getproperty(GRAMIS_RECORDED_LAUNCH_FUNCTIONS, name)
+        @test count(
+            record -> record.function_type === function_type,
+            GRAMIS_LAUNCH_RECORDS,
+        ) == 0
+    end
+    cooperative_launches = filter(
+        record -> record.function_type ===
+                  GRAMIS_COOPERATIVE_LOCAL_WEIGHTS_FUNCTION,
+        GRAMIS_LAUNCH_RECORDS,
+    )
+    @test length(cooperative_launches) == 1
+    if length(cooperative_launches) == 1
+        launch = only(cooperative_launches)
+        @test launch.ndrange == 256 * proposal_count
+        @test launch.workgroupsize == 256
     end
 end

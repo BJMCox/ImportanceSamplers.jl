@@ -129,6 +129,52 @@ function gram_is_cuda_population_cholesky(::Type{T}, dimension, proposal_count) 
     )
 end
 
+function gram_is_cuda_local_weights(
+    ::Type{T},
+    local_logweights;
+    max_iterations=64,
+) where {T}
+    sample_count = 4
+    proposal_count = length(local_logweights) ÷ sample_count
+    counts = fill(sample_count, proposal_count, 1)
+    starts = IS._first_order_gramis_group_starts(counts)
+    normalized_weights = CUDA.fill(T(NaN), length(local_logweights))
+    local_ess = CUDA.fill(T(NaN), proposal_count)
+    tempering_powers = CUDA.fill(T(NaN), proposal_count)
+    status = CUDA.fill(UInt8(0xff), proposal_count)
+    device_logweights = CuArray(local_logweights)
+    device_starts = CuArray(starts)
+    device_counts = CuArray(counts)
+    thresholds = CUDA.fill(3, proposal_count, 1)
+    backend = IS.KernelAbstractions.get_backend(normalized_weights)
+    kernel = IS._cooperative_local_weights_kernel!(
+        backend,
+        IS._GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    kernel(
+        normalized_weights,
+        local_ess,
+        tempering_powers,
+        status,
+        device_logweights,
+        device_starts,
+        device_counts,
+        thresholds,
+        1,
+        T(1.0e-6),
+        max_iterations;
+        ndrange=IS._GRAMIS_REDUCTION_WORKGROUP_SIZE * proposal_count,
+        workgroupsize=IS._GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    CUDA.synchronize()
+    return (
+        normalized_weights=Array(normalized_weights),
+        local_ess=Array(local_ess),
+        tempering_powers=Array(tempering_powers),
+        status=Array(status),
+    )
+end
+
 
 function gram_is_cuda_preflight(::Type{T}) where {T}
     bank = ProposalBank([
@@ -400,6 +446,40 @@ end
 
 const GRAMIS_CUDA_MULTI_DEVICE_RESTORATION =
     gram_is_multi_device_restoration_test()
+
+
+@testset "FirstOrderGRAMIS CUDA cooperative local weights" begin
+    caller_device = CUDA.device()
+    for T in (Float32, Float64)
+        raw_ready = T[0, 0, 0, 0]
+        active = T[0, -4, -8, -12]
+        all_zero = fill(T(-Inf), 4)
+        result = gram_is_cuda_local_weights(
+            T,
+            vcat(raw_ready, active, all_zero),
+        )
+
+        @test result.status == UInt8[
+            IS._GRAMIS_COVARIANCE_READY,
+            IS._GRAMIS_COVARIANCE_READY,
+            IS._GRAMIS_ALL_ZERO_LOCAL,
+        ]
+        @test result.tempering_powers[1] == one(T)
+        @test zero(T) < result.tempering_powers[2] < one(T)
+        @test result.tempering_powers[3] == zero(T)
+        @test sum(result.normalized_weights[1:4]) ≈ one(T) rtol = T(4.0e-6)
+        @test sum(result.normalized_weights[5:8]) ≈ one(T) rtol = T(4.0e-6)
+        @test result.local_ess[1] == T(4)
+        @test result.local_ess[2] >= T(3)
+        @test result.local_ess[3] == zero(T)
+
+        fallback = gram_is_cuda_local_weights(T, active; max_iterations=1)
+        @test fallback.status == UInt8[IS._GRAMIS_TEMPERING_FALLBACK]
+        @test fallback.tempering_powers == zeros(T, 1)
+        @test sum(fallback.normalized_weights) ≈ one(T) rtol = T(4.0e-6)
+    end
+    @test CUDA.device() == caller_device
+end
 
 
 @testset "FirstOrderGRAMIS CUDA preflight and pooled adapters" begin
