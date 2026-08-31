@@ -1656,7 +1656,7 @@ function gram_is_two_round_phase_sampler(; diagnostic_copy_failure=false)
     write_failure = GRAMISWriteFailure(true, 0, 7)
     workspace_values = map(fieldnames(typeof(state.workspace))) do name
         value = getfield(state.workspace, name)
-        name in (:samples, :pooled_covariance) ?
+        name in (:samples, :covariance_centres, :pooled_covariance) ?
         GRAMISResultCopyFailureArray(value, write_failure, false) : value
     end
     workspace = ImportanceSamplers._FirstOrderGRAMISWorkspace(
@@ -1909,7 +1909,7 @@ end
     failure_switch = GRAMISOneShotFailure(true)
     workspace_values = map(fieldnames(typeof(state.workspace))) do name
         value = getfield(state.workspace, name)
-        name in (:samples, :pooled_covariance) ?
+        name in (:samples, :covariance_centres, :pooled_covariance) ?
         GRAMISResultAllocationFailureArray(value, failure_switch) : value
     end
     workspace = ImportanceSamplers._FirstOrderGRAMISWorkspace(
