@@ -128,7 +128,7 @@ end
 end
 
 function gram_is_benchmark_gradient!(destination, sample)
-    @inbounds for index in eachindex(destination, sample)
+    @inbounds for index in 1:length(destination)
         destination[index] = -sample[index]
     end
     return destination
