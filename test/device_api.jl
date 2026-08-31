@@ -549,6 +549,34 @@ function first_order_gramis_cpu_gradient!(
     return destination
 end
 
+function collect_nested_arrays(value)
+    arrays = Any[]
+    seen = Base.IdSet{Any}()
+
+    function visit(value)
+        if value isa AbstractArray
+            push!(arrays, value)
+            return
+        end
+        type = typeof(value)
+        if value isa Union{Nothing,Number,AbstractString,Symbol,Type,Module} ||
+           isprimitivetype(type)
+            return
+        end
+        if Base.ismutabletype(type)
+            value in seen && return
+            push!(seen, value)
+        end
+        for field in 1:fieldcount(type)
+            isdefined(value, field) && visit(getfield(value, field))
+        end
+        return
+    end
+
+    visit(value)
+    return arrays
+end
+
 @testset "broad device Function rules do not opt closures in" begin
     ordinary = let captured = [0.75]
         (sample, p) -> p.shift[1] + captured[1] - abs2(sample) / 2
@@ -609,6 +637,14 @@ end
     committed = state.committed
     run = state.run
     candidate = state.candidate
+    transferred_arrays = collect_nested_arrays((
+        IS._first_order_gramis_resident_state(state),
+        destination.target,
+        destination.random_buffers,
+        destination.rng,
+    ))
+    @test !isempty(transferred_arrays)
+    @test all(array -> array isa KernelArgumentTestArray, transferred_arrays)
     for arrays in (
         (committed.locations, run.locations, candidate.locations),
         (committed.factors, run.factors, candidate.factors),
