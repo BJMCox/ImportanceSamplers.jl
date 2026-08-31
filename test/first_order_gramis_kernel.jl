@@ -921,6 +921,7 @@ end
 end
 
 @testset "FirstOrderGRAMIS accelerator weighted centres and covariance symmetry" begin
+    read_state = nothing
     for T in (Float32, Float64)
         bank = ProposalBank([
             FactorGaussian(T[0, 0], T[1 0; 0 1]),
@@ -934,10 +935,8 @@ end
             repulsion_strength=zero(T),
             covariance_ess_threshold=3,
         ))
+        read_state = state
         workspace = state.workspace
-
-        @test hasproperty(workspace, :covariance_centres)
-        hasproperty(workspace, :covariance_centres) || continue
 
         workspace.samples .= T[
             1 3 5 7 9 11 9 11 0 0 0 0
@@ -972,6 +971,48 @@ end
                   bitstring.(transpose(workspace.covariances[:, :, proposal]))
         end
     end
+
+    state = read_state
+    workspace = state.workspace
+    backend = GRAMISKernelIS.KernelAbstractions.CPU()
+    centre_reads = Ref(0)
+    centre_arguments = GRAMISKernelIS._first_order_gramis_covariance_centre_arguments(
+        state,
+        1,
+    )
+    centre_kernel = GRAMISKernelIS._fit_accelerator_covariance_centres_kernel!(
+        backend,
+        GRAMISKernelIS._GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    centre_kernel(
+        centre_arguments[1:4]...,
+        GRAMISReadCountingArray(workspace.samples, centre_reads),
+        centre_arguments[6:end]...;
+        ndrange=GRAMISKernelIS._GRAMIS_REDUCTION_WORKGROUP_SIZE *
+                length(workspace.covariance_centres),
+        workgroupsize=GRAMISKernelIS._GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    GRAMISKernelIS.KernelAbstractions.synchronize(backend)
+    @test centre_reads[] == 8
+
+    covariance_reads = Ref(0)
+    covariance_arguments =
+        GRAMISKernelIS._first_order_gramis_accelerator_covariance_arguments(
+            state,
+            1,
+        )
+    covariance_kernel = GRAMISKernelIS._fit_accelerator_covariances_kernel!(
+        backend,
+    )
+    covariance_kernel(
+        covariance_arguments[1:4]...,
+        GRAMISReadCountingArray(workspace.samples, covariance_reads),
+        covariance_arguments[6:end]...;
+        ndrange=length(workspace.covariances),
+        workgroupsize=length(workspace.covariances),
+    )
+    GRAMISKernelIS.KernelAbstractions.synchronize(backend)
+    @test covariance_reads[] == 48
 end
 
 function gram_is_stability_fixture(::Type{T}, execution) where {T}

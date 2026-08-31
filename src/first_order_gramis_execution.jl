@@ -2371,6 +2371,7 @@ end
     partial_centres = @localmem eltype(covariance_centres) (
         _GRAMIS_REDUCTION_WORKGROUP_SIZE,
     )
+    # coordinate, proposal, first sample, last sample, weighted-centre flag
     group_state = @localmem eltype(starts) (5,)
     if @inbounds(lane[1]) == 1
         dimension = size(samples, 1)
