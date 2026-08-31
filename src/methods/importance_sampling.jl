@@ -372,7 +372,7 @@ end
 _copy_accelerator_algorithm(device, algorithm, method_state) =
     _copy_algorithm(device, algorithm)
 
-_prepare_transferred_method_state(device, algorithm, method_state) =
+_prepare_transferred_method_state(device, algorithm, method_state, transferred_target) =
     _prepare_method_state(algorithm)
 
 _accelerator_method_state_limit(method_state) = nothing
@@ -498,11 +498,12 @@ function _transfer_prepared_sampler(
             sampler.algorithm,
             sampler.method_state,
         )
-        target = _transfer_prepared_target(device, sampler.target)
+        transferred_target = _transfer_prepared_target(device, sampler.target)
         method_state = _prepare_transferred_method_state(
             device,
             algorithm,
             sampler.method_state,
+            transferred_target,
         )
         random_buffers = _allocate_random_buffers(
             device,
@@ -522,13 +523,13 @@ function _transfer_prepared_sampler(
             _transferred_backend_state(
                 algorithm,
                 method_state,
-                target,
+                transferred_target,
                 random_buffers,
             ),
         )
         _preflight_accelerator_method(
             device,
-            target,
+            transferred_target,
             algorithm,
             method_state,
             random_buffers,
@@ -548,7 +549,7 @@ function _transfer_prepared_sampler(
         destination = _PreparedImportanceSampler(
             backend_rng,
             random_buffers,
-            target,
+            transferred_target,
             algorithm,
             method_state,
             device,

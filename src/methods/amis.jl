@@ -371,6 +371,7 @@ function _prepare_transferred_method_state(
     device,
     algorithm::AMIS,
     method_state::_PreparedAMIS,
+    transferred_target,
 )
     transferred = _PreparedAMIS(
         Tuple(method_state.schedule),

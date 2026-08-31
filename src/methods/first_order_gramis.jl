@@ -688,8 +688,124 @@ _copy_algorithm(
     algorithm::FirstOrderGRAMIS,
 ) = deepcopy(algorithm)
 
-_accelerator_method_state_limit(::_PreparedFirstOrderGRAMIS) =
-    :first_order_gramis_accelerator_unavailable
+function _copy_accelerator_algorithm(
+    device,
+    algorithm::FirstOrderGRAMIS,
+    ::_PreparedFirstOrderGRAMIS,
+)
+    return deepcopy(algorithm)
+end
+
+function _copy_first_order_gramis_state_bank(
+    device,
+    bank::_PackedFactorGaussianBank,
+    transferred_metadata::_PackedFactorGaussianBank,
+)
+    return _PackedFactorGaussianBank(
+        _copy_to_device(device, bank.locations),
+        _copy_to_device(device, bank.factors),
+        _copy_to_device(device, bank.lognormalizers),
+        transferred_metadata.logmasses,
+        transferred_metadata.cdf,
+        transferred_metadata.proposal_ids,
+    )
+end
+
+function _copy_first_order_gramis_workspace(device, workspace)
+    return _FirstOrderGRAMISWorkspace(
+        _copy_to_device(device, workspace.samples),
+        _copy_to_device(device, workspace.round_logweights),
+        _copy_to_device(device, workspace.local_logweights),
+        _copy_to_device(device, workspace.generating_logdensities),
+        _copy_to_device(device, workspace.round_proposal_ids),
+        _copy_to_device(device, workspace.round_ids),
+        _copy_to_device(device, workspace.normalized_weights),
+        _copy_to_device(device, workspace.solve_scratch),
+        _copy_to_device(device, workspace.local_starts),
+        _copy_to_device(device, workspace.covariances),
+        _copy_to_device(device, workspace.pooled_covariance),
+        _copy_to_device(device, workspace.whitened_means),
+        _copy_to_device(device, workspace.gradients),
+        _copy_to_device(device, workspace.frozen_values),
+        _copy_to_device(device, workspace.candidate_values),
+        _copy_to_device(device, workspace.moves),
+        _copy_to_device(device, workspace.active_mask),
+        _copy_to_device(device, workspace.steps),
+        _copy_to_device(device, workspace.repulsion),
+        _copy_to_device(device, workspace.factor_status),
+        _copy_to_device(device, workspace.factor_info),
+        _copy_to_device(device, workspace.local_ess),
+        _copy_to_device(device, workspace.tempering_powers),
+        _copy_to_device(device, workspace.backtracking_trials),
+        _copy_to_device(device, workspace.collision_counts),
+    )
+end
+
+function _prepare_transferred_method_state(
+    device,
+    algorithm::FirstOrderGRAMIS,
+    method_state::_PreparedFirstOrderGRAMIS,
+    transferred_target,
+)
+    committed = _copy_packed_gaussian_bank(device, method_state.committed)
+    run = _copy_first_order_gramis_state_bank(
+        device,
+        method_state.run,
+        committed,
+    )
+    candidate = _copy_first_order_gramis_state_bank(
+        device,
+        method_state.candidate,
+        committed,
+    )
+    plan = method_state.plan
+    transferred_plan = _DeterministicAllocationPlan(
+        Tuple(plan.schedule),
+        _copy_to_device(device, plan.counts),
+        _copy_to_device(device, plan.assignments),
+        _copy_to_device(device, plan.logcoefficients),
+        Tuple(plan.offsets),
+    )
+    binding_sample = view(committed.locations, :, 1)
+    bound_gradient = _prepare_bound_gradient(transferred_target, binding_sample, 1)
+    return _PreparedFirstOrderGRAMIS(
+        committed,
+        run,
+        candidate,
+        transferred_plan,
+        _copy_to_device(device, method_state.repulsion_strength),
+        _copy_to_device(device, method_state.covariance_rate),
+        _copy_to_device(device, method_state.covariance_ess_threshold),
+        method_state.covariance_regularization,
+        method_state.tempering_tolerance,
+        method_state.tempering_max_iterations,
+        method_state.repulsion_softening,
+        method_state.max_backtracking_trials,
+        bound_gradient,
+        bound_gradient,
+        _copy_first_order_gramis_workspace(device, method_state.workspace),
+    )
+end
+
+_transferred_backend_state(
+    algorithm,
+    method_state::_PreparedFirstOrderGRAMIS,
+    target,
+    random_buffers,
+) = (method_state, target, random_buffers)
+
+function _preflight_accelerator_method(
+    device,
+    target,
+    algorithm::FirstOrderGRAMIS,
+    method_state::_PreparedFirstOrderGRAMIS,
+    random_buffers,
+    factor_execution,
+)
+    throw(SamplerDeviceError(device, :first_order_gramis_accelerator_unavailable))
+end
+
+_accelerator_method_state_limit(::_PreparedFirstOrderGRAMIS) = nothing
 
 function _first_order_gramis_preserving_cpu_destination(destination)
     if applicable(eltype, destination)

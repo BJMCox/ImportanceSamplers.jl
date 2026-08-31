@@ -40,6 +40,7 @@ function _prepare_transferred_method_state(
         _PackedDiagonalGaussianBank,
         _PackedFactorGaussianBank,
     }},
+    transferred_target,
 )
     transferred_bank = _copy_packed_gaussian_bank(device, method_state.bank)
     design = method_state.design

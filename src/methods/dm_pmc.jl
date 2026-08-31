@@ -527,6 +527,7 @@ function _prepare_transferred_method_state(
     device,
     algorithm::DeterministicMixturePMC,
     method_state::_PreparedDMPMC,
+    transferred_target,
 )
     plan = method_state.plan
     transferred_plan = _DeterministicAllocationPlan(

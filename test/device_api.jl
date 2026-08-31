@@ -3,6 +3,7 @@ using ImportanceSamplers
 import ADTypes
 import Adapt
 import DensityInterface
+import ForwardDiff
 import KernelAbstractions
 import LinearAlgebra
 import MLDataDevices
@@ -87,6 +88,37 @@ MLDataDevices.isleaf(::DerivativeTransferContext) = true
 function Adapt.adapt_structure(to, context::DerivativeTransferContext)
     DERIVATIVE_CONTEXT_TRANSFERS[] += 1
     return DerivativeTransferContext(Adapt.adapt(to, context.shift))
+end
+
+struct GRAMISTransferValue{A<:AbstractVector}
+    offset::A
+end
+
+MLDataDevices.isleaf(::GRAMISTransferValue) = true
+
+function (target::GRAMISTransferValue)(sample, p)
+    return p.shift[1] + target.offset[1] - sum(abs2, sample) / 2
+end
+
+function Adapt.adapt_structure(to, target::GRAMISTransferValue)
+    DERIVATIVE_VALUE_TRANSFERS[] += 1
+    return GRAMISTransferValue(Adapt.adapt(to, target.offset))
+end
+
+struct GRAMISTransferGradient{A<:AbstractVector}
+    scale::A
+end
+
+MLDataDevices.isleaf(::GRAMISTransferGradient) = true
+
+function (gradient::GRAMISTransferGradient)(destination, sample, p)
+    destination .= -gradient.scale[1] .* sample
+    return destination
+end
+
+function Adapt.adapt_structure(to, gradient::GRAMISTransferGradient)
+    DERIVATIVE_GRADIENT_TRANSFERS[] += 1
+    return GRAMISTransferGradient(Adapt.adapt(to, gradient.scale))
 end
 
 struct UncopyableRNG <: Random.AbstractRNG end
@@ -279,6 +311,16 @@ end
 
     _owned_backend_rng(::Main.KernelArgumentTestAccelerator, seed::UInt64) =
         Random.Xoshiro(seed)
+
+    _preflight_accelerator_method(
+        ::Main.KernelArgumentTestAccelerator,
+        target,
+        algorithm::FirstOrderGRAMIS,
+        method_state::_PreparedFirstOrderGRAMIS,
+        random_buffers::_RandomBuffers,
+        factor_execution,
+    ) = nothing
+
     _owned_backend_rng(::Main.LateFailAccelerator, seed::UInt64) =
         iszero(seed) ? Random.Xoshiro(seed) : error("late RNG construction failure")
 
@@ -455,6 +497,32 @@ function first_order_gramis_device_gradient!(destination, sample, context)
     return destination
 end
 
+function first_order_gramis_float16_target(sample, context)::Float16
+    return context.shift[1] - sum(abs2, sample) / 2
+end
+
+function first_order_gramis_outofplace_gradient(sample, context)
+    return -sample
+end
+
+function first_order_gramis_cpu_gradient!(
+    destination::Vector,
+    sample::Vector,
+    context,
+)
+    destination .= -sample
+    return destination
+end
+
+function first_order_gramis_cpu_gradient!(
+    destination::Vector,
+    sample::SubArray{T,1,<:Matrix},
+    context,
+) where {T}
+    destination .= -sample
+    return destination
+end
+
 @testset "broad device Function rules do not opt closures in" begin
     ordinary = let captured = [0.75]
         (sample, p) -> p.shift[1] + captured[1] - abs2(sample) / 2
@@ -479,7 +547,7 @@ end
     @test accelerator_error.reason === :opaque_host_closure
 end
 
-@testset "FirstOrderGRAMIS target ownership and accelerator gate" begin
+@testset "FirstOrderGRAMIS target ownership and accelerator transfer" begin
     bank = ProposalBank([
         SphericalGaussian([-2.0, 0.0], 0.75),
         DiagonalGaussian([0.0, 2.0], [1.25, 0.5]),
@@ -491,13 +559,12 @@ end
         round_size=[15, 16, 17],
         repulsion_strength=[0.1, 0.2, 0.3],
     )
+    value = GRAMISTransferValue([0.0])
+    gradient = GRAMISTransferGradient([1.0])
     context = DerivativeTransferContext([0.25])
     source = prepare_sampler(
         Random.Xoshiro(0x4752414d4953),
-        LogTarget(
-            first_order_gramis_device_target;
-            grad=first_order_gramis_device_gradient!,
-        ),
+        LogTarget(value; grad=gradient),
         context,
         algorithm;
         threaded=true,
@@ -510,12 +577,206 @@ end
 
     device = KernelArgumentTestAccelerator()
     expected_rng = copy(source.rng)
+    DERIVATIVE_VALUE_TRANSFERS[] = 0
+    DERIVATIVE_GRADIENT_TRANSFERS[] = 0
     DERIVATIVE_CONTEXT_TRANSFERS[] = 0
-    transfer_error = caught_device_error(() -> device(source))
-    @test transfer_error isa SamplerDeviceError
-    @test transfer_error.reason === :first_order_gramis_accelerator_unavailable
-    @test DERIVATIVE_CONTEXT_TRANSFERS[] == 0
+    destination = device(source)
+    state = destination.method_state
+    committed = state.committed
+    run = state.run
+    candidate = state.candidate
+    plan = state.plan
+    workspace = state.workspace
+    buffers = destination.random_buffers
+
+    @test all(
+        array -> array isa KernelArgumentTestArray,
+        (
+            committed.locations,
+            committed.factors,
+            committed.lognormalizers,
+            committed.logmasses,
+            committed.cdf,
+            committed.proposal_ids,
+            run.locations,
+            run.factors,
+            run.lognormalizers,
+            candidate.locations,
+            candidate.factors,
+            candidate.lognormalizers,
+            plan.counts,
+            plan.assignments,
+            plan.logcoefficients,
+            state.repulsion_strength,
+            state.covariance_rate,
+            state.covariance_ess_threshold,
+            destination.target.logdensity.offset,
+            destination.target.gradient.scale,
+            destination.target.context.shift,
+            workspace.samples,
+            workspace.round_logweights,
+            workspace.local_logweights,
+            workspace.generating_logdensities,
+            workspace.round_proposal_ids,
+            workspace.round_ids,
+            workspace.normalized_weights,
+            workspace.solve_scratch,
+            workspace.local_starts,
+            workspace.covariances,
+            workspace.pooled_covariance,
+            workspace.whitened_means,
+            workspace.gradients,
+            workspace.frozen_values,
+            workspace.candidate_values,
+            workspace.moves,
+            workspace.active_mask,
+            workspace.steps,
+            workspace.repulsion,
+            workspace.factor_status,
+            workspace.factor_info,
+            workspace.local_ess,
+            workspace.tempering_powers,
+            workspace.backtracking_trials,
+            workspace.collision_counts,
+            buffers.uniform,
+            buffers.normal,
+            buffers.failure_scratch.record.storage,
+        ),
+    )
+    for arrays in (
+        (committed.locations, run.locations, candidate.locations),
+        (committed.factors, run.factors, candidate.factors),
+        (
+            committed.lognormalizers,
+            run.lognormalizers,
+            candidate.lognormalizers,
+        ),
+    )
+        @test arrays[1] !== arrays[2]
+        @test arrays[1] !== arrays[3]
+        @test arrays[2] !== arrays[3]
+    end
+    @test run.logmasses === committed.logmasses === candidate.logmasses
+    @test run.cdf === committed.cdf === candidate.cdf
+    @test run.proposal_ids === committed.proposal_ids === candidate.proposal_ids
+    @test plan.schedule isa Tuple
+    @test plan.offsets isa Tuple
+    @test state.serial_gradient === state.threaded_gradient
+    @test state.serial_gradient isa IS._BoundInPlaceGradient
+    @test state.serial_gradient !== source.method_state.serial_gradient
+    @test state.serial_gradient.target === destination.target
+    @test destination.target.context === state.serial_gradient.target.context
+    @test DERIVATIVE_VALUE_TRANSFERS[] == 1
+    @test DERIVATIVE_GRADIENT_TRANSFERS[] == 1
+    @test DERIVATIVE_CONTEXT_TRANSFERS[] == 1
+    @test destination.device === device
+    rand(expected_rng, UInt64)
     @test rand(source.rng, UInt64) == rand(expected_rng, UInt64)
+end
+
+@testset "FirstOrderGRAMIS accelerator derivative preflight" begin
+    bank = ProposalBank([
+        SphericalGaussian([-1.0, 0.0], 1.0),
+        SphericalGaussian([1.0, 0.0], 1.0),
+    ])
+    algorithm = FirstOrderGRAMIS(
+        bank;
+        rounds=1,
+        round_size=8,
+        repulsion_strength=0.0,
+    )
+    context = DerivativeTransferContext([0.25])
+    device = KernelArgumentTestAccelerator()
+
+    missing_rng = Random.Xoshiro(0x4752414d495301)
+    expected_missing_rng = copy(missing_rng)
+    @test_throws ArgumentError prepare_sampler(
+        missing_rng,
+        LogTarget(GRAMISTransferValue([0.0])),
+        context,
+        algorithm;
+        threaded=true,
+    )
+    @test rand(missing_rng, UInt64) == rand(expected_missing_rng, UInt64)
+
+    wrong_scalar_rng = Random.Xoshiro(0x4752414d495306)
+    expected_wrong_scalar_rng = copy(wrong_scalar_rng)
+    wrong_scalar_error = caught_device_error() do
+        prepare_sampler(
+            wrong_scalar_rng,
+            LogTarget(
+                first_order_gramis_float16_target;
+                grad=first_order_gramis_device_gradient!,
+            ),
+            context,
+            algorithm;
+            threaded=true,
+        )
+    end
+    @test wrong_scalar_error isa SamplerExecutionError
+    @test occursin(
+        "target log-density return type must be provably limited to Float32 " *
+        "and Float64; inferred Float16",
+        sprint(showerror, wrong_scalar_error),
+    )
+    @test rand(wrong_scalar_rng, UInt64) == rand(expected_wrong_scalar_rng, UInt64)
+
+    cases = (
+        (
+            0x4752414d495302,
+            LogTarget(
+                GRAMISTransferValue([0.0]),
+                ADTypes.AutoForwardDiff(),
+            ),
+            :gradient_source_cpu_only,
+        ),
+        (
+            0x4752414d495303,
+            LogTarget(
+                GRAMISTransferValue([0.0]);
+                grad=first_order_gramis_outofplace_gradient,
+            ),
+            :out_of_place_gradient_cpu_only,
+        ),
+        (
+            0x4752414d495304,
+            LogTarget(
+                GRAMISTransferValue([0.0]);
+                grad=first_order_gramis_cpu_gradient!,
+            ),
+            :gradient_source_cpu_only,
+        ),
+    )
+    for (seed, target, reason) in cases
+        source = prepare_sampler(
+            Random.Xoshiro(seed),
+            target,
+            context,
+            algorithm;
+            threaded=true,
+        )
+        expected_rng = copy(source.rng)
+        error = caught_device_error(() -> device(source))
+        @test error isa SamplerDeviceError
+        @test error.reason === reason
+        @test rand(source.rng, UInt64) == rand(expected_rng, UInt64)
+    end
+
+    opaque_gradient = let scale = [1.0]
+        (destination, sample, p) -> (destination .= -scale[1] .* sample)
+    end
+    opaque_source = prepare_sampler(
+        Random.Xoshiro(0x4752414d495305),
+        LogTarget(GRAMISTransferValue([0.0]); grad=opaque_gradient),
+        context,
+        algorithm;
+        threaded=true,
+    )
+    expected_opaque_rng = copy(opaque_source.rng)
+    opaque_error = caught_device_error(() -> device(opaque_source))
+    @test opaque_error isa SamplerDeviceError
+    @test opaque_error.reason === :opaque_host_closure
+    @test rand(opaque_source.rng, UInt64) == rand(expected_opaque_rng, UInt64)
 end
 
 @testset "explicit prepared device transfer" begin
