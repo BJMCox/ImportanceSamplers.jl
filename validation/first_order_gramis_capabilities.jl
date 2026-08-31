@@ -257,6 +257,7 @@ function gram_is_multi_device_restoration_test()
     caller = CUDA.device()
     requested = first(device for device in devices if device != caller)
     source = gram_is_cuda_sampler(Float32; round_size=8, device=:cpu)
+    transfer_observed_device = caller
     sampler = try
         gram_is_cuda_device(requested)(source)
     finally
@@ -264,6 +265,7 @@ function gram_is_multi_device_restoration_test()
         CUDA.device!(caller)
     end
     @test transfer_observed_device == caller
+    execution_observed_device = caller
     result = try
         importance_sample!(sampler)
     finally
