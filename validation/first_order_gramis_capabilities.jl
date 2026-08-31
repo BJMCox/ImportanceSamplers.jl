@@ -2,10 +2,35 @@ using CUDA
 using ImportanceSamplers
 using LinearAlgebra
 using MLDataDevices
+using Pkg
 using Random
 using Test
 
 const IS = ImportanceSamplers
+const GRAMIS_CUDA_VALIDATION_SEED = 0x4752414d49534355
+const GRAMIS_CUDA_EXECUTION_SEED = 0x4752414d49534532
+const GRAMIS_CUDA_REFERENCE_ROUND_SIZE = 65_536
+const GRAMIS_CUDA_REFERENCE_MEAN_ATOL = 0.035
+const GRAMIS_CUDA_REFERENCE_COVARIANCE_ATOL = 0.055
+const GRAMIS_CUDA_CHOLESKY_RTOL = (Float32=3f-4, Float64=3e-12)
+
+function gram_is_validation_source_provenance(; required=false)
+    value = get(ENV, "IMPORTANCE_SAMPLERS_SOURCE_COMMIT", "")
+    supplied = !isempty(value)
+    required && !supplied && error(
+        "CUDA validation requires IMPORTANCE_SAMPLERS_SOURCE_COMMIT",
+    )
+    supplied && !occursin(r"^[0-9a-f]{40}$", value) && error(
+        "IMPORTANCE_SAMPLERS_SOURCE_COMMIT must be 40 lowercase hex characters",
+    )
+    return (
+        environment_variable="IMPORTANCE_SAMPLERS_SOURCE_COMMIT",
+        commit=supplied ? value : nothing,
+        supplied,
+    )
+end
+
+const GRAMIS_CUDA_SOURCE = gram_is_validation_source_provenance(required=true)
 
 struct CUDAFirstOrderGRAMISTarget{T} end
 struct CUDAFirstOrderGRAMISGradient end
@@ -42,8 +67,7 @@ function (::CUDAFirstOrderGRAMISZeroGradient)(destination, sample)
     return destination
 end
 
-function gram_is_cuda_device()
-    physical = CUDA.device()
+function gram_is_cuda_device(physical=CUDA.device())
     return MLDataDevices.CUDADevice{typeof(physical),Nothing}(physical)
 end
 
@@ -96,7 +120,7 @@ function gram_is_cuda_preflight(::Type{T}) where {T}
         FactorGaussian(T[1, 0], T[0.9 0; -0.2 1.1]),
     ])
     source = prepare_sampler(
-        Random.Xoshiro(0x4752414d49534355),
+        Random.Xoshiro(GRAMIS_CUDA_VALIDATION_SEED),
         LogTarget(
             CUDAFirstOrderGRAMISTarget{T}();
             grad=CUDAFirstOrderGRAMISGradient(),
@@ -128,6 +152,9 @@ function gram_is_cuda_sampler(
     ::Type{T};
     repulsion_strength=zero(T),
     fallback=false,
+    rounds=2,
+    round_size=8,
+    device=:cuda,
 ) where {T}
     bank = ProposalBank([
         FactorGaussian(T[-1, 0], T[1 0; 0.1 0.8]),
@@ -142,17 +169,22 @@ function gram_is_cuda_sampler(
         grad=CUDAFirstOrderGRAMISGradient(),
     )
     source = prepare_sampler(
-        Random.Xoshiro(0x4752414d49534532),
+        Random.Xoshiro(GRAMIS_CUDA_EXECUTION_SEED),
         target,
         FirstOrderGRAMIS(
             bank;
-            rounds=2,
-            round_size=8,
+            rounds,
+            round_size,
             repulsion_strength=repulsion_strength,
         );
         threaded=true,
     )
-    return gram_is_cuda_device()(source)
+    if device === :cpu
+        return source
+    elseif device === :cuda
+        return gram_is_cuda_device()(source)
+    end
+    error("unknown FirstOrderGRAMIS validation device $device")
 end
 
 function gram_is_cuda_population_bits(sampler)
@@ -161,6 +193,100 @@ function gram_is_cuda_population_bits(sampler)
         locations=map(bitstring, vec(Array(state.locations))),
         factors=map(bitstring, vec(Array(state.factors))),
         lognormalizers=map(bitstring, Array(state.lognormalizers)),
+    )
+end
+
+function gram_is_host_weighted_moments(result)
+    samples = Array(result.samples)
+    logweights = Array(result.logweights)
+    maximum_logweight = maximum(logweights)
+    weights = exp.(logweights .- maximum_logweight)
+    weights ./= sum(weights)
+    mean = samples * weights
+    centered = samples .- mean
+    covariance = (centered .* reshape(weights, 1, :)) * transpose(centered)
+    return (; mean, covariance)
+end
+
+function gram_is_package_versions()
+    wanted = Set((
+        "Adapt",
+        "CUDA",
+        "ImportanceSamplers",
+        "KernelAbstractions",
+        "MLDataDevices",
+    ))
+    return sort!(
+        [
+            (dependency.name, something(dependency.version, "unversioned")) for
+            dependency in values(Pkg.dependencies()) if dependency.name in wanted
+        ];
+        by=first,
+    )
+end
+
+function gram_is_cuda_validation_environment()
+    device = CUDA.device()
+    return (
+        gpu=CUDA.name(device),
+        capability=CUDA.capability(device),
+        driver=CUDA.driver_version(),
+        runtime=CUDA.runtime_version(),
+        julia=VERSION,
+        packages=gram_is_package_versions(),
+        source=GRAMIS_CUDA_SOURCE,
+        seeds=(
+            preflight=GRAMIS_CUDA_VALIDATION_SEED,
+            execution=GRAMIS_CUDA_EXECUTION_SEED,
+        ),
+        reference_round_size=GRAMIS_CUDA_REFERENCE_ROUND_SIZE,
+        reference_mean_atol=GRAMIS_CUDA_REFERENCE_MEAN_ATOL,
+        reference_covariance_atol=GRAMIS_CUDA_REFERENCE_COVARIANCE_ATOL,
+        cholesky_rtol=GRAMIS_CUDA_CHOLESKY_RTOL,
+        scalar_indexing_allowed=false,
+    )
+end
+
+function gram_is_multi_device_restoration_test()
+    devices = collect(CUDA.devices())
+    length(devices) >= 2 || return (
+        available=false,
+        passed=nothing,
+        device_count=length(devices),
+    )
+    caller = CUDA.device()
+    requested = first(device for device in devices if device != caller)
+    source = gram_is_cuda_sampler(Float32; round_size=8, device=:cpu)
+    sampler = try
+        gram_is_cuda_device(requested)(source)
+    finally
+        transfer_observed_device = CUDA.device()
+        CUDA.device!(caller)
+    end
+    @test transfer_observed_device == caller
+    result = try
+        importance_sample!(sampler)
+    finally
+        execution_observed_device = CUDA.device()
+        CUDA.device!(caller)
+    end
+    @test execution_observed_device == caller
+    @test IS._backend_state_resident(
+        sampler.device,
+        IS._transferred_backend_state(
+            sampler.algorithm,
+            sampler.method_state,
+            sampler.target,
+            sampler.random_buffers,
+        ),
+    )
+    return (
+        available=true,
+        passed=true,
+        device_count=length(devices),
+        caller=string(caller),
+        requested=string(requested),
+        result_samples=length(result),
     )
 end
 
@@ -175,10 +301,81 @@ CUDA.allowscalar(false)
         result = gram_is_cuda_population_cholesky(T, dimension, 3)
         @test result.info == zeros(Int32, 3)
         @test result.factors ≈ result.wrapper_factors rtol =
-            T === Float32 ? 3f-4 : 3e-12
+            T === Float32 ? GRAMIS_CUDA_CHOLESKY_RTOL.Float32 :
+            GRAMIS_CUDA_CHOLESKY_RTOL.Float64
     end
     @test CUDA.device() == caller_device
 end
+
+@testset "FirstOrderGRAMIS CUDA agrees with CPU reference moments" begin
+    caller_device = CUDA.device()
+    for T in (Float32, Float64)
+        cpu_sampler = gram_is_cuda_sampler(
+            T;
+            round_size=GRAMIS_CUDA_REFERENCE_ROUND_SIZE,
+            device=:cpu,
+        )
+        cuda_sampler = gram_is_cuda_sampler(
+            T;
+            round_size=GRAMIS_CUDA_REFERENCE_ROUND_SIZE,
+        )
+        cpu = gram_is_host_weighted_moments(importance_sample!(cpu_sampler))
+        gpu_result = importance_sample!(cuda_sampler)
+        gpu = gram_is_host_weighted_moments(gpu_result)
+        mean_atol = T(GRAMIS_CUDA_REFERENCE_MEAN_ATOL)
+        covariance_atol = T(GRAMIS_CUDA_REFERENCE_COVARIANCE_ATOL)
+        @test gpu.mean ≈ cpu.mean atol = mean_atol rtol = zero(T)
+        @test gpu.covariance ≈ cpu.covariance atol = covariance_atol rtol = zero(T)
+        @test gpu.mean ≈ zeros(T, 2) atol = mean_atol rtol = zero(T)
+        @test gpu.covariance ≈ Matrix{T}(I, 2, 2) atol = covariance_atol rtol = zero(T)
+        @test IS._backend_state_resident(
+            cuda_sampler.device,
+            IS._transferred_backend_state(
+                cuda_sampler.algorithm,
+                cuda_sampler.method_state,
+                cuda_sampler.target,
+                cuda_sampler.random_buffers,
+            ),
+        )
+        @test gpu_result.diagnostics.transfers.count <= 192
+        @test gpu_result.diagnostics.transfers.bytes <= 4_096
+    end
+    @test CUDA.device() == caller_device
+end
+
+@testset "FirstOrderGRAMIS CUDA repeated calls execute on resident state" begin
+    caller_device = CUDA.device()
+    for T in (Float32, Float64)
+        sampler = gram_is_cuda_sampler(T; round_size=256)
+        initial = gram_is_cuda_population_bits(sampler)
+        first_result = importance_sample!(sampler)
+        first = gram_is_cuda_population_bits(sampler)
+        second_result = importance_sample!(sampler)
+        second = gram_is_cuda_population_bits(sampler)
+        @test first != initial
+        @test second != first
+        @test length(first_result) == length(second_result) == 512
+        @test extrema(Array(first_result.provenance.round)) == (1, 2)
+        @test extrema(Array(second_result.provenance.round)) == (1, 2)
+        @test first_result.diagnostics.transfers.count ==
+              second_result.diagnostics.transfers.count
+        @test first_result.diagnostics.transfers.bytes ==
+              second_result.diagnostics.transfers.bytes
+        @test IS._backend_state_resident(
+            sampler.device,
+            IS._transferred_backend_state(
+                sampler.algorithm,
+                sampler.method_state,
+                sampler.target,
+                sampler.random_buffers,
+            ),
+        )
+    end
+    @test CUDA.device() == caller_device
+end
+
+const GRAMIS_CUDA_MULTI_DEVICE_RESTORATION =
+    gram_is_multi_device_restoration_test()
 
 
 @testset "FirstOrderGRAMIS CUDA preflight and pooled adapters" begin
@@ -213,7 +410,6 @@ end
     end
     @test CUDA.device() == caller_device
 end
-
 @testset "FirstOrderGRAMIS CUDA end-to-end sampler" begin
     caller_device = CUDA.device()
     for (T, strength) in ((Float32, 0f0), (Float64, 0.1))
@@ -257,6 +453,38 @@ end
         @test result.diagnostics.transfers.count <= 192
         @test result.diagnostics.transfers.bytes <= 4_096
     end
+    @test CUDA.device() == caller_device
+end
+
+@testset "FirstOrderGRAMIS CUDA call transaction rolls back after round one" begin
+    caller_device = CUDA.device()
+    sampler = gram_is_cuda_sampler(Float64; rounds=2, round_size=8)
+    plan = sampler.method_state.plan
+    invalid_proposal_id = size(sampler.method_state.committed.locations, 2) + 1
+    round_two_assignments = view(
+        plan.assignments,
+        1:plan.schedule[2],
+        2,
+    )
+    fill!(round_two_assignments, invalid_proposal_id)
+    CUDA.synchronize()
+    @test all(==(invalid_proposal_id), Array(round_two_assignments))
+    before = gram_is_cuda_population_bits(sampler)
+    failure = try
+        importance_sample!(sampler)
+        nothing
+    catch error
+        error
+    end
+    @test failure isa FirstOrderGRAMISRoundError
+    if failure isa FirstOrderGRAMISRoundError
+        @test failure.round == 2
+        @test failure.phase === :sampling
+        @test failure.cause isa SamplerExecutionError
+        @test failure.diagnostics.completed_rounds == 1
+        @test failure.diagnostics.pre_call_state_preserved === true
+    end
+    @test gram_is_cuda_population_bits(sampler) == before
     @test CUDA.device() == caller_device
 end
 
@@ -311,3 +539,22 @@ end
     end
     @test CUDA.device() == caller_device
 end
+
+const GRAMIS_CUDA_CAPABILITY_RESULT = (
+    status=:passed,
+    environment=gram_is_cuda_validation_environment(),
+    coverage=(
+        scalar_types=(Float32, Float64),
+        residence=true,
+        cpu_reference_agreement=true,
+        all_zero_fallback=true,
+        call_transaction_rollback=true,
+        repeated_resident_execution=true,
+        caller_device_restoration=(
+            current_device_checks=true,
+            multi_device=GRAMIS_CUDA_MULTI_DEVICE_RESTORATION,
+        ),
+        bounded_explicit_transfers=true,
+        scalar_indexing_disabled=true,
+    ),
+)
