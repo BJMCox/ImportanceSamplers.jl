@@ -245,11 +245,20 @@ function gram_is_transfer_record(transfers)
         record = getfield(transfers.reasons, reason)
         (count=record.count, bytes=record.bytes)
     end)
-    sum(record.count for record in values(reasons)) == transfers.count ||
-        error("reported transfer counts do not sum to the aggregate")
-    sum(record.bytes for record in values(reasons)) == transfers.bytes ||
-        error("reported transfer bytes do not sum to the aggregate")
-    return (count=transfers.count, bytes=transfers.bytes, reasons)
+    reason_count = sum(record.count for record in values(reasons))
+    reason_bytes = sum(record.bytes for record in values(reasons))
+    reason_count <= transfers.count && reason_bytes <= transfers.bytes || error(
+        "reported transfer reasons exceed the aggregate",
+    )
+    return (
+        count=transfers.count,
+        bytes=transfers.bytes,
+        reasons,
+        unattributed=(
+            count=transfers.count - reason_count,
+            bytes=transfers.bytes - reason_bytes,
+        ),
+    )
 end
 
 function gram_is_result_signature(result, sampler, cell)
