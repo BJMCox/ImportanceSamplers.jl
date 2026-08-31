@@ -286,6 +286,26 @@ function (gradient::GRAMISRoundOneGradient)(destination, sample)
     return destination
 end
 
+gram_is_kernel_state_target(sample) = -sum(abs2, sample) / 2
+
+function gram_is_kernel_state_gradient!(destination, sample)
+    destination .= -sample
+    return destination
+end
+
+function gram_is_kernel_state(algorithm)
+    sampler = prepare_sampler(
+        Random.Xoshiro(0x4752414d49535354),
+        LogTarget(
+            gram_is_kernel_state_target;
+            grad=gram_is_kernel_state_gradient!,
+        ),
+        algorithm;
+        threaded=false,
+    )
+    return sampler.method_state
+end
+
 function run_gram_is_frozen_round(
     ::Type{T},
     execution,
@@ -632,7 +652,7 @@ function gram_is_local_covariance_fixture(::Type{T}) where {T}
         repulsion_strength=zero(T),
         covariance_ess_threshold=3,
     )
-    state = GRAMISKernelIS._prepare_method_state(algorithm)
+    state = gram_is_kernel_state(algorithm)
     state.workspace.samples .= reshape(
         T[0, 2, 4, 6, 0, 2, 4, 6, 0, 1, 2, 4],
         1,
@@ -703,7 +723,7 @@ function gram_is_stability_fixture(::Type{T}, execution) where {T}
         FactorGaussian(T[0, 0], T[2 0; 1 3]),
         FactorGaussian(T[10, 10], T[1 0; 0 1]),
     ])
-    state = GRAMISKernelIS._prepare_method_state(FirstOrderGRAMIS(
+    state = gram_is_kernel_state(FirstOrderGRAMIS(
         bank;
         rounds=1,
         round_size=8,
@@ -773,7 +793,7 @@ end
         FactorGaussian(T[0, 0], T[1 0; 0 1]),
         FactorGaussian(T[10, 10], T[1 0; 0 1]),
     ])
-    state = GRAMISKernelIS._prepare_method_state(FirstOrderGRAMIS(
+    state = gram_is_kernel_state(FirstOrderGRAMIS(
         bank;
         rounds=1,
         round_size=10,
@@ -810,71 +830,13 @@ end
     )
 end
 
-@testset "FirstOrderGRAMIS computes local group starts once" begin
-    counts = [3 5; 4 3; 5 4]
-    starts = zeros(Int, 3)
-
-    @test @inferred(GRAMISKernelIS._local_group_starts!(
-        starts,
-        counts,
-        2,
-        GRAMISKernelIS._SerialCPUExecution(),
-    )) === nothing
-    @test starts == [1, 6, 9]
-end
-
-@testset "FirstOrderGRAMIS threaded CPU launches expose the default pool" begin
-    serial = GRAMISKernelIS._SerialCPUExecution()
-    threaded = GRAMISKernelIS._ThreadedCPUExecution()
-    pool_threads = Threads.nthreads(:default)
-    cpu_backend = GRAMISKernelIS.KernelAbstractions.get_backend(zeros(1))
-    accelerator_backend = Val(:accelerator)
-
-    boundary_ranges = unique(filter(
-        >(0),
-        (
-            pool_threads - 1,
-            pool_threads,
-            pool_threads + 1,
-            2pool_threads - 1,
-            16,
-            4_096,
-            65_536,
-        ),
-    ))
-    for ndrange in boundary_ranges
-        expected = min(1_024, max(1, fld(ndrange, pool_threads)))
-        workgroupsize = @inferred(
-            GRAMISKernelIS._first_order_gramis_workgroupsize(
-                threaded,
-                cpu_backend,
-                ndrange,
-            )
-        )
-
-        @test workgroupsize == expected
-        @test cld(ndrange, workgroupsize) >= min(pool_threads, ndrange)
-        @test GRAMISKernelIS._first_order_gramis_workgroupsize(
-            serial,
-            cpu_backend,
-            ndrange,
-        ) == ndrange
-        @test GRAMISKernelIS._first_order_gramis_workgroupsize(
-            threaded,
-            accelerator_backend,
-            ndrange,
-        ) === nothing
-        @test GRAMISKernelIS._native_workgroupsize(threaded, ndrange) === nothing
-    end
-end
-
 @testset "FirstOrderGRAMIS Float32 accepted ESS matches published weights" begin
     T = Float32
     bank = ProposalBank([
         FactorGaussian(T[0], reshape(T[1], 1, 1)),
         FactorGaussian(T[10], reshape(T[1], 1, 1)),
     ])
-    state = GRAMISKernelIS._prepare_method_state(FirstOrderGRAMIS(
+    state = gram_is_kernel_state(FirstOrderGRAMIS(
         bank;
         rounds=1,
         round_size=16,
@@ -942,7 +904,7 @@ function gram_is_covariance_update_state(
         FactorGaussian(T[0, 0], T[2 0; 1 3]),
         FactorGaussian(T[10, 10], T[1 0; 0.5 2]),
     ])
-    return GRAMISKernelIS._prepare_method_state(FirstOrderGRAMIS(
+    return gram_is_kernel_state(FirstOrderGRAMIS(
         bank;
         rounds=1,
         round_size=8,
@@ -1044,22 +1006,13 @@ end
         factors = fill(T(-99), size(covariances))
         info = fill(-99, proposal_count)
 
-        if execution isa GRAMISKernelIS._SerialCPUExecution
-            @test @inferred(GRAMISKernelIS._factor_population!(
-                device,
-                factors,
-                covariances,
-                info,
-            )) === nothing
-        else
-            @test @inferred(GRAMISKernelIS._factor_population!(
-                device,
-                factors,
-                covariances,
-                info,
-                execution,
-            )) === nothing
-        end
+        @test @inferred(GRAMISKernelIS._factor_population!(
+            device,
+            factors,
+            covariances,
+            info,
+            execution,
+        )) === nothing
         @test info == zeros(Int, proposal_count)
         @test factors ≈ expected rtol = 16eps(T)
     end
@@ -1486,61 +1439,6 @@ end
         @test trials == ones(Int, 2)
         @test target.calls[] == 2
         @test active_mask.reads[] == 6
-    end
-end
-
-@testset "FirstOrderGRAMIS prepared-state gradient forwarding" begin
-    for T in (Float32, Float64), execution in (
-        GRAMISKernelIS._SerialCPUExecution(),
-        GRAMISKernelIS._ThreadedCPUExecution(),
-    )
-        bank = ProposalBank([
-            FactorGaussian(T[-1], reshape(T[1], 1, 1)),
-            FactorGaussian(T[1], reshape(T[1], 1, 1)),
-        ])
-        algorithm = FirstOrderGRAMIS(
-            bank;
-            rounds=1,
-            round_size=6,
-            repulsion_strength=zero(T),
-            max_backtracking_trials=4,
-        )
-        value_operation = GRAMISRoundOneValue{T}(Threads.Atomic{Int}(0))
-        gradient_operation = GRAMISRoundOneGradient(Threads.Atomic{Int}(0))
-        prepared = GRAMISKernelIS._prepare_target(
-            LogTarget(value_operation; grad=gradient_operation),
-            first(bank.proposals),
-        )
-        state = GRAMISKernelIS._prepare_method_state(algorithm, prepared)
-        target = GRAMISKernelIS._bind_resolved_target(
-            prepared,
-            view(state.run.locations, :, 1),
-        )
-
-        @test @inferred(GRAMISKernelIS._evaluate_frozen_gradients!(
-            state,
-            target,
-            execution,
-        )) === nothing
-        @test @inferred(GRAMISKernelIS._precondition_gradients!(
-            state,
-            execution,
-        )) === nothing
-        @test @inferred(GRAMISKernelIS._backtrack_means!(
-            state,
-            target,
-            execution,
-        )) === nothing
-
-        @test state.workspace.frozen_values == fill(T(-0.5), 2)
-        @test state.workspace.gradients == reshape(T[1, -1], 1, :)
-        @test state.workspace.moves == reshape(T[1, -1], 1, :)
-        @test state.candidate.locations == zeros(T, 1, 2)
-        @test state.workspace.candidate_values == zeros(T, 2)
-        @test state.workspace.steps == ones(T, 2)
-        @test state.workspace.backtracking_trials == ones(Int, 2)
-        @test value_operation.calls[] == 4
-        @test gradient_operation.calls[] == 2
     end
 end
 

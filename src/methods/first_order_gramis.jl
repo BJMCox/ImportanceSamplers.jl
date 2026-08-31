@@ -264,18 +264,6 @@ struct _FirstOrderGRAMISWorkspace{S,L,I,N,Q,O,C,G,A,P,R,F,J,E,W,B}
     collision_counts::B
 end
 
-struct _NoFirstOrderGRAMISGradient end
-
-struct _FirstOrderGRAMISActiveRounds
-    rounds::Tuple
-end
-
-Base.Tuple(active::_FirstOrderGRAMISActiveRounds) = active.rounds
-Base.length(active::_FirstOrderGRAMISActiveRounds) = length(active.rounds)
-Base.iterate(active::_FirstOrderGRAMISActiveRounds, state...) =
-    iterate(active.rounds, state...)
-Base.in(round, active::_FirstOrderGRAMISActiveRounds) = round in active.rounds
-
 mutable struct _PreparedFirstOrderGRAMIS{
     B,
     P,
@@ -299,7 +287,7 @@ mutable struct _PreparedFirstOrderGRAMIS{
     max_backtracking_trials::Int
     serial_gradient::G
     threaded_gradient::G
-    active_repulsion_rounds::_FirstOrderGRAMISActiveRounds
+    active_repulsion_rounds::Vector{Int}
     workspace::W
 end
 
@@ -600,9 +588,7 @@ function _prepare_first_order_gramis_state(
         ),
     )
     workspace = _allocate_first_order_gramis_workspace(committed, plan, L)
-    active_repulsion_rounds = _FirstOrderGRAMISActiveRounds(
-        Tuple(findall(!iszero, repulsion_strength)),
-    )
+    active_repulsion_rounds = findall(!iszero, repulsion_strength)
     return _PreparedFirstOrderGRAMIS(
         committed,
         run,
@@ -620,19 +606,6 @@ function _prepare_first_order_gramis_state(
         threaded_gradient,
         active_repulsion_rounds,
         workspace,
-    )
-end
-
-function _prepare_method_state(algorithm::FirstOrderGRAMIS)
-    packed = _first_order_gramis_factor_bank(algorithm.bank)
-    T = eltype(packed.locations)
-    gradient = _NoFirstOrderGRAMISGradient()
-    return _prepare_first_order_gramis_state(
-        algorithm,
-        packed,
-        T,
-        gradient,
-        gradient,
     )
 end
 
@@ -775,7 +748,7 @@ function _prepare_transferred_method_state(
         method_state.max_backtracking_trials,
         bound_gradient,
         bound_gradient,
-        _FirstOrderGRAMISActiveRounds(Tuple(method_state.active_repulsion_rounds)),
+        copy(method_state.active_repulsion_rounds),
         _copy_first_order_gramis_workspace(device, method_state.workspace),
     )
 end
@@ -932,8 +905,6 @@ function _preflight_accelerator_method(
     return nothing
 end
 
-_accelerator_method_state_limit(::_PreparedFirstOrderGRAMIS) = nothing
-
 function _first_order_gramis_preserving_cpu_destination(destination)
     if applicable(eltype, destination)
         policy = eltype(destination)
@@ -973,14 +944,7 @@ function current_proposal(
             "to request an explicit CPU snapshot",
         ),
     )
-    committed = sampler.method_state.committed
-    return _first_order_gramis_snapshot(
-        committed.locations,
-        committed.factors,
-        committed.lognormalizers,
-        committed.proposal_ids,
-        sampler.algorithm.bank.masses,
-    )
+    return current_proposal(MLDataDevices.cpu_device(), sampler)
 end
 
 function current_proposal(

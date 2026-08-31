@@ -135,6 +135,14 @@ end
     )
 end
 
+@inline function _scale_aware_ridge(
+    previous_trace,
+    dimension,
+    regularization::T,
+) where {T}
+    return regularization * previous_trace / T(dimension)
+end
+
 struct _KernelExecution{E}
     cpu_execution::E
 end

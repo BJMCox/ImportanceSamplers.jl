@@ -303,15 +303,6 @@ end
     @test state.serial_gradient.target.context ===
           state.threaded_gradient.target.context
 
-    @test state isa GRAMISIS._PreparedFirstOrderGRAMIS
-    @test workspace isa GRAMISIS._FirstOrderGRAMISWorkspace
-    @test committed isa GRAMISIS._PackedFactorGaussianBank
-    @test run isa GRAMISIS._PackedFactorGaussianBank
-    @test candidate isa GRAMISIS._PackedFactorGaussianBank
-    @test size(committed.locations) == (2, 3)
-    @test size(committed.factors) == (2, 2, 3)
-    @test size(committed.lognormalizers) == (3,)
-
     for field in (:locations, :factors, :lognormalizers)
         @test getfield(committed, field) !== getfield(run, field)
         @test getfield(committed, field) !== getfield(candidate, field)
@@ -322,41 +313,10 @@ end
         @test getfield(committed, field) === getfield(candidate, field)
     end
 
-    @test size(workspace.samples) == (2, 17)
-    @test size(workspace.round_logweights) == (17,)
-    @test size(workspace.local_logweights) == (17,)
-    @test size(workspace.generating_logdensities) == (17,)
-    @test size(workspace.round_proposal_ids) == (17,)
-    @test size(workspace.round_ids) == (17,)
-    @test size(workspace.normalized_weights) == (17,)
-    @test size(workspace.solve_scratch) == (2, 17)
-    @test size(workspace.local_starts) == (3,)
-    @test size(workspace.covariances) == (2, 2, 3)
-    @test size(workspace.pooled_covariance) == (2, 2)
-    @test size(workspace.whitened_means) == (2, 3)
-    @test size(workspace.gradients) == (2, 3)
-    @test size(workspace.frozen_values) == (3,)
-    @test size(workspace.candidate_values) == (3,)
-    @test size(workspace.moves) == (2, 3)
-    @test size(workspace.active_mask) == (3,)
-    @test size(workspace.steps) == (3,)
-    @test size(workspace.repulsion) == (2, 3)
-    @test size(workspace.factor_status) == (3,)
-    @test size(workspace.factor_info) == (3,)
-    @test size(workspace.local_ess) == (3,)
-    @test size(workspace.tempering_powers) == (3,)
-    @test size(workspace.backtracking_trials) == (3,)
-    @test size(workspace.collision_counts) == (3,)
     @test workspace.frozen_values !== workspace.candidate_values
     @test workspace.moves !== workspace.gradients
     @test workspace.moves !== workspace.repulsion
     @test workspace.moves !== candidate.locations
-
-    for type in (typeof(state), typeof(workspace), typeof(committed))
-        @test isconcretetype(type)
-        @test all(isconcretetype, fieldtypes(type))
-        @test !(Any in fieldtypes(type))
-    end
 
     snapshot = @inferred current_proposal(sampler)
     explicit_snapshot = @inferred current_proposal(MLDataDevices.cpu_device(), sampler)

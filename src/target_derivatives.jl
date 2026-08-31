@@ -30,11 +30,6 @@ const _GRADIENT_SOURCE_MESSAGE =
     "LogTarget(logdensity, adtype), or a bare first-order " *
     "LogDensityProblems target"
 
-_gradient_source(::LogTarget{F,A,G}) where {F,A,G} = :explicit
-_gradient_source(::LogTarget{F,A,Nothing}) where {F,A<:ADTypes.NoAutoDiff} =
-    throw(ArgumentError(_GRADIENT_SOURCE_MESSAGE))
-_gradient_source(::LogTarget{F,A,Nothing}) where {F,A} = :ad
-
 function _gradient_source(target::_BoundLogDensityProblemsTarget)
     return _gradient_source(target.target)
 end

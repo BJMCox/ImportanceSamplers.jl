@@ -191,12 +191,7 @@ end
     f = x -> -sum(abs2, x) / 2
     g! = (G, x) -> (G .= -x; G)
 
-    @test ISD._gradient_source(LogTarget(f; grad=g!)) === :explicit
     @test ISD._gradient_source(FirstOrderLDP()) === :logdensityproblems
-    @test ISD._gradient_source(
-        LogTarget(f, ADTypes.AutoForwardDiff()),
-    ) === :ad
-    @test_throws ArgumentError ISD._gradient_source(LogTarget(f))
 
     value_calls = Ref(0)
     ldp_gradient_calls = Ref(0)

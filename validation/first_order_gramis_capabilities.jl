@@ -105,9 +105,10 @@ function gram_is_cuda_population_cholesky(::Type{T}, dimension, proposal_count) 
     covariances = CuArray(source)
     factors = similar(covariances)
     info = CUDA.fill(Int32(-1), proposal_count)
+    status = CUDA.fill(IS._GRAMIS_COVARIANCE_READY, proposal_count)
     device = gram_is_cuda_device()
 
-    IS._factor_population!(device, factors, covariances, info)
+    IS._factor_population!(device, factors, covariances, info, status)
     CUDA.synchronize()
 
     wrapper_factors = [CuArray(source[:, :, slot]) for slot in 1:proposal_count]

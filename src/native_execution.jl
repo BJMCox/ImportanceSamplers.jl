@@ -608,6 +608,8 @@ end
 
 _native_workgroupsize(::_SerialCPUExecution, nsamples) = nsamples
 _native_workgroupsize(::_ThreadedCPUExecution, nsamples) = nothing
+@inline _native_workgroupsize(execution::_KernelExecution, nsamples) =
+    _native_workgroupsize(execution.cpu_execution, nsamples)
 
 _native_failure_location(::_NoSampleTransform, block) = nothing
 _native_failure_location(::_NativeScalarTransform, block) = nothing

@@ -111,23 +111,6 @@ function ImportanceSamplers._amis_potrf!(
 end
 
 function ImportanceSamplers._factor_population!(
-    device::MLDataDevices.CUDADevice,
-    factors::CUDA.StridedCuArray{T,3},
-    covariances::CUDA.StridedCuArray{T,3},
-    info::CUDA.StridedCuVector{Int32},
-) where {T<:Union{Float32,Float64}}
-    status = similar(info, UInt8)
-    fill!(status, ImportanceSamplers._GRAMIS_COVARIANCE_READY)
-    return ImportanceSamplers._factor_population!(
-        device,
-        factors,
-        covariances,
-        info,
-        status,
-    )
-end
-
-function ImportanceSamplers._factor_population!(
     ::MLDataDevices.CUDADevice,
     factors::CUDA.StridedCuArray{T,3},
     covariances::CUDA.StridedCuArray{T,3},
@@ -198,6 +181,8 @@ function ImportanceSamplers._preflight_first_order_gramis_factorization!(
     )
     factors = similar(covariances)
     info = similar(method_state.workspace.factor_info, Int32, proposal_count)
+    status = similar(method_state.workspace.factor_status, UInt8, proposal_count)
+    fill!(status, ImportanceSamplers._GRAMIS_COVARIANCE_READY)
     backend = KernelAbstractions.get_backend(covariances)
     covariance_kernel = _factorization_preflight_covariances!(backend)
     covariance_kernel(
@@ -209,6 +194,7 @@ function ImportanceSamplers._preflight_first_order_gramis_factorization!(
         factors,
         covariances,
         info,
+        status,
     )
     any(!iszero, info) && throw(
         ImportanceSamplers.SamplerDeviceError(

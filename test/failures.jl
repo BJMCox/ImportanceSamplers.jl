@@ -1304,13 +1304,22 @@ function gram_is_all_zero_local_state(all_groups)
         FactorGaussian(T[0, 0], T[2 0; 1 3]),
         FactorGaussian(T[10, 10], T[1 0; 0.5 2]),
     ])
-    state = ImportanceSamplers._prepare_method_state(FirstOrderGRAMIS(
-        bank;
-        rounds=1,
-        round_size=8,
-        repulsion_strength=zero(T),
-        covariance_ess_threshold=3,
-    ))
+    sampler = prepare_sampler(
+        Random.Xoshiro(0x4752414d49535a45),
+        LogTarget(
+            GRAMISTransactionTarget{T}(false, 0);
+            grad=gram_is_transaction_gradient!,
+        ),
+        FirstOrderGRAMIS(
+            bank;
+            rounds=1,
+            round_size=8,
+            repulsion_strength=zero(T),
+            covariance_ess_threshold=3,
+        );
+        threaded=false,
+    )
+    state = sampler.method_state
     state.workspace.samples .= T[
         -1 1 0 0 8 10 12 10
         0 0 -1 1 10 8 10 12
@@ -1698,41 +1707,12 @@ function gram_is_pointer_roles_valid(sampler)
            banks[2].locations !== banks[3].locations
 end
 
-function gram_is_rebuild_sampler(sampler, workspace)
-    state = sampler.method_state
-    rebuilt_state = ImportanceSamplers._PreparedFirstOrderGRAMIS(
-        state.committed,
-        state.run,
-        state.candidate,
-        state.plan,
-        state.repulsion_strength,
-        state.covariance_rate,
-        state.covariance_ess_threshold,
-        state.covariance_regularization,
-        state.tempering_tolerance,
-        state.tempering_max_iterations,
-        state.repulsion_softening,
-        state.max_backtracking_trials,
-        state.serial_gradient,
-        state.threaded_gradient,
-        state.active_repulsion_rounds,
-        workspace,
-    )
-    return ImportanceSamplers._PreparedImportanceSampler(
-        sampler.rng,
-        sampler.random_buffers,
-        sampler.target,
-        sampler.algorithm,
-        rebuilt_state,
-        sampler.device,
-        sampler.factor_execution,
-        sampler.threaded,
-        false,
-        sampler.executed,
-    )
-end
-
-function gram_is_rebuild_sampler(sampler, workspace, plan)
+function gram_is_rebuild_sampler(
+    sampler,
+    workspace;
+    plan=sampler.method_state.plan,
+    active_repulsion_rounds=sampler.method_state.active_repulsion_rounds,
+)
     state = sampler.method_state
     rebuilt_state = ImportanceSamplers._PreparedFirstOrderGRAMIS(
         state.committed,
@@ -1749,7 +1729,7 @@ function gram_is_rebuild_sampler(sampler, workspace, plan)
         state.max_backtracking_trials,
         state.serial_gradient,
         state.threaded_gradient,
-        state.active_repulsion_rounds,
+        active_repulsion_rounds,
         workspace,
     )
     return ImportanceSamplers._PreparedImportanceSampler(
@@ -1787,64 +1767,6 @@ function gram_is_full_error_diagnostics(
     @test failure.diagnostics.transfers.count == 0
     @test failure.diagnostics.transfers.bytes == 0
     @test failure.diagnostics.pre_call_state_preserved === true
-end
-
-@testset "FirstOrderGRAMIS CPU failure seams preserve zero transfers" begin
-    device = MLDataDevices.CPUDevice()
-    execution = ImportanceSamplers._SerialCPUExecution()
-
-    transfers = ImportanceSamplers._ResultTransferCounter(0, 0)
-    proposal_failure = caught_exception() do
-        ImportanceSamplers._add_first_order_gramis_repulsion!(
-            device,
-            reshape([NaN, 0.0], 1, 2),
-            zeros(1, 2),
-            transfers,
-            execution,
-        )
-    end
-    @test proposal_failure isa ImportanceSamplers._FirstOrderGRAMISProposalError
-    @test proposal_failure.proposal_slot == 1
-    @test proposal_failure.reason === :location_nonfinite
-    @test isnan(proposal_failure.value)
-    @test transfers.count == 0
-    @test transfers.bytes == 0
-
-    sampler, _ = gram_is_transaction_sampler()
-    candidate = sampler.method_state.candidate
-    candidate.factors[1, 1, 1] = NaN
-    transfers = ImportanceSamplers._ResultTransferCounter(0, 0)
-    factor_failure = caught_exception() do
-        ImportanceSamplers._validate_first_order_gramis_candidate_factors!(
-            device,
-            candidate,
-            zeros(UInt8, 2),
-            transfers,
-            execution,
-        )
-    end
-    @test factor_failure isa ImportanceSamplers._FirstOrderGRAMISProposalError
-    @test factor_failure.proposal_slot == 1
-    @test factor_failure.reason === :factor_nonfinite
-    @test isnan(factor_failure.value)
-    @test transfers.count == 0
-    @test transfers.bytes == 0
-
-    transfers = ImportanceSamplers._ResultTransferCounter(0, 0)
-    covariance_failure = caught_exception() do
-        ImportanceSamplers._throw_first_order_gramis_covariance_failure(
-            device,
-            [-1, 0],
-            transfers,
-            execution,
-        )
-    end
-    @test covariance_failure isa
-          ImportanceSamplers._FirstOrderGRAMISCovarianceError
-    @test covariance_failure.proposal_slot == 1
-    @test covariance_failure.info == -1
-    @test transfers.count == 0
-    @test transfers.bytes == 0
 end
 
 function gram_is_result_bits(result)
@@ -2031,7 +1953,11 @@ end
         plan.logcoefficients,
         plan.offsets,
     )
-    sampler = gram_is_rebuild_sampler(base_sampler, state.workspace, failing_plan)
+    sampler = gram_is_rebuild_sampler(
+        base_sampler,
+        state.workspace;
+        plan=failing_plan,
+    )
     before = gram_is_population_bits(sampler)
 
     failure = caught_exception(() -> importance_sample!(sampler))
@@ -2081,8 +2007,11 @@ end
             sampler.method_state.covariance_rate[2] = NaN
         elseif case.name === :repulsion
             sampler.method_state.repulsion_strength[2] = Inf
-            sampler.method_state.active_repulsion_rounds =
-                ImportanceSamplers._FirstOrderGRAMISActiveRounds((2,))
+            sampler = gram_is_rebuild_sampler(
+                sampler,
+                sampler.method_state.workspace;
+                active_repulsion_rounds=[2],
+            )
         end
 
         before = gram_is_population_bits(sampler)

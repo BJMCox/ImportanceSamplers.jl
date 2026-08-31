@@ -39,9 +39,6 @@ end
 @inline _first_order_gramis_workgroupsize(execution, backend, ndrange) =
     _native_workgroupsize(execution, ndrange)
 
-@inline _native_workgroupsize(execution::_KernelExecution, ndrange) =
-    _native_workgroupsize(execution.cpu_execution, ndrange)
-
 @inline function _first_order_gramis_workgroupsize(
     ::_ThreadedCPUExecution,
     ::KernelAbstractions.CPU,
@@ -1827,14 +1824,6 @@ end
     method_state.workspace.factor_status,
 )
 
-@inline function _scale_aware_ridge(
-    previous_trace,
-    dimension,
-    regularization::T,
-) where {T}
-    return regularization * previous_trace / T(dimension)
-end
-
 @kernel function _local_group_starts_kernel!(starts, counts, round)
     first_sample = 1
     for proposal_slot in eachindex(starts)
@@ -2382,21 +2371,6 @@ function _factor_population!(
         )
     end
     return nothing
-end
-
-function _factor_population!(
-    device::MLDataDevices.AbstractCPUDevice,
-    factors::StridedArray{T,3},
-    covariances::StridedArray{T,3},
-    info::StridedVector{I},
-) where {T<:Union{Float32,Float64},I<:Signed}
-    return _factor_population!(
-        device,
-        factors,
-        covariances,
-        info,
-        _SerialCPUExecution(),
-    )
 end
 
 function _factor_ready_population!(
