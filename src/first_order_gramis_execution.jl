@@ -22,6 +22,20 @@
     end
 end
 
+@inline _first_order_gramis_workgroupsize(execution, backend, ndrange) =
+    _native_workgroupsize(execution, ndrange)
+
+@inline function _first_order_gramis_workgroupsize(
+    ::_ThreadedCPUExecution,
+    ::KernelAbstractions.CPU,
+    ndrange,
+)
+    return min(
+        1_024,
+        max(1, cld(ndrange, Threads.nthreads(:default))),
+    )
+end
+
 @inline function _first_order_gramis_sample_slot!(
     samples,
     returned_logweights,
@@ -184,7 +198,11 @@ function _first_order_gramis_sample_round!(
         round,
         failure_storage;
         ndrange=length(local_logweights),
-        workgroupsize=_native_workgroupsize(execution, length(local_logweights)),
+        workgroupsize=_first_order_gramis_workgroupsize(
+            execution,
+            backend,
+            length(local_logweights),
+        ),
     )
     KernelAbstractions.synchronize(backend)
     return nothing
@@ -494,8 +512,14 @@ function _validate_preconditioned_moves!(moves)
     return nothing
 end
 
-function _validate_backtracking_candidates!(candidate_values, trials, trial)
-    @inbounds for proposal_slot in eachindex(candidate_values, trials)
+function _validate_backtracking_candidates!(
+    candidate_values,
+    active_mask,
+    trials,
+    trial,
+)
+    any_active = false
+    @inbounds for proposal_slot in eachindex(candidate_values, active_mask, trials)
         trials[proposal_slot] == trial || continue
         value = candidate_values[proposal_slot]
         (isfinite(value) || value == -Inf) ||
@@ -504,8 +528,9 @@ function _validate_backtracking_candidates!(candidate_values, trials, trial)
                 :candidate_value_nonfinite,
                 value,
             )
+        any_active |= active_mask[proposal_slot]
     end
-    return nothing
+    return any_active
 end
 
 @inline function _precondition_gradient_slot!(
@@ -931,7 +956,12 @@ function _backtrack_means!(
             trial,
             execution,
         )
-        _validate_backtracking_candidates!(candidate_values, trials, trial)
+        _validate_backtracking_candidates!(
+            candidate_values,
+            active_mask,
+            trials,
+            trial,
+        ) || break
     end
     _finish_backtracking!(
         candidate_locations,
@@ -993,7 +1023,7 @@ function _local_group_starts!(starts, counts, round, execution)
         counts,
         round;
         ndrange=1,
-        workgroupsize=_native_workgroupsize(execution, 1),
+        workgroupsize=_first_order_gramis_workgroupsize(execution, backend, 1),
     )
     KernelAbstractions.synchronize(backend)
     return nothing
@@ -1074,7 +1104,11 @@ function _local_weight_summary!(
         method_state.plan.counts,
         round;
         ndrange=proposal_count,
-        workgroupsize=_native_workgroupsize(execution, proposal_count),
+        workgroupsize=_first_order_gramis_workgroupsize(
+            execution,
+            backend,
+            proposal_count,
+        ),
     )
     KernelAbstractions.synchronize(backend)
     return nothing
@@ -1200,7 +1234,11 @@ function _tempering_power!(
         method_state.tempering_tolerance,
         method_state.tempering_max_iterations;
         ndrange=proposal_count,
-        workgroupsize=_native_workgroupsize(execution, proposal_count),
+        workgroupsize=_first_order_gramis_workgroupsize(
+            execution,
+            backend,
+            proposal_count,
+        ),
     )
     KernelAbstractions.synchronize(backend)
     return nothing
@@ -1308,7 +1346,11 @@ function _fit_local_covariances!(
         method_state.plan.counts,
         round;
         ndrange=covariance_entries,
-        workgroupsize=_native_workgroupsize(execution, covariance_entries),
+        workgroupsize=_first_order_gramis_workgroupsize(
+            execution,
+            backend,
+            covariance_entries,
+        ),
     )
     KernelAbstractions.synchronize(backend)
     return nothing
@@ -1372,7 +1414,11 @@ function _blend_local_covariances!(
         round,
         method_state.covariance_regularization;
         ndrange=proposal_count,
-        workgroupsize=_native_workgroupsize(execution, proposal_count),
+        workgroupsize=_first_order_gramis_workgroupsize(
+            execution,
+            backend,
+            proposal_count,
+        ),
     )
     KernelAbstractions.synchronize(backend)
     return nothing

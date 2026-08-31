@@ -144,6 +144,15 @@ struct GRAMISBacktrackingTarget{T}
     calls::Vector{Threads.Atomic{Int}}
 end
 
+struct GRAMISAlwaysAcceptTarget{T}
+    calls::Threads.Atomic{Int}
+end
+
+struct GRAMISAtomicReadVector{A<:AbstractVector{Bool}} <: AbstractVector{Bool}
+    storage::A
+    reads::Threads.Atomic{Int}
+end
+
 struct GRAMISRoundOneValue{T}
     calls::Threads.Atomic{Int}
 end
@@ -165,6 +174,8 @@ end
 
 Base.size(array::GRAMISReadCountingArray) = size(array.storage)
 Base.IndexStyle(::Type{<:GRAMISReadCountingArray}) = IndexCartesian()
+Base.size(array::GRAMISAtomicReadVector) = size(array.storage)
+Base.IndexStyle(::Type{<:GRAMISAtomicReadVector}) = IndexLinear()
 Base.size(matrix::GRAMISOperationCountingMatrix) = size(matrix.storage)
 Base.IndexStyle(::Type{<:GRAMISOperationCountingMatrix}) = IndexLinear()
 
@@ -225,6 +236,16 @@ function Base.getindex(
     return array.storage[indices...]
 end
 
+function Base.getindex(array::GRAMISAtomicReadVector, index::Int)
+    Threads.atomic_add!(array.reads, 1)
+    return array.storage[index]
+end
+
+function Base.setindex!(array::GRAMISAtomicReadVector, value, index::Int)
+    array.storage[index] = value
+    return value
+end
+
 function (target::GRAMISCountedFrozenValue{T})(sample)::T where {T}
     Threads.atomic_add!(target.calls, 1)
     return -abs2(sample[1]) / T(2) - abs2(sample[2]) / T(4)
@@ -247,6 +268,11 @@ function (target::GRAMISBacktrackingTarget{T})(sample)::T where {T}
         return value <= T(10.25) ? zero(T) : -one(T)
     end
     return -one(T)
+end
+
+function (target::GRAMISAlwaysAcceptTarget{T})(sample)::T where {T}
+    Threads.atomic_add!(target.calls, 1)
+    return zero(T)
 end
 
 function (target::GRAMISRoundOneValue{T})(sample)::T where {T}
@@ -795,6 +821,39 @@ end
         GRAMISKernelIS._SerialCPUExecution(),
     )) === nothing
     @test starts == [1, 6, 9]
+end
+
+@testset "FirstOrderGRAMIS threaded CPU launches expose the default pool" begin
+    serial = GRAMISKernelIS._SerialCPUExecution()
+    threaded = GRAMISKernelIS._ThreadedCPUExecution()
+    pool_threads = Threads.nthreads(:default)
+    cpu_backend = GRAMISKernelIS.KernelAbstractions.get_backend(zeros(1))
+    accelerator_backend = Val(:accelerator)
+
+    for ndrange in (1, max(2, pool_threads), 4_096, 65_536)
+        expected = min(1_024, max(1, cld(ndrange, pool_threads)))
+        workgroupsize = @inferred(
+            GRAMISKernelIS._first_order_gramis_workgroupsize(
+                threaded,
+                cpu_backend,
+                ndrange,
+            )
+        )
+
+        @test workgroupsize == expected
+        @test cld(ndrange, workgroupsize) >= min(pool_threads, ndrange)
+        @test GRAMISKernelIS._first_order_gramis_workgroupsize(
+            serial,
+            cpu_backend,
+            ndrange,
+        ) == ndrange
+        @test GRAMISKernelIS._first_order_gramis_workgroupsize(
+            threaded,
+            accelerator_backend,
+            ndrange,
+        ) === nothing
+        @test GRAMISKernelIS._native_workgroupsize(threaded, ndrange) === nothing
+    end
 end
 
 @testset "FirstOrderGRAMIS Float32 accepted ESS matches published weights" begin
@@ -1373,6 +1432,48 @@ end
         @test getindex.(target.calls) == [1, 3, 3]
         @test locations == reshape(T[0, 10, 20], 1, :)
         @test moves == ones(T, 1, 3)
+    end
+end
+
+@testset "FirstOrderGRAMIS CPU backtracking stops after all proposals accept" begin
+    for T in (Float32, Float64), execution in (
+        GRAMISKernelIS._SerialCPUExecution(),
+        GRAMISKernelIS._ThreadedCPUExecution(),
+    )
+        locations = reshape(T[0, 10], 1, :)
+        moves = ones(T, 1, 2)
+        frozen_values = zeros(T, 2)
+        candidate_locations = similar(locations)
+        candidate_values = similar(frozen_values)
+        active_mask = GRAMISAtomicReadVector(
+            fill(false, 2),
+            Threads.Atomic{Int}(0),
+        )
+        steps = similar(frozen_values)
+        trials = similar(frozen_values, Int)
+        target = GRAMISAlwaysAcceptTarget{T}(Threads.Atomic{Int}(0))
+
+        @test @inferred(GRAMISKernelIS._backtrack_means!(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            steps,
+            trials,
+            target,
+            frozen_values,
+            locations,
+            moves,
+            20,
+            execution,
+        )) === nothing
+
+        @test candidate_locations == locations .+ moves
+        @test candidate_values == frozen_values
+        @test active_mask.storage == fill(false, 2)
+        @test steps == ones(T, 2)
+        @test trials == ones(Int, 2)
+        @test target.calls[] == 2
+        @test active_mask.reads[] == 6
     end
 end
 
