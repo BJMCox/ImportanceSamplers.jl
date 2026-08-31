@@ -1813,6 +1813,42 @@ function _first_order_gramis_covariance_kernel_arguments(
     )
 end
 
+function _first_order_gramis_covariance_centre_arguments(
+    method_state::_PreparedFirstOrderGRAMIS,
+    round,
+)
+    workspace = method_state.workspace
+    return (
+        workspace.covariance_centres,
+        workspace.normalized_weights,
+        workspace.tempering_powers,
+        workspace.factor_status,
+        workspace.samples,
+        method_state.run.locations,
+        workspace.local_starts,
+        method_state.plan.counts,
+        round,
+    )
+end
+
+function _first_order_gramis_accelerator_covariance_arguments(
+    method_state::_PreparedFirstOrderGRAMIS,
+    round,
+)
+    workspace = method_state.workspace
+    return (
+        workspace.covariances,
+        workspace.covariance_centres,
+        workspace.normalized_weights,
+        workspace.factor_status,
+        workspace.samples,
+        method_state.run.factors,
+        workspace.local_starts,
+        method_state.plan.counts,
+        round,
+    )
+end
+
 @inline _first_order_gramis_factor_arguments(
     method_state,
     info=method_state.workspace.factor_info,
@@ -2315,6 +2351,161 @@ end
     end
 end
 
+@kernel function _fit_accelerator_covariance_centres_kernel!(
+    covariance_centres,
+    normalized_weights,
+    tempering_powers,
+    status,
+    samples,
+    locations,
+    starts,
+    counts,
+    round,
+)
+    group_index = @index(Group, Linear)
+    lane_index = @index(Local, Linear)
+    lane = @private Int (1,)
+    @inbounds lane[1] = lane_index
+    @uniform lane_count = @groupsize()[1]
+    @uniform T = eltype(covariance_centres)
+    partial_centres = @localmem eltype(covariance_centres) (
+        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    group_state = @localmem eltype(starts) (5,)
+    if @inbounds(lane[1]) == 1
+        dimension = size(samples, 1)
+        proposal_slot = (group_index - 1) ÷ dimension + 1
+        @inbounds group_state[1] = (group_index - 1) % dimension + 1
+        @inbounds group_state[2] = proposal_slot
+        @inbounds group_state[3] = starts[proposal_slot, round]
+        @inbounds group_state[4] =
+            group_state[3] + counts[proposal_slot, round] - 1
+        @inbounds group_state[5] =
+            status[proposal_slot] == _GRAMIS_COVARIANCE_READY &&
+            tempering_powers[proposal_slot] < one(T)
+    end
+    @synchronize()
+
+    partial = zero(T)
+    if @inbounds(group_state[5]) == 1
+        for sample_index in (@inbounds(group_state[3]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[4]))
+            partial += @inbounds(normalized_weights[sample_index]) *
+                       @inbounds(samples[group_state[1], sample_index])
+        end
+    end
+    @inbounds partial_centres[lane[1]] = partial
+    @synchronize()
+    for reduction_offset in _GRAMIS_REDUCTION_OFFSETS
+        if @inbounds(lane[1]) <= reduction_offset
+            @inbounds partial_centres[lane[1]] +=
+                partial_centres[lane[1] + reduction_offset]
+        end
+        @synchronize()
+    end
+    if @inbounds(lane[1]) == 1
+        if @inbounds(group_state[5]) == 1
+            @inbounds covariance_centres[group_state[1], group_state[2]] =
+                partial_centres[1]
+        else
+            @inbounds covariance_centres[group_state[1], group_state[2]] =
+                locations[group_state[1], group_state[2]]
+        end
+    end
+end
+
+@kernel function _fit_accelerator_covariances_kernel!(
+    covariances,
+    covariance_centres,
+    normalized_weights,
+    status,
+    samples,
+    factors,
+    starts,
+    counts,
+    round,
+)
+    entry = @index(Global, Linear)
+    dimension = size(samples, 1)
+    entries_per_proposal = dimension * dimension
+    proposal_slot = (entry - 1) ÷ entries_per_proposal + 1
+    matrix_entry = (entry - 1) % entries_per_proposal
+    row = matrix_entry % dimension + 1
+    column = matrix_entry ÷ dimension + 1
+    if column <= row
+        if @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY
+            first_sample, sample_count = _gramis_local_group(
+                starts,
+                counts,
+                proposal_slot,
+                round,
+            )
+            last_sample = first_sample + sample_count - 1
+            center_row = @inbounds covariance_centres[row, proposal_slot]
+            center_column = @inbounds covariance_centres[column, proposal_slot]
+            T = eltype(covariances)
+            covariance = zero(T)
+            for sample_index in first_sample:last_sample
+                weight = @inbounds normalized_weights[sample_index]
+                centered_row = @inbounds(samples[row, sample_index]) - center_row
+                centered_column =
+                    @inbounds(samples[column, sample_index]) - center_column
+                covariance += weight * centered_row * centered_column
+            end
+        else
+            covariance =
+                _gramis_current_covariance(factors, row, column, proposal_slot)
+        end
+        @inbounds covariances[row, column, proposal_slot] = covariance
+        @inbounds covariances[column, row, proposal_slot] = covariance
+    end
+end
+
+function _fit_accelerator_covariance_centres!(
+    method_state::_PreparedFirstOrderGRAMIS,
+    round,
+    ::_KernelExecution,
+)
+    workspace = method_state.workspace
+    backend = KernelAbstractions.get_backend(workspace.covariance_centres)
+    pair_count = length(workspace.covariance_centres)
+    kernel = _fit_accelerator_covariance_centres_kernel!(
+        backend,
+        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    kernel(
+        _first_order_gramis_covariance_centre_arguments(method_state, round)...;
+        ndrange=_GRAMIS_REDUCTION_WORKGROUP_SIZE * pair_count,
+        workgroupsize=_GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
+function _fit_accelerator_covariances!(
+    method_state::_PreparedFirstOrderGRAMIS,
+    round,
+    execution::_KernelExecution,
+)
+    workspace = method_state.workspace
+    backend = KernelAbstractions.get_backend(workspace.covariances)
+    covariance_entries = length(workspace.covariances)
+    kernel = _fit_accelerator_covariances_kernel!(backend)
+    kernel(
+        _first_order_gramis_accelerator_covariance_arguments(
+            method_state,
+            round,
+        )...;
+        ndrange=covariance_entries,
+        workgroupsize=_first_order_gramis_workgroupsize(
+            execution,
+            backend,
+            covariance_entries,
+        ),
+    )
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
 function _prepare_local_covariance_weights!(
     method_state::_PreparedFirstOrderGRAMIS,
     round,
@@ -2336,7 +2527,7 @@ end
 function _fit_local_covariances!(
     method_state::_PreparedFirstOrderGRAMIS,
     round,
-    execution,
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
 )
     _prepare_local_covariance_weights!(method_state, round, execution)
 
@@ -2358,6 +2549,16 @@ function _fit_local_covariances!(
     )
     KernelAbstractions.synchronize(backend)
     return nothing
+end
+
+function _fit_local_covariances!(
+    method_state::_PreparedFirstOrderGRAMIS,
+    round,
+    execution::_KernelExecution,
+)
+    _prepare_local_covariance_weights!(method_state, round, execution)
+    _fit_accelerator_covariance_centres!(method_state, round, execution)
+    return _fit_accelerator_covariances!(method_state, round, execution)
 end
 
 @kernel function _blend_local_covariances_kernel!(

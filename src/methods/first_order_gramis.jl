@@ -246,6 +246,7 @@ struct _FirstOrderGRAMISWorkspace{S,L,I,N,Q,O,C,G,A,P,R,F,J,E,W,B}
     normalized_weights::N
     solve_scratch::Q
     local_starts::O
+    covariance_centres::S
     covariances::C
     pooled_covariance::S
     whitened_means::G
@@ -505,6 +506,7 @@ function _allocate_first_order_gramis_workspace(bank, plan, ::Type{L}) where {L}
         similar(prototype, T, capacity),
         _allocate_mis_solve_scratch(prototype, bank, capacity),
         _first_order_gramis_group_starts(plan.counts),
+        similar(prototype, T, dimension, proposal_count),
         similar(prototype, T, dimension, dimension, proposal_count),
         similar(prototype, T, dimension, dimension),
         similar(prototype, T, dimension, proposal_count),
@@ -707,6 +709,7 @@ function _copy_first_order_gramis_workspace(device, workspace)
         _copy_to_device(device, workspace.normalized_weights),
         _copy_to_device(device, workspace.solve_scratch),
         _copy_to_device(device, workspace.local_starts),
+        _copy_to_device(device, workspace.covariance_centres),
         _copy_to_device(device, workspace.covariances),
         _copy_to_device(device, workspace.pooled_covariance),
         _copy_to_device(device, workspace.whitened_means),
@@ -925,11 +928,27 @@ function _preflight_accelerator_method(
     )
     _preflight_first_order_gramis_cooperative_kernel!(method_state)
 
+    centre_kernel = _fit_accelerator_covariance_centres_kernel!(
+        backend,
+        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    _preflight_first_order_gramis_kernel_arguments(
+        device,
+        centre_kernel,
+        _first_order_gramis_covariance_centre_arguments(method_state, 1),
+    )
     covariance_kernels = (
-        _fit_local_covariances_kernel!(backend),
+        _fit_accelerator_covariances_kernel!(backend),
         _blend_local_covariances_kernel!(backend),
     )
-    for (kernel, arguments) in zip(covariance_kernels, covariance_arguments[2:3])
+    covariance_kernel_arguments = (
+        _first_order_gramis_accelerator_covariance_arguments(method_state, 1),
+        covariance_arguments[3],
+    )
+    for (kernel, arguments) in zip(
+        covariance_kernels,
+        covariance_kernel_arguments,
+    )
         _preflight_first_order_gramis_kernel_arguments(
             device,
             kernel,

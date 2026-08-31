@@ -176,6 +176,57 @@ function gram_is_cuda_local_weights(
     )
 end
 
+function gram_is_cuda_covariance_fit(::Type{T}, status, tempering_powers) where {T}
+    samples = CuArray(T[
+        1 3 5 7 9 11 9 11
+        2 0 4 6 19 19 21 21
+    ])
+    normalized_weights = CuArray(repeat(T[0.1, 0.2, 0.3, 0.4], 2))
+    locations = CuArray(T[0 10; 0 20])
+    factors = CuArray(reshape(T[1, 0, 0, 1, 2, 1, 0, 3], 2, 2, 2))
+    starts = CuArray(reshape(Int[1, 5], :, 1))
+    counts = CUDA.fill(4, 2, 1)
+    centres = CUDA.fill(T(NaN), 2, 2)
+    covariances = CUDA.fill(T(NaN), 2, 2, 2)
+    device_status = CuArray(status)
+    device_powers = CuArray(tempering_powers)
+    backend = IS.KernelAbstractions.get_backend(samples)
+
+    centre_kernel = IS._fit_accelerator_covariance_centres_kernel!(
+        backend,
+        IS._GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    centre_kernel(
+        centres,
+        normalized_weights,
+        device_powers,
+        device_status,
+        samples,
+        locations,
+        starts,
+        counts,
+        1;
+        ndrange=IS._GRAMIS_REDUCTION_WORKGROUP_SIZE * length(centres),
+        workgroupsize=IS._GRAMIS_REDUCTION_WORKGROUP_SIZE,
+    )
+    covariance_kernel = IS._fit_accelerator_covariances_kernel!(backend)
+    covariance_kernel(
+        covariances,
+        centres,
+        normalized_weights,
+        device_status,
+        samples,
+        factors,
+        starts,
+        counts,
+        1;
+        ndrange=length(covariances),
+        workgroupsize=length(covariances),
+    )
+    CUDA.synchronize()
+    return (; centres=Array(centres), covariances=Array(covariances))
+end
+
 
 function gram_is_cuda_preflight(::Type{T}) where {T}
     bank = ProposalBank([
@@ -492,6 +543,41 @@ const GRAMIS_CUDA_MULTI_DEVICE_RESTORATION =
     @test 0.0f0 < only(mixed.tempering_powers) < 1.0f0
     @test sum(mixed.normalized_weights) ≈ 1.0f0 rtol = 4.0f-5
     @test only(mixed.local_ess) >= 200.0f0
+    @test CUDA.device() == caller_device
+end
+
+@testset "FirstOrderGRAMIS CUDA weighted centres and covariance symmetry" begin
+    caller_device = CUDA.device()
+    for T in (Float32, Float64)
+        ready = gram_is_cuda_covariance_fit(
+            T,
+            fill(IS._GRAMIS_COVARIANCE_READY, 2),
+            T[0.5, 1],
+        )
+        @test ready.centres[:, 1] ≈ T[5, 3.8] rtol = 8eps(T)
+        @test ready.centres[:, 2] == T[10, 20]
+        @test ready.covariances[:, :, 1] ≈ T[4 4; 4 5.16] rtol = 16eps(T)
+        @test ready.covariances[:, :, 2] ≈ T[1 0; 0 1] rtol = 8eps(T)
+
+        fallback = gram_is_cuda_covariance_fit(
+            T,
+            UInt8[
+                IS._GRAMIS_ALL_ZERO_LOCAL,
+                IS._GRAMIS_TEMPERING_FALLBACK,
+            ],
+            zeros(T, 2),
+        )
+        @test fallback.covariances[:, :, 1] == T[1 0; 0 1]
+        @test fallback.covariances[:, :, 2] == T[4 2; 2 10]
+        for covariance in (
+            ready.covariances[:, :, 1],
+            ready.covariances[:, :, 2],
+            fallback.covariances[:, :, 1],
+            fallback.covariances[:, :, 2],
+        )
+            @test bitstring.(covariance) == bitstring.(transpose(covariance))
+        end
+    end
     @test CUDA.device() == caller_device
 end
 

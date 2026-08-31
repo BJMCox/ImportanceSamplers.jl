@@ -920,6 +920,60 @@ end
     end
 end
 
+@testset "FirstOrderGRAMIS accelerator weighted centres and covariance symmetry" begin
+    for T in (Float32, Float64)
+        bank = ProposalBank([
+            FactorGaussian(T[0, 0], T[1 0; 0 1]),
+            FactorGaussian(T[10, 20], T[1 0; 0 1]),
+            FactorGaussian(T[30, 40], T[2 0; 1 3]),
+        ])
+        state = gram_is_kernel_state(FirstOrderGRAMIS(
+            bank;
+            rounds=1,
+            round_size=12,
+            repulsion_strength=zero(T),
+            covariance_ess_threshold=3,
+        ))
+        workspace = state.workspace
+
+        @test hasproperty(workspace, :covariance_centres)
+        hasproperty(workspace, :covariance_centres) || continue
+
+        workspace.samples .= T[
+            1 3 5 7 9 11 9 11 0 0 0 0
+            2 0 4 6 19 19 21 21 0 0 0 0
+        ]
+        workspace.normalized_weights .= repeat(T[0.1, 0.2, 0.3, 0.4], 3)
+        workspace.tempering_powers .= T[0.5, 1, 0]
+        workspace.factor_status .= UInt8[
+            GRAMISKernelIS._GRAMIS_COVARIANCE_READY,
+            GRAMISKernelIS._GRAMIS_COVARIANCE_READY,
+            GRAMISKernelIS._GRAMIS_TEMPERING_FALLBACK,
+        ]
+        fill!(workspace.covariances, T(NaN))
+
+        execution = GRAMISKernelIS._KernelExecution(
+            GRAMISKernelIS._SerialCPUExecution(),
+        )
+        GRAMISKernelIS._fit_accelerator_covariance_centres!(state, 1, execution)
+        GRAMISKernelIS._fit_accelerator_covariances!(state, 1, execution)
+
+        @test workspace.covariance_centres[:, 1] ≈ T[5, 3.8] rtol = 8eps(T)
+        @test workspace.covariance_centres[:, 2] == T[10, 20]
+        @test workspace.covariances[:, :, 1] ≈ T[4 4; 4 5.16] rtol = 16eps(T)
+        @test workspace.covariances[:, :, 2] ≈ T[1 0; 0 1] rtol = 8eps(T)
+        @test workspace.covariances[:, :, 3] == T[4 2; 2 10]
+        workspace.factor_status[3] = GRAMISKernelIS._GRAMIS_ALL_ZERO_LOCAL
+        GRAMISKernelIS._fit_accelerator_covariance_centres!(state, 1, execution)
+        GRAMISKernelIS._fit_accelerator_covariances!(state, 1, execution)
+        @test workspace.covariances[:, :, 3] == T[4 2; 2 10]
+        for proposal in axes(workspace.covariances, 3)
+            @test bitstring.(workspace.covariances[:, :, proposal]) ==
+                  bitstring.(transpose(workspace.covariances[:, :, proposal]))
+        end
+    end
+end
+
 function gram_is_stability_fixture(::Type{T}, execution) where {T}
     bank = ProposalBank([
         FactorGaussian(T[0, 0], T[2 0; 1 3]),
