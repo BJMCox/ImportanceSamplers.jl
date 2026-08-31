@@ -696,21 +696,6 @@ function _copy_accelerator_algorithm(
     return deepcopy(algorithm)
 end
 
-function _copy_first_order_gramis_state_bank(
-    device,
-    bank::_PackedFactorGaussianBank,
-    transferred_metadata::_PackedFactorGaussianBank,
-)
-    return _PackedFactorGaussianBank(
-        _copy_to_device(device, bank.locations),
-        _copy_to_device(device, bank.factors),
-        _copy_to_device(device, bank.lognormalizers),
-        transferred_metadata.logmasses,
-        transferred_metadata.cdf,
-        transferred_metadata.proposal_ids,
-    )
-end
-
 function _copy_first_order_gramis_workspace(device, workspace)
     return _FirstOrderGRAMISWorkspace(
         _copy_to_device(device, workspace.samples),
@@ -748,16 +733,8 @@ function _prepare_transferred_method_state(
     transferred_target,
 )
     committed = _copy_packed_gaussian_bank(device, method_state.committed)
-    run = _copy_first_order_gramis_state_bank(
-        device,
-        method_state.run,
-        committed,
-    )
-    candidate = _copy_first_order_gramis_state_bank(
-        device,
-        method_state.candidate,
-        committed,
-    )
+    run = _first_order_gramis_state_bank(committed)
+    candidate = _first_order_gramis_state_bank(committed)
     plan = method_state.plan
     transferred_plan = _DeterministicAllocationPlan(
         Tuple(plan.schedule),

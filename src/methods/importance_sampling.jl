@@ -372,7 +372,7 @@ end
 _copy_accelerator_algorithm(device, algorithm, method_state) =
     _copy_algorithm(device, algorithm)
 
-_prepare_transferred_method_state(device, algorithm, method_state, transferred_target) =
+_prepare_transferred_method_state(device, algorithm, method_state, _transferred_target) =
     _prepare_method_state(algorithm)
 
 _accelerator_method_state_limit(method_state) = nothing

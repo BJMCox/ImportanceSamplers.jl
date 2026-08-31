@@ -154,6 +154,7 @@ Base.size(array::KernelArgumentTestArray) = size(array.storage)
 Base.getindex(array::KernelArgumentTestArray, indices...) =
     getindex(array.storage, indices...)
 Base.IndexStyle(::Type{<:KernelArgumentTestArray}) = IndexLinear()
+Base.copy(array::KernelArgumentTestArray) = KernelArgumentTestArray(copy(array.storage))
 const KERNEL_ARGUMENT_TEST_INT_SIMILAR_LENGTHS = Int[]
 Base.similar(
     ::KernelArgumentTestArray,
@@ -218,6 +219,13 @@ const KERNEL_ARGUMENT_TEST_CPU_ELEMENTS = Ref(0)
 function Adapt.adapt_storage(::KernelArgumentTestAccelerator, array::Array)
     KERNEL_ARGUMENT_TEST_CURRENT[] === :selected || error("wrong active mock device")
     return KernelArgumentTestArray(copy(array))
+end
+
+struct GRAMISFailClosedAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
+MLDataDevices.functional(::GRAMISFailClosedAccelerator) = true
+
+function Adapt.adapt_storage(::GRAMISFailClosedAccelerator, array::Array)
+    return Adapt.adapt_storage(KernelArgumentTestAccelerator(), array)
 end
 
 function Base.Array(array::KernelArgumentTestArray)
@@ -320,6 +328,19 @@ end
         random_buffers::_RandomBuffers,
         factor_execution,
     ) = nothing
+
+    function _with_backend_device(f, ::Main.GRAMISFailClosedAccelerator)
+        previous = Main.KERNEL_ARGUMENT_TEST_CURRENT[]
+        Main.KERNEL_ARGUMENT_TEST_CURRENT[] = :selected
+        try
+            return f()
+        finally
+            Main.KERNEL_ARGUMENT_TEST_CURRENT[] = previous
+        end
+    end
+
+    _owned_backend_rng(::Main.GRAMISFailClosedAccelerator, seed::UInt64) =
+        Random.Xoshiro(seed)
 
     _owned_backend_rng(::Main.LateFailAccelerator, seed::UInt64) =
         iszero(seed) ? Random.Xoshiro(seed) : error("late RNG construction failure")
@@ -672,6 +693,24 @@ end
     @test destination.device === device
     rand(expected_rng, UInt64)
     @test rand(source.rng, UInt64) == rand(expected_rng, UInt64)
+
+    fail_closed_device = GRAMISFailClosedAccelerator()
+    @test MLDataDevices.functional(fail_closed_device)
+    fail_closed_source = prepare_sampler(
+        Random.Xoshiro(0x4752414d4954),
+        LogTarget(value; grad=gradient),
+        context,
+        algorithm;
+        threaded=true,
+    )
+    expected_fail_closed_rng = copy(fail_closed_source.rng)
+    fail_closed_error = caught_device_error(
+        () -> fail_closed_device(fail_closed_source),
+    )
+    @test fail_closed_error isa SamplerDeviceError
+    @test fail_closed_error.reason === :first_order_gramis_accelerator_unavailable
+    @test rand(fail_closed_source.rng, UInt64) ==
+          rand(expected_fail_closed_rng, UInt64)
 end
 
 @testset "FirstOrderGRAMIS accelerator derivative preflight" begin
