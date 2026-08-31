@@ -1544,7 +1544,7 @@ end
     end
 end
 
-@testset "FirstOrderGRAMIS leaves non-CPU state execution unavailable" begin
+@testset "FirstOrderGRAMIS kernel execution reuses device-compatible math" begin
     T = Float64
     bank = ProposalBank([
         FactorGaussian(T[-1], reshape(T[1], 1, 1)),
@@ -1571,19 +1571,92 @@ end
         GRAMISKernelIS._SerialCPUExecution(),
     )
 
-    @test !applicable(
-        GRAMISKernelIS._evaluate_frozen_gradients!,
+    @test eltype(state.workspace.local_starts) === Int
+    @test eltype(state.workspace.factor_info) === Int32
+    @test GRAMISKernelIS._native_workgroupsize(execution, 17) == 17
+
+    @test @inferred(GRAMISKernelIS._evaluate_frozen_gradients!(
         state,
         target,
         execution,
-    )
-    @test !applicable(GRAMISKernelIS._precondition_gradients!, state, execution)
-    @test !applicable(
-        GRAMISKernelIS._backtrack_means!,
+    )) === nothing
+    @test @inferred(GRAMISKernelIS._precondition_gradients!(
+        state,
+        execution,
+    )) === nothing
+    @test @inferred(GRAMISKernelIS._backtrack_means!(
         state,
         target,
         execution,
+    )) === nothing
+    @test state.workspace.frozen_values == fill(T(-0.5), 2)
+    @test state.workspace.gradients == reshape(T[1, -1], 1, :)
+    @test state.workspace.moves == reshape(T[1, -1], 1, :)
+    @test state.candidate.locations == zeros(T, 1, 2)
+    @test state.workspace.steps == ones(T, 2)
+    @test state.workspace.backtracking_trials == ones(Int, 2)
+end
+
+@testset "population Cholesky kernel strides beyond one workgroup" begin
+    backend = GRAMISKernelIS.KernelAbstractions.CPU()
+    workgroupsize = GRAMISKernelIS._GRAMIS_CHOLESKY_WORKGROUP_SIZE
+    for T in (Float32, Float64), dimension in (2, workgroupsize + 3)
+        proposal_count = 2
+        covariances = Array{T}(undef, dimension, dimension, proposal_count)
+        expected = similar(covariances)
+        for proposal_slot in 1:proposal_count
+            seed = reshape(
+                T.(1:(dimension * dimension)),
+                dimension,
+                dimension,
+            ) / T(dimension + proposal_slot + 2)
+            covariance = seed * transpose(seed) +
+                         T(dimension + proposal_slot) * LinearAlgebra.I
+            covariances[:, :, proposal_slot] .= covariance
+            expected[:, :, proposal_slot] .= Matrix(LinearAlgebra.cholesky(
+                LinearAlgebra.Hermitian(covariance),
+            ).L)
+        end
+        factors = fill(T(-99), size(covariances))
+        info = fill(Int32(-99), proposal_count)
+        kernel = GRAMISKernelIS._factor_population_kernel!(
+            backend,
+            workgroupsize,
+        )
+
+        kernel(
+            factors,
+            covariances,
+            info;
+            ndrange=workgroupsize * proposal_count,
+        )
+        GRAMISKernelIS.KernelAbstractions.synchronize(backend)
+
+        @test info == zeros(Int32, proposal_count)
+        @test factors ≈ expected rtol = T === Float32 ? 2f-4 : 2e-12
+        @test all(
+            iszero(factors[row, column, proposal_slot])
+            for proposal_slot in 1:proposal_count
+            for column in 1:dimension
+            for row in 1:(column - 1)
+        )
+    end
+
+    covariances = Array{Float64}(undef, 2, 2, 2)
+    covariances[:, :, 1] .= [1.0 2.0; 2.0 1.0]
+    covariances[:, :, 2] .= [1.0 NaN; NaN 1.0]
+    factors = similar(covariances)
+    info = fill(Int32(-99), 2)
+    kernel = GRAMISKernelIS._factor_population_kernel!(backend, workgroupsize)
+    kernel(
+        factors,
+        covariances,
+        info;
+        ndrange=2workgroupsize,
     )
+    GRAMISKernelIS.KernelAbstractions.synchronize(backend)
+
+    @test info == Int32[2, GRAMISKernelIS._GRAMIS_COVARIANCE_NONFINITE_INFO]
 end
 
 function gram_is_gradient_move_allocation_counts()

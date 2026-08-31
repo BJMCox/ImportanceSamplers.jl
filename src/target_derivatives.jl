@@ -4,6 +4,8 @@ struct _BoundInPlaceGradient{T} <: _BoundGradient
     target::T
 end
 
+Adapt.@adapt_structure _BoundInPlaceGradient
+
 struct _BoundOutOfPlaceGradient{T} <: _BoundGradient
     target::T
 end

@@ -25,6 +25,9 @@ end
 @inline _first_order_gramis_workgroupsize(execution, backend, ndrange) =
     _native_workgroupsize(execution, ndrange)
 
+@inline _native_workgroupsize(execution::_KernelExecution, ndrange) =
+    _native_workgroupsize(execution.cpu_execution, ndrange)
+
 @inline function _first_order_gramis_workgroupsize(
     ::_ThreadedCPUExecution,
     ::KernelAbstractions.CPU,
@@ -272,6 +275,29 @@ end
 function _pooled_covariance!(
     pooled_covariance,
     factors,
+    ::_KernelExecution,
+)
+    dimension = size(factors, 1)
+    proposal_count = size(factors, 3)
+    packed_factors = reshape(
+        factors,
+        dimension,
+        dimension * proposal_count,
+    )
+    T = eltype(pooled_covariance)
+    LinearAlgebra.mul!(
+        pooled_covariance,
+        packed_factors,
+        transpose(packed_factors),
+        inv(T(proposal_count)),
+        zero(T),
+    )
+    return nothing
+end
+
+function _pooled_covariance!(
+    pooled_covariance,
+    factors,
     ::_ThreadedCPUExecution,
 )
     Threads.@threads :dynamic for entry in 1:length(pooled_covariance)
@@ -412,6 +438,59 @@ function _repulsion_force!(
     return nothing
 end
 
+@kernel function _repulsion_force_kernel!(
+    repulsion,
+    collision_counts,
+    means,
+    whitened_means,
+    strength,
+    round,
+    softening,
+)
+    proposal_slot = @index(Global, Linear)
+    _repulsion_slot!(
+        repulsion,
+        collision_counts,
+        means,
+        whitened_means,
+        @inbounds(strength[round]),
+        softening,
+        proposal_slot,
+    )
+end
+
+function _repulsion_force!(
+    repulsion,
+    collision_counts,
+    means,
+    whitened_means,
+    strength,
+    round,
+    softening,
+    execution::_KernelExecution,
+)
+    backend = KernelAbstractions.get_backend(repulsion)
+    proposal_count = size(means, 2)
+    kernel = _repulsion_force_kernel!(backend)
+    kernel(
+        repulsion,
+        collision_counts,
+        means,
+        whitened_means,
+        strength,
+        round,
+        softening;
+        ndrange=proposal_count,
+        workgroupsize=_first_order_gramis_workgroupsize(
+            execution,
+            backend,
+            proposal_count,
+        ),
+    )
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
 function _repulsion_force!(
     repulsion,
     collision_counts,
@@ -477,6 +556,59 @@ function _repulsion!(
         execution,
     )
     _validate_repulsion!(repulsion)
+    return nothing
+end
+
+function _repulsion!(
+    repulsion,
+    collision_counts,
+    pooled_covariance,
+    whitened_means,
+    means,
+    factors,
+    strengths::AbstractVector,
+    round,
+    softening,
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
+)
+    return _repulsion!(
+        repulsion,
+        collision_counts,
+        pooled_covariance,
+        whitened_means,
+        means,
+        factors,
+        @inbounds(strengths[round]),
+        softening,
+        execution,
+    )
+end
+
+function _repulsion!(
+    repulsion,
+    collision_counts,
+    pooled_covariance,
+    whitened_means,
+    means,
+    factors,
+    strength,
+    round,
+    softening,
+    execution::_KernelExecution,
+)
+    _pooled_covariance!(pooled_covariance, factors, execution)
+    _factor_pooled_covariance!(pooled_covariance)
+    _whiten_means!(whitened_means, pooled_covariance, means)
+    _repulsion_force!(
+        repulsion,
+        collision_counts,
+        means,
+        whitened_means,
+        strength,
+        round,
+        softening,
+        execution,
+    )
     return nothing
 end
 
@@ -577,6 +709,35 @@ function _precondition_gradients!(
     return nothing
 end
 
+@kernel function _precondition_gradients_kernel!(moves, gradients, factors)
+    proposal_slot = @index(Global, Linear)
+    _precondition_gradient_slot!(moves, gradients, factors, proposal_slot)
+end
+
+function _precondition_gradients!(
+    moves,
+    gradients,
+    factors,
+    execution::_KernelExecution,
+)
+    backend = KernelAbstractions.get_backend(moves)
+    kernel = _precondition_gradients_kernel!(backend)
+    proposal_count = size(gradients, 2)
+    kernel(
+        moves,
+        gradients,
+        factors;
+        ndrange=proposal_count,
+        workgroupsize=_first_order_gramis_workgroupsize(
+            execution,
+            backend,
+            proposal_count,
+        ),
+    )
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
 function _precondition_gradients!(
     moves,
     gradients,
@@ -627,6 +788,52 @@ function _evaluate_frozen_gradients!(
     return nothing
 end
 
+@kernel function _evaluate_frozen_gradients_kernel!(
+    values,
+    gradients,
+    target,
+    bound_gradient,
+    locations,
+)
+    proposal_slot = @index(Global, Linear)
+    _evaluate_frozen_gradient_slot!(
+        values,
+        gradients,
+        target,
+        bound_gradient,
+        locations,
+        proposal_slot,
+    )
+end
+
+function _evaluate_frozen_gradients!(
+    values,
+    gradients,
+    target,
+    bound_gradient,
+    locations,
+    execution::_KernelExecution,
+)
+    backend = KernelAbstractions.get_backend(values)
+    kernel = _evaluate_frozen_gradients_kernel!(backend)
+    proposal_count = size(locations, 2)
+    kernel(
+        values,
+        gradients,
+        target,
+        bound_gradient,
+        locations;
+        ndrange=proposal_count,
+        workgroupsize=_first_order_gramis_workgroupsize(
+            execution,
+            backend,
+            proposal_count,
+        ),
+    )
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
 _first_order_gramis_bound_gradient(
     method_state::_PreparedFirstOrderGRAMIS,
     ::_SerialCPUExecution,
@@ -637,10 +844,15 @@ _first_order_gramis_bound_gradient(
     ::_ThreadedCPUExecution,
 ) = method_state.threaded_gradient
 
+_first_order_gramis_bound_gradient(
+    method_state::_PreparedFirstOrderGRAMIS,
+    ::_KernelExecution,
+) = method_state.serial_gradient
+
 function _evaluate_frozen_gradients!(
     method_state::_PreparedFirstOrderGRAMIS,
     target,
-    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution,_KernelExecution},
 )
     workspace = method_state.workspace
     return _evaluate_frozen_gradients!(
@@ -655,7 +867,7 @@ end
 
 function _precondition_gradients!(
     method_state::_PreparedFirstOrderGRAMIS,
-    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution,_KernelExecution},
 )
     workspace = method_state.workspace
     return _precondition_gradients!(
@@ -895,6 +1107,141 @@ function _finish_backtracking!(
     return nothing
 end
 
+@kernel function _initialize_backtracking_kernel!(
+    candidate_locations,
+    candidate_values,
+    active_mask,
+    steps,
+    trials,
+    frozen_values,
+    locations,
+)
+    proposal_slot = @index(Global, Linear)
+    _initialize_backtracking_slot!(
+        candidate_locations,
+        candidate_values,
+        active_mask,
+        steps,
+        trials,
+        frozen_values,
+        locations,
+        proposal_slot,
+    )
+end
+
+@kernel function _backtracking_trial_kernel!(
+    candidate_locations,
+    candidate_values,
+    active_mask,
+    steps,
+    trials,
+    target,
+    frozen_values,
+    locations,
+    moves,
+    step,
+    trial,
+)
+    proposal_slot = @index(Global, Linear)
+    _backtracking_trial_slot!(
+        candidate_locations,
+        candidate_values,
+        active_mask,
+        steps,
+        trials,
+        target,
+        frozen_values,
+        locations,
+        moves,
+        step,
+        trial,
+        proposal_slot,
+    )
+end
+
+@kernel function _finish_backtracking_kernel!(
+    candidate_locations,
+    candidate_values,
+    active_mask,
+    frozen_values,
+    locations,
+)
+    proposal_slot = @index(Global, Linear)
+    _finish_backtracking_slot!(
+        candidate_locations,
+        candidate_values,
+        active_mask,
+        frozen_values,
+        locations,
+        proposal_slot,
+    )
+end
+
+function _backtrack_means!(
+    candidate_locations,
+    candidate_values,
+    active_mask,
+    steps,
+    trials,
+    target,
+    frozen_values,
+    locations,
+    moves,
+    max_trials,
+    execution::_KernelExecution,
+)
+    backend = KernelAbstractions.get_backend(candidate_locations)
+    proposal_count = size(locations, 2)
+    workgroupsize = _first_order_gramis_workgroupsize(
+        execution,
+        backend,
+        proposal_count,
+    )
+    initialize_kernel = _initialize_backtracking_kernel!(backend)
+    initialize_kernel(
+        candidate_locations,
+        candidate_values,
+        active_mask,
+        steps,
+        trials,
+        frozen_values,
+        locations;
+        ndrange=proposal_count,
+        workgroupsize,
+    )
+    trial_kernel = _backtracking_trial_kernel!(backend)
+    for trial in 1:max_trials
+        step = ldexp(one(eltype(steps)), 1 - trial)
+        trial_kernel(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            steps,
+            trials,
+            target,
+            frozen_values,
+            locations,
+            moves,
+            step,
+            trial;
+            ndrange=proposal_count,
+            workgroupsize,
+        )
+    end
+    finish_kernel = _finish_backtracking_kernel!(backend)
+    finish_kernel(
+        candidate_locations,
+        candidate_values,
+        active_mask,
+        frozen_values,
+        locations;
+        ndrange=proposal_count,
+        workgroupsize,
+    )
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
 function _finish_backtracking!(
     candidate_locations,
     candidate_values,
@@ -977,7 +1324,7 @@ end
 function _backtrack_means!(
     method_state::_PreparedFirstOrderGRAMIS,
     target,
-    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution,_KernelExecution},
 )
     workspace = method_state.workspace
     return _backtrack_means!(
@@ -1424,7 +1771,93 @@ function _blend_local_covariances!(
     return nothing
 end
 
-const _GRAMIS_COVARIANCE_NONFINITE_INFO = -1
+const _GRAMIS_COVARIANCE_NONFINITE_INFO = Int32(-1)
+const _GRAMIS_CHOLESKY_WORKGROUP_SIZE = 64
+
+@kernel function _factorization_preflight_covariances!(covariances)
+    entry = @index(Global, Linear)
+    dimension = size(covariances, 1)
+    entries_per_proposal = dimension * dimension
+    proposal_slot = (entry - 1) ÷ entries_per_proposal + 1
+    matrix_entry = (entry - 1) % entries_per_proposal
+    row = matrix_entry % dimension + 1
+    column = matrix_entry ÷ dimension + 1
+    T = eltype(covariances)
+    @inbounds covariances[row, column, proposal_slot] = row == column ?
+        T(dimension + proposal_slot) : T(row + column) / T(100)
+end
+
+@kernel function _factor_population_kernel!(factors, covariances, info)
+    proposal_slot = @index(Group, Linear)
+    lane = @index(Local, Linear)
+    @uniform lane_count = @groupsize()[1]
+    @uniform dimension = size(factors, 1)
+    lane_bad = @localmem Int32 (_GRAMIS_CHOLESKY_WORKGROUP_SIZE,)
+
+    lane == 1 && (@inbounds info[proposal_slot] = Int32(0))
+    bad = Int32(0)
+    for entry in lane:lane_count:(dimension * dimension)
+        row = (entry - 1) % dimension + 1
+        column = (entry - 1) ÷ dimension + 1
+        value = @inbounds covariances[row, column, proposal_slot]
+        bad |= isfinite(value) ? Int32(0) : Int32(1)
+        @inbounds factors[row, column, proposal_slot] =
+            row < column ? zero(eltype(factors)) : value
+    end
+    @inbounds lane_bad[lane] = bad
+    @synchronize()
+    if lane == 1
+        group_bad = @inbounds lane_bad[1]
+        for other_lane in 2:lane_count
+            group_bad |= @inbounds lane_bad[other_lane]
+        end
+        iszero(group_bad) ||
+            (@inbounds info[proposal_slot] = _GRAMIS_COVARIANCE_NONFINITE_INFO)
+    end
+    @synchronize()
+
+    for column in 1:dimension
+        if lane == 1 && iszero(@inbounds(info[proposal_slot]))
+            pivot = @inbounds factors[column, column, proposal_slot]
+            for previous in 1:(column - 1)
+                pivot -= abs2(@inbounds factors[column, previous, proposal_slot])
+            end
+            if isfinite(pivot) && pivot > zero(pivot)
+                @inbounds factors[column, column, proposal_slot] = sqrt(pivot)
+            else
+                @inbounds info[proposal_slot] = Int32(column)
+            end
+        end
+        @synchronize()
+
+        bad = Int32(0)
+        if iszero(@inbounds(info[proposal_slot]))
+            diagonal = @inbounds factors[column, column, proposal_slot]
+            for row in (column + lane):lane_count:dimension
+                value = @inbounds factors[row, column, proposal_slot]
+                for previous in 1:(column - 1)
+                    value -= @inbounds(
+                        factors[row, previous, proposal_slot] *
+                        factors[column, previous, proposal_slot]
+                    )
+                end
+                value /= diagonal
+                @inbounds factors[row, column, proposal_slot] = value
+                bad |= isfinite(value) ? Int32(0) : Int32(1)
+            end
+        end
+        @inbounds lane_bad[lane] = bad
+        @synchronize()
+        if lane == 1 && iszero(@inbounds(info[proposal_slot]))
+            group_bad = @inbounds lane_bad[1]
+            for other_lane in 2:lane_count
+                group_bad |= @inbounds lane_bad[other_lane]
+            end
+            iszero(group_bad) || @inbounds(info[proposal_slot] = Int32(column))
+        end
+        @synchronize()
+    end
+end
 
 @inline function _factor_population_slot!(
     factors,
@@ -1459,9 +1892,9 @@ function _factor_population!(
     ::MLDataDevices.AbstractCPUDevice,
     factors::StridedArray{T,3},
     covariances::StridedArray{T,3},
-    info::StridedVector{Int},
+    info::StridedVector{I},
     ::_SerialCPUExecution,
-) where {T<:Union{Float32,Float64}}
+) where {T<:Union{Float32,Float64},I<:Signed}
     @inbounds for proposal_slot in axes(factors, 3)
         _factor_population_slot!(
             factors,
@@ -1477,9 +1910,9 @@ function _factor_population!(
     ::MLDataDevices.AbstractCPUDevice,
     factors::StridedArray{T,3},
     covariances::StridedArray{T,3},
-    info::StridedVector{Int},
+    info::StridedVector{I},
     ::_ThreadedCPUExecution,
-) where {T<:Union{Float32,Float64}}
+) where {T<:Union{Float32,Float64},I<:Signed}
     Threads.@threads :dynamic for proposal_slot in axes(factors, 3)
         _factor_population_slot!(
             factors,
@@ -1495,8 +1928,8 @@ function _factor_population!(
     device::MLDataDevices.AbstractCPUDevice,
     factors::StridedArray{T,3},
     covariances::StridedArray{T,3},
-    info::StridedVector{Int},
-) where {T<:Union{Float32,Float64}}
+    info::StridedVector{I},
+) where {T<:Union{Float32,Float64},I<:Signed}
     return _factor_population!(
         device,
         factors,
@@ -1554,9 +1987,9 @@ function _update_local_covariances!(
     ::MLDataDevices.AbstractCPUDevice,
     method_state::_PreparedFirstOrderGRAMIS,
     round,
-    info::StridedVector{Int},
+    info::StridedVector{I},
     execution,
-)
+) where {I<:Signed}
     copyto!(method_state.candidate.factors, method_state.run.factors)
     _blend_local_covariances!(method_state, round, execution)
     workspace = method_state.workspace
@@ -1869,7 +2302,9 @@ function _importance_sample_cpu!(
     method_state::_PreparedFirstOrderGRAMIS,
     threaded,
 )
-    execution = threaded ? _ThreadedCPUExecution() : _SerialCPUExecution()
+    cpu_execution = threaded ? _ThreadedCPUExecution() : _SerialCPUExecution()
+    execution = sampler.device isa MLDataDevices.AbstractAcceleratorDevice ?
+                _KernelExecution(cpu_execution) : cpu_execution
     plan = method_state.plan
     workspace = method_state.workspace
     buffers = sampler.random_buffers
@@ -1887,10 +2322,7 @@ function _importance_sample_cpu!(
         :result_construction,
         0,
         begin
-            allocated_active_rounds = findall(
-                !iszero,
-                method_state.repulsion_strength,
-            )
+            allocated_active_rounds = collect(method_state.active_repulsion_rounds)
             active_repulsion_count = length(allocated_active_rounds)
             (
                 samples=similar(workspace.samples, T, dimension, total_samples),
@@ -2079,19 +2511,19 @@ function _importance_sample_cpu!(
             :repulsion,
             round - 1,
             begin
-                strength = method_state.repulsion_strength[round]
-                _repulsion!(
-                    workspace.repulsion,
-                    workspace.collision_counts,
-                    workspace.pooled_covariance,
-                    workspace.whitened_means,
-                    method_state.run.locations,
-                    method_state.run.factors,
-                    strength,
-                    method_state.repulsion_softening,
-                    execution,
-                )
-                if !iszero(strength)
+                if round in method_state.active_repulsion_rounds
+                    _repulsion!(
+                        workspace.repulsion,
+                        workspace.collision_counts,
+                        workspace.pooled_covariance,
+                        workspace.whitened_means,
+                        method_state.run.locations,
+                        method_state.run.factors,
+                        method_state.repulsion_strength,
+                        round,
+                        method_state.repulsion_softening,
+                        execution,
+                    )
                     active_repulsion_position[] += 1
                     minimum_whitened_distances[active_repulsion_position[]] =
                         _minimum_first_order_gramis_whitened_distance(
@@ -2100,6 +2532,12 @@ function _importance_sample_cpu!(
                             transfers,
                             execution,
                         )
+                else
+                    fill!(workspace.repulsion, zero(T))
+                    fill!(
+                        workspace.collision_counts,
+                        _GRAMIS_COLLISIONS_UNAVAILABLE,
+                    )
                 end
             end,
         )

@@ -1603,6 +1603,7 @@ function gram_is_transaction_sampler(; invalid_diagnostics=false)
         state.max_backtracking_trials,
         state.serial_gradient,
         state.threaded_gradient,
+        state.active_repulsion_rounds,
         invalid_workspace,
     )
     invalid_sampler = ImportanceSamplers._PreparedImportanceSampler(
@@ -1714,6 +1715,7 @@ function gram_is_rebuild_sampler(sampler, workspace)
         state.max_backtracking_trials,
         state.serial_gradient,
         state.threaded_gradient,
+        state.active_repulsion_rounds,
         workspace,
     )
     return ImportanceSamplers._PreparedImportanceSampler(
@@ -1747,6 +1749,7 @@ function gram_is_rebuild_sampler(sampler, workspace, plan)
         state.max_backtracking_trials,
         state.serial_gradient,
         state.threaded_gradient,
+        state.active_repulsion_rounds,
         workspace,
     )
     return ImportanceSamplers._PreparedImportanceSampler(
@@ -2078,6 +2081,7 @@ end
             sampler.method_state.covariance_rate[2] = NaN
         elseif case.name === :repulsion
             sampler.method_state.repulsion_strength[2] = Inf
+            push!(sampler.method_state.active_repulsion_rounds, 2)
         end
 
         before = gram_is_population_bits(sampler)

@@ -236,7 +236,7 @@ function _first_order_gramis_default_threshold(sample_count)
     return 3 * quotient + cld(3 * remainder, 10)
 end
 
-struct _FirstOrderGRAMISWorkspace{S,L,I,N,Q,O,C,G,A,P,R,F,E,W,B}
+struct _FirstOrderGRAMISWorkspace{S,L,I,N,Q,O,C,G,A,P,R,F,J,E,W,B}
     samples::S
     round_logweights::L
     local_logweights::L
@@ -257,7 +257,7 @@ struct _FirstOrderGRAMISWorkspace{S,L,I,N,Q,O,C,G,A,P,R,F,E,W,B}
     steps::P
     repulsion::R
     factor_status::F
-    factor_info::I
+    factor_info::J
     local_ess::E
     tempering_powers::W
     backtracking_trials::B
@@ -273,6 +273,7 @@ mutable struct _PreparedFirstOrderGRAMIS{
     C,
     E,
     G,
+    A,
     W,
 }
     committed::B
@@ -289,6 +290,7 @@ mutable struct _PreparedFirstOrderGRAMIS{
     max_backtracking_trials::Int
     serial_gradient::G
     threaded_gradient::G
+    active_repulsion_rounds::A
     workspace::W
 end
 
@@ -505,7 +507,7 @@ function _allocate_first_order_gramis_workspace(bank, plan, ::Type{L}) where {L}
         similar(prototype, T, proposal_count),
         similar(prototype, T, dimension, proposal_count),
         similar(prototype, UInt8, proposal_count),
-        similar(prototype, Int, proposal_count),
+        similar(prototype, Int32, proposal_count),
         similar(prototype, T, proposal_count),
         similar(prototype, T, proposal_count),
         similar(prototype, Int, proposal_count),
@@ -589,6 +591,7 @@ function _prepare_first_order_gramis_state(
         ),
     )
     workspace = _allocate_first_order_gramis_workspace(committed, plan, L)
+    active_repulsion_rounds = findall(!iszero, repulsion_strength)
     return _PreparedFirstOrderGRAMIS(
         committed,
         run,
@@ -604,6 +607,7 @@ function _prepare_first_order_gramis_state(
         max_backtracking_trials,
         serial_gradient,
         threaded_gradient,
+        active_repulsion_rounds,
         workspace,
     )
 end
@@ -760,6 +764,7 @@ function _prepare_transferred_method_state(
         method_state.max_backtracking_trials,
         bound_gradient,
         bound_gradient,
+        method_state.active_repulsion_rounds,
         _copy_first_order_gramis_workspace(device, method_state.workspace),
     )
 end
@@ -771,6 +776,42 @@ _transferred_backend_state(
     random_buffers,
 ) = (method_state, target, random_buffers)
 
+_prepared_backend_state(
+    sampler,
+    method_state::_PreparedFirstOrderGRAMIS,
+) = (method_state, sampler.target, sampler.random_buffers, sampler.rng)
+
+_first_order_gramis_resident_state(method_state::_PreparedFirstOrderGRAMIS) =
+    (
+        method_state.committed,
+        method_state.run,
+        method_state.candidate,
+        method_state.plan,
+        method_state.repulsion_strength,
+        method_state.covariance_rate,
+        method_state.covariance_ess_threshold,
+        method_state.serial_gradient,
+        method_state.threaded_gradient,
+        method_state.workspace,
+    )
+
+_first_order_gramis_factorization_supported(device) = false
+
+function _preflight_first_order_gramis_factorization!(device, method_state)
+    throw(SamplerDeviceError(device, :first_order_gramis_accelerator_unavailable))
+end
+
+function _preflight_first_order_gramis_kernel_arguments(
+    device,
+    kernel,
+    arguments,
+)
+    for argument in arguments
+        _preflight_kernel_argument(device, kernel, argument)
+    end
+    return nothing
+end
+
 function _preflight_accelerator_method(
     device,
     target,
@@ -779,7 +820,223 @@ function _preflight_accelerator_method(
     random_buffers,
     factor_execution,
 )
-    throw(SamplerDeviceError(device, :first_order_gramis_accelerator_unavailable))
+    _first_order_gramis_factorization_supported(device) || throw(
+        SamplerDeviceError(device, :first_order_gramis_accelerator_unavailable),
+    )
+    workspace = method_state.workspace
+    bank = method_state.committed
+    binding_sample = view(bank.locations, :, 1)
+    bound_target = _bind_resolved_target(target, binding_sample)
+    log_type = eltype(workspace.round_logweights)
+    target_argument = _NativeDeviceTarget{log_type,typeof(bound_target)}(
+        bound_target,
+    )
+    bound_gradient = method_state.serial_gradient
+    backend = KernelAbstractions.get_backend(workspace.samples)
+
+    sample_kernel = _mis_round_launch_kernel!(backend)
+    _preflight_first_order_gramis_kernel_arguments(
+        device,
+        sample_kernel,
+        (
+            view(workspace.samples, :, 1:1),
+            view(workspace.round_logweights, 1:1),
+            view(workspace.round_proposal_ids, 1:1),
+            random_buffers.failure_scratch.record.storage,
+            view(random_buffers.normal, 1:size(bank.locations, 1)),
+            target_argument,
+            bank,
+            view(method_state.plan.assignments, 1:1, 1),
+            _RealizedMixtureDenominator(method_state.plan.logcoefficients, 1),
+            workspace.solve_scratch,
+            _MISAdaptationOutput(
+                workspace.local_logweights,
+                workspace.generating_logdensities,
+            ),
+        ),
+    )
+
+    local_weights_kernel = _first_order_gramis_local_weights_kernel!(backend)
+    _preflight_first_order_gramis_kernel_arguments(
+        device,
+        local_weights_kernel,
+        (
+            workspace.local_logweights,
+            workspace.generating_logdensities,
+            workspace.round_proposal_ids,
+            workspace.round_ids,
+            1,
+            random_buffers.failure_scratch.record.storage,
+        ),
+    )
+
+    gradient_kernel = _evaluate_frozen_gradients_kernel!(backend)
+    _preflight_first_order_gramis_kernel_arguments(
+        device,
+        gradient_kernel,
+        (
+            workspace.frozen_values,
+            workspace.gradients,
+            bound_target,
+            bound_gradient,
+            bank.locations,
+        ),
+    )
+    precondition_kernel = _precondition_gradients_kernel!(backend)
+    _preflight_first_order_gramis_kernel_arguments(
+        device,
+        precondition_kernel,
+        (workspace.moves, workspace.gradients, bank.factors),
+    )
+
+    covariance_kernels = (
+        (
+            _local_group_starts_kernel!(backend),
+            (workspace.local_starts, method_state.plan.counts, 1),
+        ),
+        (
+            _local_weight_summary_kernel!(backend),
+            (
+                workspace.normalized_weights,
+                workspace.local_ess,
+                workspace.tempering_powers,
+                workspace.factor_status,
+                workspace.local_logweights,
+                workspace.local_starts,
+                method_state.plan.counts,
+                1,
+            ),
+        ),
+        (
+            _tempering_power_kernel!(backend),
+            (
+                workspace.normalized_weights,
+                workspace.local_ess,
+                workspace.tempering_powers,
+                workspace.factor_status,
+                workspace.local_logweights,
+                workspace.local_starts,
+                method_state.plan.counts,
+                method_state.covariance_ess_threshold,
+                1,
+                method_state.tempering_tolerance,
+                method_state.tempering_max_iterations,
+            ),
+        ),
+        (
+            _fit_local_covariances_kernel!(backend),
+            (
+                workspace.covariances,
+                workspace.normalized_weights,
+                workspace.tempering_powers,
+                workspace.factor_status,
+                workspace.samples,
+                bank.locations,
+                bank.factors,
+                workspace.local_starts,
+                method_state.plan.counts,
+                1,
+            ),
+        ),
+        (
+            _blend_local_covariances_kernel!(backend),
+            (
+                workspace.covariances,
+                bank.factors,
+                workspace.factor_status,
+                method_state.covariance_rate,
+                1,
+                method_state.covariance_regularization,
+            ),
+        ),
+    )
+    for (kernel, arguments) in covariance_kernels
+        _preflight_first_order_gramis_kernel_arguments(
+            device,
+            kernel,
+            arguments,
+        )
+    end
+
+    factor_kernel = _factor_population_kernel!(
+        backend,
+        _GRAMIS_CHOLESKY_WORKGROUP_SIZE,
+    )
+    _preflight_first_order_gramis_kernel_arguments(
+        device,
+        factor_kernel,
+        (
+            method_state.candidate.factors,
+            workspace.covariances,
+            workspace.factor_info,
+        ),
+    )
+
+    repulsion_kernel = _repulsion_force_kernel!(backend)
+    _preflight_first_order_gramis_kernel_arguments(
+        device,
+        repulsion_kernel,
+        (
+            workspace.repulsion,
+            workspace.collision_counts,
+            bank.locations,
+            workspace.whitened_means,
+            method_state.repulsion_strength,
+            1,
+            method_state.repulsion_softening,
+        ),
+    )
+
+    backtracking_kernels = (
+        (
+            _initialize_backtracking_kernel!(backend),
+            (
+                method_state.candidate.locations,
+                workspace.candidate_values,
+                workspace.active_mask,
+                workspace.steps,
+                workspace.backtracking_trials,
+                workspace.frozen_values,
+                bank.locations,
+            ),
+        ),
+        (
+            _backtracking_trial_kernel!(backend),
+            (
+                method_state.candidate.locations,
+                workspace.candidate_values,
+                workspace.active_mask,
+                workspace.steps,
+                workspace.backtracking_trials,
+                bound_target,
+                workspace.frozen_values,
+                bank.locations,
+                workspace.moves,
+                one(eltype(workspace.steps)),
+                1,
+            ),
+        ),
+        (
+            _finish_backtracking_kernel!(backend),
+            (
+                method_state.candidate.locations,
+                workspace.candidate_values,
+                workspace.active_mask,
+                workspace.frozen_values,
+                bank.locations,
+            ),
+        ),
+    )
+    for (kernel, arguments) in backtracking_kernels
+        _preflight_first_order_gramis_kernel_arguments(
+            device,
+            kernel,
+            arguments,
+        )
+    end
+
+    _preflight_first_order_gramis_factorization!(device, method_state)
+    return nothing
 end
 
 _accelerator_method_state_limit(::_PreparedFirstOrderGRAMIS) = nothing

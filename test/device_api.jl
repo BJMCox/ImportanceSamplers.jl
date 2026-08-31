@@ -59,7 +59,7 @@ function (target::DerivativeTransferValue)(sample, p)
 end
 
 function Adapt.adapt_structure(to, target::DerivativeTransferValue)
-    DERIVATIVE_VALUE_TRANSFERS[] += 1
+    to isa KernelArgumentTestAdaptor || (DERIVATIVE_VALUE_TRANSFERS[] += 1)
     return DerivativeTransferValue(Adapt.adapt(to, target.offset))
 end
 
@@ -75,7 +75,7 @@ function (gradient::DerivativeTransferGradient)(destination, sample, p)
 end
 
 function Adapt.adapt_structure(to, gradient::DerivativeTransferGradient)
-    DERIVATIVE_GRADIENT_TRANSFERS[] += 1
+    to isa KernelArgumentTestAdaptor || (DERIVATIVE_GRADIENT_TRANSFERS[] += 1)
     return DerivativeTransferGradient(Adapt.adapt(to, gradient.scale))
 end
 
@@ -86,7 +86,7 @@ end
 MLDataDevices.isleaf(::DerivativeTransferContext) = true
 
 function Adapt.adapt_structure(to, context::DerivativeTransferContext)
-    DERIVATIVE_CONTEXT_TRANSFERS[] += 1
+    to isa KernelArgumentTestAdaptor || (DERIVATIVE_CONTEXT_TRANSFERS[] += 1)
     return DerivativeTransferContext(Adapt.adapt(to, context.shift))
 end
 
@@ -101,7 +101,7 @@ function (target::GRAMISTransferValue)(sample, p)
 end
 
 function Adapt.adapt_structure(to, target::GRAMISTransferValue)
-    DERIVATIVE_VALUE_TRANSFERS[] += 1
+    to isa KernelArgumentTestAdaptor || (DERIVATIVE_VALUE_TRANSFERS[] += 1)
     return GRAMISTransferValue(Adapt.adapt(to, target.offset))
 end
 
@@ -117,7 +117,7 @@ function (gradient::GRAMISTransferGradient)(destination, sample, p)
 end
 
 function Adapt.adapt_structure(to, gradient::GRAMISTransferGradient)
-    DERIVATIVE_GRADIENT_TRANSFERS[] += 1
+    to isa KernelArgumentTestAdaptor || (DERIVATIVE_GRADIENT_TRANSFERS[] += 1)
     return GRAMISTransferGradient(Adapt.adapt(to, gradient.scale))
 end
 
@@ -168,10 +168,12 @@ end
 KernelAbstractions.get_backend(::KernelArgumentTestArray) =
     KernelArgumentTestBackend()
 
-struct KernelArgumentTestDeviceArray{T,N}
+struct KernelArgumentTestDeviceArray{T,N} <: AbstractArray{T,N}
     pointer::Ptr{T}
     dimensions::NTuple{N,Int}
 end
+
+Base.size(array::KernelArgumentTestDeviceArray) = array.dimensions
 
 struct KernelArgumentTestAdaptor end
 
@@ -320,13 +322,13 @@ end
     _owned_backend_rng(::Main.KernelArgumentTestAccelerator, seed::UInt64) =
         Random.Xoshiro(seed)
 
-    _preflight_accelerator_method(
+    _first_order_gramis_factorization_supported(
         ::Main.KernelArgumentTestAccelerator,
-        target,
-        algorithm::FirstOrderGRAMIS,
+    ) = true
+
+    _preflight_first_order_gramis_factorization!(
+        ::Main.KernelArgumentTestAccelerator,
         method_state::_PreparedFirstOrderGRAMIS,
-        random_buffers::_RandomBuffers,
-        factor_execution,
     ) = nothing
 
     function _with_backend_device(f, ::Main.GRAMISFailClosedAccelerator)
@@ -691,8 +693,10 @@ end
     @test DERIVATIVE_GRADIENT_TRANSFERS[] == 1
     @test DERIVATIVE_CONTEXT_TRANSFERS[] == 1
     @test destination.device === device
+    @test first(IS._prepared_backend_state(destination, state)) === state
     rand(expected_rng, UInt64)
     @test rand(source.rng, UInt64) == rand(expected_rng, UInt64)
+    @test !isempty(KERNEL_ARGUMENT_TEST_ARGUMENTS)
 
     fail_closed_device = GRAMISFailClosedAccelerator()
     @test MLDataDevices.functional(fail_closed_device)
