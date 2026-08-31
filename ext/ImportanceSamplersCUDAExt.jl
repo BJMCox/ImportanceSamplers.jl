@@ -236,18 +236,4 @@ function ImportanceSamplers._preflight_first_order_gramis_factorization!(
     return nothing
 end
 
-function ImportanceSamplers._preflight_first_order_gramis_live_execution!(
-    device::MLDataDevices.CUDADevice,
-    method_state::ImportanceSamplers._PreparedFirstOrderGRAMIS,
-    target,
-    random_buffers,
-)
-    return ImportanceSamplers._execute_first_order_gramis_live_preflight!(
-        device,
-        method_state,
-        target,
-        random_buffers,
-    )
-end
-
 end

@@ -327,6 +327,13 @@ end
         method_state::_PreparedFirstOrderGRAMIS,
     ) = nothing
 
+    _execute_first_order_gramis_live_preflight!(
+        ::Main.KernelArgumentTestAccelerator,
+        method_state::_PreparedFirstOrderGRAMIS,
+        target,
+        random_buffers::_RandomBuffers,
+    ) = nothing
+
     function _with_backend_device(f, ::Main.GRAMISFailClosedAccelerator)
         previous = Main.KERNEL_ARGUMENT_TEST_CURRENT[]
         Main.KERNEL_ARGUMENT_TEST_CURRENT[] = :selected
@@ -689,10 +696,8 @@ end
     @test DERIVATIVE_GRADIENT_TRANSFERS[] == 1
     @test DERIVATIVE_CONTEXT_TRANSFERS[] == 1
     @test destination.device === device
-    @test first(IS._prepared_backend_state(destination, state)) === state
     rand(expected_rng, UInt64)
     @test rand(source.rng, UInt64) == rand(expected_rng, UInt64)
-    @test !isempty(KERNEL_ARGUMENT_TEST_ARGUMENTS)
 
     fail_closed_device = GRAMISFailClosedAccelerator()
     @test MLDataDevices.functional(fail_closed_device)

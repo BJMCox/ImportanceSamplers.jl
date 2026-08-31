@@ -22,6 +22,20 @@
     end
 end
 
+@inline function _first_order_gramis_local_weight_arguments(
+    local_logweights, generating_logdensities, proposal_ids, round_ids,
+    round, failure_storage,
+)
+    return (
+        local_logweights,
+        generating_logdensities,
+        proposal_ids,
+        round_ids,
+        round,
+        failure_storage,
+    )
+end
+
 @inline _first_order_gramis_workgroupsize(execution, backend, ndrange) =
     _native_workgroupsize(execution, ndrange)
 
@@ -194,12 +208,14 @@ function _first_order_gramis_sample_round!(
     backend = KernelAbstractions.get_backend(local_logweights)
     kernel = _first_order_gramis_local_weights_kernel!(backend)
     kernel(
-        local_logweights,
-        generating_logdensities,
-        proposal_ids,
-        round_ids,
-        round,
-        failure_storage;
+        _first_order_gramis_local_weight_arguments(
+            local_logweights,
+            generating_logdensities,
+            proposal_ids,
+            round_ids,
+            round,
+            failure_storage,
+        )...;
         ndrange=length(local_logweights),
         workgroupsize=_first_order_gramis_workgroupsize(
             execution,
@@ -637,13 +653,21 @@ function _repulsion_force!(
     return nothing
 end
 
+@inline function _repulsion_failure(repulsion, proposal_slot)
+    @inbounds for row in axes(repulsion, 1)
+        value = repulsion[row, proposal_slot]
+        isfinite(value) || return (_GRAMIS_FORCE_NONFINITE, value)
+    end
+    return (UInt16(0), zero(eltype(repulsion)))
+end
+
 function _validate_repulsion!(repulsion)
-    @inbounds for proposal_slot in axes(repulsion, 2), row in axes(repulsion, 1)
-        force = repulsion[row, proposal_slot]
-        isfinite(force) || _throw_first_order_gramis_repulsion_error(
+    @inbounds for proposal_slot in axes(repulsion, 2)
+        reason, value = _repulsion_failure(repulsion, proposal_slot)
+        iszero(reason) || _throw_first_order_gramis_repulsion_error(
             proposal_slot,
             :force_nonfinite,
-            force,
+            value,
         )
     end
     return nothing
@@ -655,18 +679,10 @@ end
     repulsion,
 )
     proposal_slot = @index(Global, Linear)
-    @inbounds for row in axes(repulsion, 1)
-        value = repulsion[row, proposal_slot]
-        if !isfinite(value)
-            failure_values[proposal_slot] = value
-            _record_native_failure!(
-                failure_storage,
-                proposal_slot,
-                0,
-                _GRAMIS_FORCE_NONFINITE,
-            )
-            break
-        end
+    reason, value = _repulsion_failure(repulsion, proposal_slot)
+    if !iszero(reason)
+        @inbounds failure_values[proposal_slot] = value
+        _record_native_failure!(failure_storage, proposal_slot, 0, reason)
     end
 end
 
@@ -803,36 +819,64 @@ function _repulsion!(
     )
 end
 
+@inline function _frozen_derivative_failure(values, gradients, proposal_slot)
+    value = @inbounds values[proposal_slot]
+    isfinite(value) || return (_GRAMIS_FROZEN_VALUE_NONFINITE, value)
+    @inbounds for row in axes(gradients, 1)
+        value = gradients[row, proposal_slot]
+        isfinite(value) || return (_GRAMIS_GRADIENT_NONFINITE, value)
+    end
+    return (UInt16(0), value)
+end
+
 function _validate_frozen_derivatives!(values, gradients)
     @inbounds for proposal_slot in eachindex(values)
-        value = values[proposal_slot]
-        isfinite(value) || _throw_first_order_gramis_derivative_error(
+        reason, value = _frozen_derivative_failure(
+            values,
+            gradients,
             proposal_slot,
-            :frozen_value_nonfinite,
+        )
+        iszero(reason) || _throw_first_order_gramis_derivative_error(
+            proposal_slot,
+            _first_order_gramis_derivative_reason(reason),
             value,
         )
-        for row in axes(gradients, 1)
-            gradient = gradients[row, proposal_slot]
-            isfinite(gradient) || _throw_first_order_gramis_derivative_error(
-                proposal_slot,
-                :gradient_nonfinite,
-                gradient,
-            )
-        end
     end
     return nothing
 end
 
+@inline function _preconditioned_move_failure(moves, proposal_slot)
+    @inbounds for row in axes(moves, 1)
+        value = moves[row, proposal_slot]
+        isfinite(value) || return (_GRAMIS_MOVE_NONFINITE, value)
+    end
+    return (UInt16(0), zero(eltype(moves)))
+end
+
 function _validate_preconditioned_moves!(moves)
-    @inbounds for proposal_slot in axes(moves, 2), row in axes(moves, 1)
-        move = moves[row, proposal_slot]
-        isfinite(move) || _throw_first_order_gramis_derivative_error(
+    @inbounds for proposal_slot in axes(moves, 2)
+        reason, value = _preconditioned_move_failure(moves, proposal_slot)
+        iszero(reason) || _throw_first_order_gramis_derivative_error(
             proposal_slot,
-            :move_nonfinite,
-            move,
+            _first_order_gramis_derivative_reason(reason),
+            value,
         )
     end
     return nothing
+end
+
+@inline function _backtracking_candidate_failure(
+    candidate_values,
+    trials,
+    trial,
+    proposal_slot,
+)
+    @inbounds(trials[proposal_slot]) == trial ||
+        return (false, UInt16(0), zero(eltype(candidate_values)))
+    value = @inbounds candidate_values[proposal_slot]
+    reason = isfinite(value) || value == -Inf ?
+             UInt16(0) : _GRAMIS_CANDIDATE_VALUE_NONFINITE
+    return (true, reason, value)
 end
 
 function _validate_backtracking_candidates!(
@@ -843,14 +887,18 @@ function _validate_backtracking_candidates!(
 )
     any_active = false
     @inbounds for proposal_slot in eachindex(candidate_values, active_mask, trials)
-        trials[proposal_slot] == trial || continue
-        value = candidate_values[proposal_slot]
-        (isfinite(value) || value == -Inf) ||
-            _throw_first_order_gramis_derivative_error(
-                proposal_slot,
-                :candidate_value_nonfinite,
-                value,
-            )
+        evaluated, reason, value = _backtracking_candidate_failure(
+            candidate_values,
+            trials,
+            trial,
+            proposal_slot,
+        )
+        evaluated || continue
+        iszero(reason) || _throw_first_order_gramis_derivative_error(
+            proposal_slot,
+            _first_order_gramis_derivative_reason(reason),
+            value,
+        )
         any_active |= active_mask[proposal_slot]
     end
     return any_active
@@ -911,18 +959,10 @@ end
     moves,
 )
     proposal_slot = @index(Global, Linear)
-    @inbounds for row in axes(moves, 1)
-        value = moves[row, proposal_slot]
-        if !isfinite(value)
-            failure_values[proposal_slot] = value
-            _record_native_failure!(
-                failure_storage,
-                proposal_slot,
-                0,
-                _GRAMIS_MOVE_NONFINITE,
-            )
-            break
-        end
+    reason, value = _preconditioned_move_failure(moves, proposal_slot)
+    if !iszero(reason)
+        @inbounds failure_values[proposal_slot] = value
+        _record_native_failure!(failure_storage, proposal_slot, 0, reason)
     end
 end
 
@@ -1025,20 +1065,7 @@ end
     gradients,
 )
     proposal_slot = @index(Global, Linear)
-    value = @inbounds values[proposal_slot]
-    reason = UInt16(0)
-    if !isfinite(value)
-        reason = _GRAMIS_FROZEN_VALUE_NONFINITE
-    else
-        @inbounds for row in axes(gradients, 1)
-            gradient = gradients[row, proposal_slot]
-            if !isfinite(gradient)
-                value = gradient
-                reason = _GRAMIS_GRADIENT_NONFINITE
-                break
-            end
-        end
-    end
+    reason, value = _frozen_derivative_failure(values, gradients, proposal_slot)
     if !iszero(reason)
         @inbounds failure_values[proposal_slot] = value
         _record_native_failure!(failure_storage, proposal_slot, 0, reason)
@@ -1482,14 +1509,14 @@ end
     trial,
 )
     proposal_slot = @index(Global, Linear)
-    if @inbounds(trials[proposal_slot]) == trial
-        value = @inbounds candidate_values[proposal_slot]
-        (isfinite(value) || value == -Inf) || _record_native_failure!(
-            failure_storage,
-            proposal_slot,
-            0,
-            _GRAMIS_CANDIDATE_VALUE_NONFINITE,
-        )
+    _, reason, _ = _backtracking_candidate_failure(
+        candidate_values,
+        trials,
+        trial,
+        proposal_slot,
+    )
+    if !iszero(reason)
+        _record_native_failure!(failure_storage, proposal_slot, 0, reason)
     end
 end
 
@@ -1695,13 +1722,6 @@ function _backtrack_means!(
     )
     return _backtrack_means!(arguments..., execution)
 end
-
-_preflight_first_order_gramis_live_execution!(
-    device,
-    method_state,
-    target,
-    random_buffers,
-) = nothing
 
 function _execute_first_order_gramis_live_preflight!(
     device::MLDataDevices.AbstractAcceleratorDevice,
@@ -2716,17 +2736,23 @@ function _throw_first_order_gramis_device_proposal_failure(
         slot,
         transfers,
     )
-    reason = failure.reason_bits == _GRAMIS_LOCATION_NONFINITE ?
-             :location_nonfinite :
-             failure.reason_bits == _GRAMIS_FACTOR_NONFINITE ?
-             :factor_nonfinite :
-             failure.reason_bits == _GRAMIS_FACTOR_DIAGONAL_INVALID ?
-             :factor_diagonal_invalid :
-             failure.reason_bits == _GRAMIS_LOGNORMALIZER_NONFINITE ?
-             :lognormalizer_nonfinite : error(
-        "unknown FirstOrderGRAMIS proposal failure code",
+    throw(
+        _FirstOrderGRAMISProposalError(
+            slot,
+            _first_order_gramis_proposal_reason(failure.reason_bits),
+            value,
+        ),
     )
-    throw(_FirstOrderGRAMISProposalError(slot, reason, value))
+end
+
+function _first_order_gramis_proposal_reason(reason)
+    reason == _GRAMIS_LOCATION_NONFINITE && return :location_nonfinite
+    reason == _GRAMIS_FACTOR_NONFINITE && return :factor_nonfinite
+    reason == _GRAMIS_FACTOR_DIAGONAL_INVALID &&
+        return :factor_diagonal_invalid
+    reason == _GRAMIS_LOGNORMALIZER_NONFINITE &&
+        return :lognormalizer_nonfinite
+    error("unknown FirstOrderGRAMIS proposal failure code")
 end
 
 function _add_first_order_gramis_repulsion!(
@@ -2763,6 +2789,33 @@ function _add_first_order_gramis_repulsion!(
     )
 end
 
+@inline function _candidate_factor_validation(factors, status, proposal_slot)
+    T = eltype(factors)
+    @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY ||
+        return (false, UInt16(0), zero(T), zero(T))
+    dimension = size(factors, 1)
+    logabsdet = zero(T)
+    value = zero(T)
+    @inbounds for column in axes(factors, 2), row in axes(factors, 1)
+        value = factors[row, column, proposal_slot]
+        isfinite(value) ||
+            return (true, _GRAMIS_FACTOR_NONFINITE, value, zero(T))
+        if row == column
+            value > zero(T) || return (
+                true,
+                _GRAMIS_FACTOR_DIAGONAL_INVALID,
+                value,
+                zero(T),
+            )
+            logabsdet += log(value)
+        end
+    end
+    lognormalizer = _gaussian_lognormalizer(T, dimension, logabsdet)
+    reason = isfinite(lognormalizer) ?
+             UInt16(0) : _GRAMIS_LOGNORMALIZER_NONFINITE
+    return (true, reason, lognormalizer, lognormalizer)
+end
+
 function _validate_first_order_gramis_candidate_factors!(
     ::MLDataDevices.AbstractCPUDevice,
     candidate,
@@ -2770,37 +2823,18 @@ function _validate_first_order_gramis_candidate_factors!(
     transfers,
     execution,
 )
-    T = eltype(candidate.factors)
-    dimension = size(candidate.factors, 1)
     @inbounds for proposal_slot in axes(candidate.factors, 3)
-        status[proposal_slot] == _GRAMIS_COVARIANCE_READY || continue
-        logabsdet = zero(T)
-        for column in axes(candidate.factors, 2), row in axes(candidate.factors, 1)
-            value = candidate.factors[row, column, proposal_slot]
-            isfinite(value) || throw(
-                _FirstOrderGRAMISProposalError(
-                    proposal_slot,
-                    :factor_nonfinite,
-                    value,
-                ),
-            )
-            if row == column
-                value > zero(T) || throw(
-                    _FirstOrderGRAMISProposalError(
-                        proposal_slot,
-                        :factor_diagonal_invalid,
-                        value,
-                    ),
-                )
-                logabsdet += log(value)
-            end
-        end
-        lognormalizer = _gaussian_lognormalizer(T, dimension, logabsdet)
-        isfinite(lognormalizer) || throw(
+        ready, reason, value, lognormalizer = _candidate_factor_validation(
+            candidate.factors,
+            status,
+            proposal_slot,
+        )
+        ready || continue
+        iszero(reason) || throw(
             _FirstOrderGRAMISProposalError(
                 proposal_slot,
-                :lognormalizer_nonfinite,
-                lognormalizer,
+                _first_order_gramis_proposal_reason(reason),
+                value,
             ),
         )
         candidate.lognormalizers[proposal_slot] = lognormalizer
@@ -2816,36 +2850,17 @@ end
     status,
 )
     proposal_slot = @index(Global, Linear)
-    if @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY
-        T = eltype(factors)
-        dimension = size(factors, 1)
-        logabsdet = zero(T)
-        reason = UInt16(0)
-        value = zero(T)
-        @inbounds for column in axes(factors, 2), row in axes(factors, 1)
-            value = factors[row, column, proposal_slot]
-            if !isfinite(value)
-                reason = _GRAMIS_FACTOR_NONFINITE
-                break
-            elseif row == column
-                if value <= zero(T)
-                    reason = _GRAMIS_FACTOR_DIAGONAL_INVALID
-                    break
-                end
-                logabsdet += log(value)
-            end
-        end
-        if iszero(reason)
-            value = _gaussian_lognormalizer(T, dimension, logabsdet)
-            if isfinite(value)
-                @inbounds lognormalizers[proposal_slot] = value
-            else
-                reason = _GRAMIS_LOGNORMALIZER_NONFINITE
-            end
-        end
+    ready, reason, value, lognormalizer = _candidate_factor_validation(
+        factors,
+        status,
+        proposal_slot,
+    )
+    if ready
         if !iszero(reason)
             @inbounds failure_values[proposal_slot] = value
             _record_native_failure!(failure_storage, proposal_slot, 0, reason)
+        else
+            @inbounds lognormalizers[proposal_slot] = lognormalizer
         end
     end
 end
@@ -2920,30 +2935,8 @@ function _throw_first_order_gramis_covariance_failure(
     throw(_FirstOrderGRAMISCovarianceError(slot, Int(factor_info)))
 end
 
-@kernel function _minimum_first_order_gramis_whitened_distance_kernel!(
-    output,
+@inline function _minimum_first_order_gramis_whitened_distance_value(
     whitened_means,
-)
-    T = eltype(whitened_means)
-    minimum_distance = T(Inf)
-    @inbounds for right in 2:size(whitened_means, 2), left in 1:(right - 1)
-        distance = zero(T)
-        for row in axes(whitened_means, 1)
-            distance = hypot(
-                distance,
-                whitened_means[row, right] - whitened_means[row, left],
-            )
-        end
-        minimum_distance = min(minimum_distance, distance)
-    end
-    @inbounds output[1] = minimum_distance
-end
-
-function _minimum_first_order_gramis_whitened_distance(
-    ::MLDataDevices.AbstractCPUDevice,
-    whitened_means,
-    transfers,
-    execution,
 )
     T = eltype(whitened_means)
     minimum_distance = T(Inf)
@@ -2958,6 +2951,23 @@ function _minimum_first_order_gramis_whitened_distance(
         minimum_distance = min(minimum_distance, distance)
     end
     return minimum_distance
+end
+
+@kernel function _minimum_first_order_gramis_whitened_distance_kernel!(
+    output,
+    whitened_means,
+)
+    @inbounds output[1] =
+        _minimum_first_order_gramis_whitened_distance_value(whitened_means)
+end
+
+function _minimum_first_order_gramis_whitened_distance(
+    ::MLDataDevices.AbstractCPUDevice,
+    whitened_means,
+    transfers,
+    execution,
+)
+    return _minimum_first_order_gramis_whitened_distance_value(whitened_means)
 end
 
 function _minimum_first_order_gramis_whitened_distance(

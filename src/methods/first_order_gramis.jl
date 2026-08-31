@@ -868,7 +868,7 @@ function _preflight_accelerator_method(
     _preflight_first_order_gramis_kernel_arguments(
         device,
         local_weights_kernel,
-        (
+        _first_order_gramis_local_weight_arguments(
             workspace.local_logweights,
             workspace.generating_logdensities,
             workspace.round_proposal_ids,
@@ -922,13 +922,13 @@ function _preflight_accelerator_method(
         ),
     )
 
-    _preflight_first_order_gramis_live_execution!(
+    _preflight_first_order_gramis_factorization!(device, method_state)
+    _execute_first_order_gramis_live_preflight!(
         device,
         method_state,
         bound_target,
         random_buffers,
     )
-    _preflight_first_order_gramis_factorization!(device, method_state)
     return nothing
 end
 
