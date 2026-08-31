@@ -632,6 +632,32 @@ end
     end
 end
 
+@inline function _mis_round_kernel_arguments(
+    samples,
+    output::_MISRoundOutput,
+    failure_storage,
+    normal_buffer,
+    target,
+    bank,
+    assignments,
+    denominator,
+    solve_scratch,
+)
+    return (
+        samples,
+        output.logweights,
+        output.proposal_ids,
+        failure_storage,
+        normal_buffer,
+        target,
+        bank,
+        assignments,
+        denominator,
+        solve_scratch,
+        output.adaptation,
+    )
+end
+
 function _launch_mis_round!(
     samples,
     output::_MISRoundOutput,
@@ -647,17 +673,17 @@ function _launch_mis_round!(
     backend = KernelAbstractions.get_backend(normal_buffer)
     kernel = _mis_round_launch_kernel!(backend)
     kernel(
-        samples,
-        output.logweights,
-        output.proposal_ids,
-        failure_storage,
-        normal_buffer,
-        target,
-        bank,
-        assignments,
-        denominator,
-        solve_scratch,
-        output.adaptation;
+        _mis_round_kernel_arguments(
+            samples,
+            output,
+            failure_storage,
+            normal_buffer,
+            target,
+            bank,
+            assignments,
+            denominator,
+            solve_scratch,
+        )...;
         ndrange=length(output.logweights),
         workgroupsize=_native_workgroupsize(
             execution,

@@ -9,13 +9,36 @@ const IS = ImportanceSamplers
 
 struct CUDAFirstOrderGRAMISTarget{T} end
 struct CUDAFirstOrderGRAMISGradient end
+struct CUDAFirstOrderGRAMISMeanOnlyTarget{T}
+    locations::NTuple{2,T}
+end
+struct CUDAFirstOrderGRAMISZeroGradient end
 
 function (::CUDAFirstOrderGRAMISTarget{T})(sample)::T where {T}
-    return -T(0.5) * sum(abs2, sample)
+    value = zero(T)
+    @inbounds for row in 1:length(sample)
+        value += abs2(sample[row])
+    end
+    return -T(0.5) * value
 end
 
 function (::CUDAFirstOrderGRAMISGradient)(destination, sample)
-    destination .= -sample
+    @inbounds for row in 1:length(destination)
+        destination[row] = -sample[row]
+    end
+    return destination
+end
+
+function (target::CUDAFirstOrderGRAMISMeanOnlyTarget{T})(sample)::T where {T}
+    at_left = sample[1] == target.locations[1] && iszero(sample[2])
+    at_right = sample[1] == target.locations[2] && iszero(sample[2])
+    return at_left || at_right ? zero(T) : T(-Inf)
+end
+
+function (::CUDAFirstOrderGRAMISZeroGradient)(destination, sample)
+    @inbounds for row in 1:length(destination)
+        destination[row] = zero(eltype(destination))
+    end
     return destination
 end
 
@@ -102,6 +125,46 @@ function gram_is_cuda_preflight(::Type{T}) where {T}
     )
 end
 
+function gram_is_cuda_sampler(
+    ::Type{T};
+    repulsion_strength=zero(T),
+    fallback=false,
+) where {T}
+    bank = ProposalBank([
+        FactorGaussian(T[-1, 0], T[1 0; 0.1 0.8]),
+        FactorGaussian(T[1, 0], T[0.9 0; -0.2 1.1]),
+    ])
+    target = fallback ?
+             LogTarget(
+        CUDAFirstOrderGRAMISMeanOnlyTarget{T}((-one(T), one(T)));
+        grad=CUDAFirstOrderGRAMISZeroGradient(),
+    ) : LogTarget(
+        CUDAFirstOrderGRAMISTarget{T}();
+        grad=CUDAFirstOrderGRAMISGradient(),
+    )
+    source = prepare_sampler(
+        Random.Xoshiro(0x4752414d49534532),
+        target,
+        FirstOrderGRAMIS(
+            bank;
+            rounds=2,
+            round_size=8,
+            repulsion_strength=repulsion_strength,
+        );
+        threaded=true,
+    )
+    return gram_is_cuda_device()(source)
+end
+
+function gram_is_cuda_population_bits(sampler)
+    state = sampler.method_state.committed
+    return (
+        locations=map(bitstring, vec(Array(state.locations))),
+        factors=map(bitstring, vec(Array(state.factors))),
+        lognormalizers=map(bitstring, Array(state.lognormalizers)),
+    )
+end
+
 CUDA.allowscalar(false)
 
 @testset "FirstOrderGRAMIS CUDA population Cholesky capabilities" begin
@@ -159,4 +222,108 @@ end
             T === Float32 ? 5f-5 : 5e-13
     end
     @test CUDA.device() == caller_device
+end
+
+@testset "FirstOrderGRAMIS CUDA end-to-end sampler" begin
+    caller_device = CUDA.device()
+    for T in (Float32, Float64), strength in (zero(T), T(0.1))
+        sampler = gram_is_cuda_sampler(T; repulsion_strength=strength)
+        result = importance_sample!(sampler)
+        @test result isa WeightedSamples
+        @test length(result.logweights) == 16
+        @test IS._backend_state_resident(
+            sampler.device,
+            IS._transferred_backend_state(
+                sampler.algorithm,
+                sampler.method_state,
+                sampler.target,
+                sampler.random_buffers,
+            ),
+        )
+        @test result.diagnostics.failures == 0
+        @test result.diagnostics.transfers.count <= 192
+        @test result.diagnostics.transfers.bytes <= 4_096
+        @test CUDA.device() == caller_device
+    end
+end
+
+@testset "FirstOrderGRAMIS CUDA fallback preserves factors" begin
+    caller_device = CUDA.device()
+    for T in (Float32, Float64)
+        sampler = gram_is_cuda_sampler(T; fallback=true)
+        before_factors = map(
+            bitstring,
+            vec(Array(sampler.method_state.committed.factors)),
+        )
+        result = importance_sample!(sampler)
+        @test all(==(-Inf), Array(result.logweights))
+        @test all(
+            ==(IS._GRAMIS_ALL_ZERO_LOCAL),
+            Array(result.diagnostics.fallback_status),
+        )
+        @test map(
+            bitstring,
+            vec(Array(sampler.method_state.committed.factors)),
+        ) == before_factors
+        @test result.diagnostics.transfers.count <= 192
+        @test result.diagnostics.transfers.bytes <= 4_096
+        @test CUDA.device() == caller_device
+    end
+end
+
+@testset "FirstOrderGRAMIS CUDA covariance failure rolls back" begin
+    caller_device = CUDA.device()
+    for T in (Float32, Float64)
+        sampler = gram_is_cuda_sampler(T)
+        fill!(sampler.method_state.covariance_rate, T(NaN))
+        before = gram_is_cuda_population_bits(sampler)
+        failure = try
+            importance_sample!(sampler)
+            nothing
+        catch error
+            error
+        end
+        @test failure isa FirstOrderGRAMISRoundError
+        @test failure.phase === :covariance
+        @test failure.diagnostics.pre_call_state_preserved === true
+        @test failure.diagnostics.transfers.count <= 192
+        @test failure.diagnostics.transfers.bytes <= 4_096
+        @test gram_is_cuda_population_bits(sampler) == before
+        @test CUDA.device() == caller_device
+    end
+end
+
+@testset "FirstOrderGRAMIS CUDA repulsion failures roll back" begin
+    caller_device = CUDA.device()
+    for T in (Float32, Float64), case in (:pooled_covariance, :force)
+        sampler = gram_is_cuda_sampler(
+            T;
+            repulsion_strength=T(0.1),
+            fallback=case === :pooled_covariance,
+        )
+        if case === :pooled_covariance
+            fill!(sampler.method_state.committed.factors, sqrt(floatmax(T)))
+        else
+            fill!(sampler.method_state.repulsion_strength, T(Inf))
+        end
+        before = gram_is_cuda_population_bits(sampler)
+        failure = try
+            importance_sample!(sampler)
+            nothing
+        catch error
+            error
+        end
+        @test failure isa FirstOrderGRAMISRoundError
+        @test failure.phase === :repulsion
+        @test failure.cause isa IS._FirstOrderGRAMISRepulsionError
+        @test failure.cause.reason === (
+            case === :pooled_covariance ?
+            :pooled_covariance_nonfinite : :force_nonfinite
+        )
+        @test failure.diagnostics.pre_call_state_preserved === true
+        @test failure.diagnostics.transfers.count <= 192
+        @test failure.diagnostics.transfers.bytes <= 4_096
+        @test gram_is_cuda_population_bits(sampler) == before
+        @test CUDA.device() == caller_device
+    end
 end

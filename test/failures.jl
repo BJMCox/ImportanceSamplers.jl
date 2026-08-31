@@ -2081,7 +2081,8 @@ end
             sampler.method_state.covariance_rate[2] = NaN
         elseif case.name === :repulsion
             sampler.method_state.repulsion_strength[2] = Inf
-            push!(sampler.method_state.active_repulsion_rounds, 2)
+            sampler.method_state.active_repulsion_rounds =
+                ImportanceSamplers._FirstOrderGRAMISActiveRounds((2,))
         end
 
         before = gram_is_population_bits(sampler)

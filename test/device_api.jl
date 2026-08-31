@@ -322,10 +322,6 @@ end
     _owned_backend_rng(::Main.KernelArgumentTestAccelerator, seed::UInt64) =
         Random.Xoshiro(seed)
 
-    _first_order_gramis_factorization_supported(
-        ::Main.KernelArgumentTestAccelerator,
-    ) = true
-
     _preflight_first_order_gramis_factorization!(
         ::Main.KernelArgumentTestAccelerator,
         method_state::_PreparedFirstOrderGRAMIS,

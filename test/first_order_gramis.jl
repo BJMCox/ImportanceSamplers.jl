@@ -82,6 +82,8 @@ end
         sampler = @inferred prepare_first_order_gramis(algorithm)
         state = sampler.method_state
         @test state.repulsion_strength == T[0.1, 0.2, 0.3]
+        @test !(state.active_repulsion_rounds isa AbstractVector)
+        @test Tuple(state.active_repulsion_rounds) == (1, 2, 3)
         @test state.covariance_rate == covariance_rate
         @test repulsion.calls == [1, 2, 3]
         @test state.plan.schedule == [24, 30, 36]
@@ -89,6 +91,7 @@ end
 
         second = prepare_first_order_gramis(algorithm)
         @test second.method_state.repulsion_strength == state.repulsion_strength
+        @test Tuple(second.method_state.active_repulsion_rounds) == (1, 2, 3)
         @test repulsion.calls == [1, 2, 3, 1, 2, 3]
 
         scalar = prepare_first_order_gramis(FirstOrderGRAMIS(

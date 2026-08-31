@@ -10,10 +10,6 @@ ImportanceSamplers._backend_functional(::MLDataDevices.CUDADevice) =
     CUDA.functional()
 
 ImportanceSamplers._factor_batch_supported(::MLDataDevices.CUDADevice) = true
-ImportanceSamplers._first_order_gramis_factorization_supported(
-    ::MLDataDevices.CUDADevice,
-) = true
-
 function ImportanceSamplers._with_backend_device(
     f,
     device::MLDataDevices.CUDADevice,
@@ -60,6 +56,46 @@ function _cuda_state_resident(device, state)
     return true
 end
 
+function ImportanceSamplers._first_order_gramis_failure_value(
+    ::MLDataDevices.CUDADevice,
+    values::CUDA.AnyCuArray,
+    index,
+    transfers,
+)
+    snapshot = Array(view(vec(values), index:index))
+    ImportanceSamplers._record_device_scalar_transfer!(
+        transfers,
+        values,
+        eltype(values),
+    )
+    return only(snapshot)
+end
+
+function ImportanceSamplers._first_order_gramis_diagnostic_summary(
+    ::MLDataDevices.CUDADevice,
+    status::CUDA.AnyCuArray,
+    steps::CUDA.AnyCuArray,
+    trials::CUDA.AnyCuArray,
+    transfers,
+    ::ImportanceSamplers._KernelExecution,
+)
+    all_zero = count(==(ImportanceSamplers._GRAMIS_ALL_ZERO_LOCAL), status)
+    tempering = count(
+        ==(ImportanceSamplers._GRAMIS_TEMPERING_FALLBACK),
+        status,
+    )
+    backtracking = count(iszero, steps)
+    target_trials = sum(trials)
+    for values in (status, status, steps, trials)
+        ImportanceSamplers._record_device_scalar_transfer!(
+            transfers,
+            values,
+            Int,
+        )
+    end
+    return (; all_zero, tempering, backtracking, target_trials)
+end
+
 ImportanceSamplers._owned_backend_rng(
     ::MLDataDevices.CUDADevice,
     seed::UInt64,
@@ -75,10 +111,28 @@ function ImportanceSamplers._amis_potrf!(
 end
 
 function ImportanceSamplers._factor_population!(
+    device::MLDataDevices.CUDADevice,
+    factors::CUDA.StridedCuArray{T,3},
+    covariances::CUDA.StridedCuArray{T,3},
+    info::CUDA.StridedCuVector{Int32},
+) where {T<:Union{Float32,Float64}}
+    status = similar(info, UInt8)
+    fill!(status, ImportanceSamplers._GRAMIS_COVARIANCE_READY)
+    return ImportanceSamplers._factor_population!(
+        device,
+        factors,
+        covariances,
+        info,
+        status,
+    )
+end
+
+function ImportanceSamplers._factor_population!(
     ::MLDataDevices.CUDADevice,
     factors::CUDA.StridedCuArray{T,3},
     covariances::CUDA.StridedCuArray{T,3},
     info::CUDA.StridedCuVector{Int32},
+    status::CUDA.StridedCuVector{UInt8},
 ) where {T<:Union{Float32,Float64}}
     proposal_count = size(factors, 3)
     workgroupsize = ImportanceSamplers._GRAMIS_CHOLESKY_WORKGROUP_SIZE
@@ -90,7 +144,8 @@ function ImportanceSamplers._factor_population!(
     kernel(
         factors,
         covariances,
-        info;
+        info,
+        status;
         ndrange=workgroupsize * proposal_count,
     )
     KernelAbstractions.synchronize(backend)
@@ -111,6 +166,21 @@ function ImportanceSamplers._factor_pooled_covariance!(
     return nothing
 end
 
+KernelAbstractions.@kernel function _factorization_preflight_covariances!(
+    covariances,
+)
+    entry = KernelAbstractions.@index(Global, Linear)
+    dimension = size(covariances, 1)
+    entries_per_proposal = dimension * dimension
+    proposal_slot = (entry - 1) ÷ entries_per_proposal + 1
+    matrix_entry = (entry - 1) % entries_per_proposal
+    row = matrix_entry % dimension + 1
+    column = matrix_entry ÷ dimension + 1
+    T = eltype(covariances)
+    @inbounds covariances[row, column, proposal_slot] = row == column ?
+        T(dimension + proposal_slot) : T(row + column) / T(100)
+end
+
 function ImportanceSamplers._preflight_first_order_gramis_factorization!(
     device::MLDataDevices.CUDADevice,
     method_state::ImportanceSamplers._PreparedFirstOrderGRAMIS,
@@ -129,8 +199,7 @@ function ImportanceSamplers._preflight_first_order_gramis_factorization!(
     factors = similar(covariances)
     info = similar(method_state.workspace.factor_info, Int32, proposal_count)
     backend = KernelAbstractions.get_backend(covariances)
-    covariance_kernel =
-        ImportanceSamplers._factorization_preflight_covariances!(backend)
+    covariance_kernel = _factorization_preflight_covariances!(backend)
     covariance_kernel(
         covariances;
         ndrange=length(covariances),
@@ -165,6 +234,20 @@ function ImportanceSamplers._preflight_first_order_gramis_factorization!(
         ),
     )
     return nothing
+end
+
+function ImportanceSamplers._preflight_first_order_gramis_live_execution!(
+    device::MLDataDevices.CUDADevice,
+    method_state::ImportanceSamplers._PreparedFirstOrderGRAMIS,
+    target,
+    random_buffers,
+)
+    return ImportanceSamplers._execute_first_order_gramis_live_preflight!(
+        device,
+        method_state,
+        target,
+        random_buffers,
+    )
 end
 
 end

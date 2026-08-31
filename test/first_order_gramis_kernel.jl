@@ -1619,6 +1619,10 @@ end
         end
         factors = fill(T(-99), size(covariances))
         info = fill(Int32(-99), proposal_count)
+        status = fill(
+            GRAMISKernelIS._GRAMIS_COVARIANCE_READY,
+            proposal_count,
+        )
         kernel = GRAMISKernelIS._factor_population_kernel!(
             backend,
             workgroupsize,
@@ -1627,7 +1631,8 @@ end
         kernel(
             factors,
             covariances,
-            info;
+            info,
+            status;
             ndrange=workgroupsize * proposal_count,
         )
         GRAMISKernelIS.KernelAbstractions.synchronize(backend)
@@ -1647,16 +1652,32 @@ end
     covariances[:, :, 2] .= [1.0 NaN; NaN 1.0]
     factors = similar(covariances)
     info = fill(Int32(-99), 2)
+    status = fill(GRAMISKernelIS._GRAMIS_COVARIANCE_READY, 2)
     kernel = GRAMISKernelIS._factor_population_kernel!(backend, workgroupsize)
     kernel(
         factors,
         covariances,
-        info;
+        info,
+        status;
         ndrange=2workgroupsize,
     )
     GRAMISKernelIS.KernelAbstractions.synchronize(backend)
 
     @test info == Int32[2, GRAMISKernelIS._GRAMIS_COVARIANCE_NONFINITE_INFO]
+
+    preserved = reshape(Float64[2, 0, 0, 3], 2, 2, 1)
+    poison = fill(NaN, 2, 2, 1)
+    fallback_info = fill(Int32(-99), 1)
+    kernel(
+        preserved,
+        poison,
+        fallback_info,
+        fill(GRAMISKernelIS._GRAMIS_ALL_ZERO_LOCAL, 1);
+        ndrange=workgroupsize,
+    )
+    GRAMISKernelIS.KernelAbstractions.synchronize(backend)
+    @test preserved == reshape(Float64[2, 0, 0, 3], 2, 2, 1)
+    @test fallback_info == zeros(Int32, 1)
 end
 
 function gram_is_gradient_move_allocation_counts()
