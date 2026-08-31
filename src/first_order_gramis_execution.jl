@@ -2276,7 +2276,6 @@ function _cooperative_local_weights!(
         ndrange=_GRAMIS_REDUCTION_WORKGROUP_SIZE * proposal_count,
         workgroupsize=_GRAMIS_REDUCTION_WORKGROUP_SIZE,
     )
-    KernelAbstractions.synchronize(backend)
     return nothing
 end
 
@@ -2478,7 +2477,6 @@ function _fit_accelerator_covariance_centres!(
         ndrange=_GRAMIS_REDUCTION_WORKGROUP_SIZE * pair_count,
         workgroupsize=_GRAMIS_REDUCTION_WORKGROUP_SIZE,
     )
-    KernelAbstractions.synchronize(backend)
     return nothing
 end
 
