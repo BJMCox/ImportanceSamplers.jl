@@ -102,6 +102,10 @@ const GRAMIS_BENCHMARK_CPU_EXECUTIONS = GRAMIS_BENCHMARK_SERIAL_ONLY ?
                                         (:serial,) :
                                         GRAMIS_BENCHMARK_THREADED_ONLY ?
                                         (:threaded,) : (:serial, :threaded)
+const GRAMIS_BENCHMARK_FACTOR_EXECUTIONS = (
+    FusedFactorExecution(),
+    BatchedFactorExecution(),
+)
 const GRAMIS_BENCHMARK_DEFAULT_SAMPLES = GRAMIS_BENCHMARK_SMOKE ? 3 :
                                          GRAMIS_BENCHMARK_EFFECTIVE_ROUND_SIZE === nothing ?
                                          3 :
@@ -159,6 +163,7 @@ function gram_is_benchmark_cell(
     proposal_count,
     tempering,
     execution,
+    factor_execution,
     device,
 ) where {T}
     round_size = GRAMIS_BENCHMARK_EFFECTIVE_ROUND_SIZE === nothing ?
@@ -177,6 +182,10 @@ function gram_is_benchmark_cell(
         tempering,
         execution,
         threaded=execution !== :serial,
+        factor_execution,
+        factor_execution_policy=ImportanceSamplers._factor_execution_name(
+            factor_execution,
+        ),
         rounds=2,
         round_size,
         covariance_ess_threshold=threshold,
@@ -216,6 +225,7 @@ function gram_is_prepare_benchmark(cell, seed)
         target,
         algorithm;
         threaded=cell.threaded,
+        factor_execution=cell.factor_execution,
     )
     if cell.device === :cpu
         return source
@@ -601,11 +611,13 @@ function gram_is_benchmark_cells()
                     proposals,
                     tempering,
                     execution,
+                    factor_execution,
                     :cpu,
                 ) for T in GRAMIS_BENCHMARK_TYPES for
                 (dimension, proposals) in configurations for
                 tempering in GRAMIS_BENCHMARK_TEMPERING for
-                execution in GRAMIS_BENCHMARK_CPU_EXECUTIONS
+                execution in GRAMIS_BENCHMARK_CPU_EXECUTIONS for
+                factor_execution in GRAMIS_BENCHMARK_FACTOR_EXECUTIONS
             ),
         )
     end
@@ -619,10 +631,12 @@ function gram_is_benchmark_cells()
                     proposals,
                     tempering,
                     :cuda,
+                    factor_execution,
                     :cuda,
                 ) for T in GRAMIS_BENCHMARK_TYPES for
                 (dimension, proposals) in configurations for
-                tempering in GRAMIS_BENCHMARK_TEMPERING
+                tempering in GRAMIS_BENCHMARK_TEMPERING for
+                factor_execution in GRAMIS_BENCHMARK_FACTOR_EXECUTIONS
             ),
         )
     end
@@ -654,10 +668,12 @@ function gram_is_benchmark_main()
     expected_cpu_rows = GRAMIS_BENCHMARK_CPU ?
                         length(GRAMIS_BENCHMARK_TYPES) * length(configurations) *
                         length(GRAMIS_BENCHMARK_TEMPERING) *
-                        length(GRAMIS_BENCHMARK_CPU_EXECUTIONS) : 0
+                        length(GRAMIS_BENCHMARK_CPU_EXECUTIONS) *
+                        length(GRAMIS_BENCHMARK_FACTOR_EXECUTIONS) : 0
     expected_cuda_rows = GRAMIS_BENCHMARK_CUDA ?
                          length(GRAMIS_BENCHMARK_TYPES) * length(configurations) *
-                         length(GRAMIS_BENCHMARK_TEMPERING) : 0
+                         length(GRAMIS_BENCHMARK_TEMPERING) *
+                         length(GRAMIS_BENCHMARK_FACTOR_EXECUTIONS) : 0
     length(rows) == expected_cpu_rows + expected_cuda_rows ||
         error("benchmark matrix is incomplete")
     cuda = GRAMIS_BENCHMARK_CUDA ? (
