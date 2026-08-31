@@ -34,6 +34,9 @@ const GRAMIS_CUDA_SOURCE = gram_is_validation_source_provenance(required=true)
 
 struct CUDAFirstOrderGRAMISTarget{T} end
 struct CUDAFirstOrderGRAMISGradient end
+struct CUDAFirstOrderGRAMISRoundTwoFailureGradient{T}
+    locations::NTuple{2,T}
+end
 struct CUDAFirstOrderGRAMISMeanOnlyTarget{T}
     locations::NTuple{2,T}
 end
@@ -50,6 +53,18 @@ end
 function (::CUDAFirstOrderGRAMISGradient)(destination, sample)
     @inbounds for row in 1:length(destination)
         destination[row] = -sample[row]
+    end
+    return destination
+end
+
+function (gradient::CUDAFirstOrderGRAMISRoundTwoFailureGradient{T})(
+    destination,
+    sample,
+) where {T}
+    initial = (sample[1] == gradient.locations[1] ||
+               sample[1] == gradient.locations[2]) && iszero(sample[2])
+    @inbounds for row in eachindex(destination)
+        destination[row] = initial ? -sample[row] : T(NaN)
     end
     return destination
 end
@@ -155,18 +170,24 @@ function gram_is_cuda_sampler(
     rounds=2,
     round_size=8,
     device=:cuda,
+    round_two_failure=false,
 ) where {T}
     bank = ProposalBank([
         FactorGaussian(T[-1, 0], T[1 0; 0.1 0.8]),
         FactorGaussian(T[1, 0], T[0.9 0; -0.2 1.1]),
     ])
+    gradient = round_two_failure ?
+               CUDAFirstOrderGRAMISRoundTwoFailureGradient{T}((
+                   -one(T),
+                   one(T),
+               )) : CUDAFirstOrderGRAMISGradient()
     target = fallback ?
              LogTarget(
         CUDAFirstOrderGRAMISMeanOnlyTarget{T}((-one(T), one(T)));
         grad=CUDAFirstOrderGRAMISZeroGradient(),
     ) : LogTarget(
         CUDAFirstOrderGRAMISTarget{T}();
-        grad=CUDAFirstOrderGRAMISGradient(),
+        grad=gradient,
     )
     source = prepare_sampler(
         Random.Xoshiro(GRAMIS_CUDA_EXECUTION_SEED),
@@ -460,17 +481,12 @@ end
 
 @testset "FirstOrderGRAMIS CUDA call transaction rolls back after round one" begin
     caller_device = CUDA.device()
-    sampler = gram_is_cuda_sampler(Float64; rounds=2, round_size=8)
-    plan = sampler.method_state.plan
-    invalid_proposal_id = size(sampler.method_state.committed.locations, 2) + 1
-    round_two_assignments = view(
-        plan.assignments,
-        1:plan.schedule[2],
-        2,
+    sampler = gram_is_cuda_sampler(
+        Float64;
+        rounds=2,
+        round_size=8,
+        round_two_failure=true,
     )
-    fill!(round_two_assignments, invalid_proposal_id)
-    CUDA.synchronize()
-    @test all(==(invalid_proposal_id), Array(round_two_assignments))
     before = gram_is_cuda_population_bits(sampler)
     failure = try
         importance_sample!(sampler)
@@ -481,8 +497,7 @@ end
     @test failure isa FirstOrderGRAMISRoundError
     if failure isa FirstOrderGRAMISRoundError
         @test failure.round == 2
-        @test failure.phase === :sampling
-        @test failure.cause isa SamplerExecutionError
+        @test failure.phase === :derivative
         @test failure.diagnostics.completed_rounds == 1
         @test failure.diagnostics.pre_call_state_preserved === true
     end
