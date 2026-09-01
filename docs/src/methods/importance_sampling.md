@@ -294,6 +294,38 @@ one concrete scalar per sample.
 quantiles. Exact ordering remains CPU-only. Transfer a device result to CPU
 explicitly before calling either function.
 
+### Unweighted resampling
+
+Use [`resample`](@ref) when an API needs ordinary draws instead of a weighted
+estimator:
+
+```jldoctest resampling
+using ImportanceSamplers
+using Random
+using Statistics
+
+weighted = WeightedSamples([10.0, 20.0, 30.0], [-Inf, 0.0, -Inf])
+draws = resample(Xoshiro(7), weighted, 4)
+
+(draws.samples, draws[1], mean(draws))
+
+# output
+
+([20.0, 20.0, 20.0, 20.0], 20.0, 20.0)
+```
+
+The default [`MultinomialResampling`](@ref) method makes independent weighted
+draws with replacement. Omit the count to request exactly `length(weighted)`
+draws. The output [`UnweightedSamples`](@ref) contains samples only. It does
+not copy the source importance weights or invent uniform importance weights,
+so keep the original weighted result for evidence, ESS, and weighted
+summaries.
+
+`mean`, `var`, `std`, `cov`, `quantile`, and `median` use ordinary unweighted
+definitions on `UnweightedSamples`. Resampling preserves scalar, vector, and
+named-tuple sample structure and keeps output on the input device. Exact
+quantiles and scalar indexing remain CPU-only.
+
 ## All-zero weights
 
 If every target evaluation is `-Inf`, the run still returns its samples and raw

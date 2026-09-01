@@ -19,6 +19,7 @@ export AbstractImportanceSampler,
     AbstractProposalFamily,
     AbstractProposalPopulation,
     AbstractRadialProposalFamily,
+    AbstractResamplingMethod,
     AbstractSampleTransform,
     AMIS,
     AMISRoundError,
@@ -36,6 +37,7 @@ export AbstractImportanceSampler,
     IntervalTransform,
     InvalidTransformError,
     LogTarget,
+    MultinomialResampling,
     PartialDeterministicMixture,
     ProposalBank,
     RandomMixture,
@@ -51,6 +53,7 @@ export AbstractImportanceSampler,
     ProductProposal,
     SoftplusTransform,
     TransformedProposal,
+    UnweightedSamples,
     WeightedSamples,
     WeightedSampleView,
     current_proposal,
@@ -58,7 +61,8 @@ export AbstractImportanceSampler,
     importance_sample!,
     lognormalizer,
     normalized_weights,
-    prepare_sampler
+    prepare_sampler,
+    resample
 
 include("proposals.jl")
 include("transforms.jl")
@@ -80,6 +84,7 @@ include("amis_execution.jl")
 include("static_mis_execution.jl")
 include("dm_pmc_execution.jl")
 include("results.jl")
+include("resampling.jl")
 include("statistics.jl")
 
 end # module ImportanceSamplers

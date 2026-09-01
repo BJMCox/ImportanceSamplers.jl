@@ -621,11 +621,11 @@ function _preflight_accelerator_method(
         _preflight_kernel_argument(device, batch_kernel, target_argument)
     end
 
-    finalize_kernel = _dm_pmc_finalize_cdf_kernel!(backend)
+    finalize_kernel = _finalize_resampling_cdf_kernel!(backend)
     for argument in (round_views.cdf, round_views.round_size)
         _preflight_kernel_argument(device, finalize_kernel, argument)
     end
-    select_kernel = _dm_pmc_select_ancestors_kernel!(backend)
+    select_kernel = _select_resampling_ancestors_kernel!(backend)
     for argument in (
         workspace.ancestors,
         buffers.resampling_uniforms,
@@ -634,7 +634,7 @@ function _preflight_accelerator_method(
     )
         _preflight_kernel_argument(device, select_kernel, argument)
     end
-    gather_kernel = _dm_pmc_gather_ancestors_kernel!(backend)
+    gather_kernel = _gather_resampled_samples_kernel!(backend)
     for argument in (
         workspace.candidate_locations,
         round_views.samples,

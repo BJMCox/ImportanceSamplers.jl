@@ -22,6 +22,7 @@ test_files = if isempty(ARGS)
         "plain_is",
         "threading",
         "results",
+        "resampling",
         "device_results",
         "failures",
         "kernel_execution",

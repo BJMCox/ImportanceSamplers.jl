@@ -129,19 +129,27 @@ function _require_uncorrected(corrected)
     return nothing
 end
 
-function _device_functional_values(f, result::_AbstractWeightedSamples{R}) where {R}
-    sample_type = fieldtype(R, :sample)
+function _device_functional_values(
+    f,
+    result::Union{_AbstractWeightedSamples,UnweightedSamples},
+)
+    sample_type = _functional_sample_type(result)
     value_type = Base.promote_op(f, sample_type)
     value_type <: Number && isconcretetype(value_type) || throw(
         ArgumentError("device functionals must return one concrete number per sample"),
     )
-    values = similar(result.logweights, value_type)
+    values = similar(_functional_prototype(result), value_type, length(result))
     backend = KernelAbstractions.get_backend(values)
     kernel = _evaluate_functional_kernel!(backend)
     kernel(values, result.samples, f; ndrange=length(values))
     KernelAbstractions.synchronize(backend)
     return values
 end
+
+_functional_sample_type(::UnweightedSamples{R}) where {R} = R
+_functional_sample_type(::_AbstractWeightedSamples{R}) where {R} = fieldtype(R, :sample)
+_functional_prototype(result::UnweightedSamples) = _first_sample_leaf(result.samples)
+_functional_prototype(result::_AbstractWeightedSamples) = result.logweights
 
 function _weighted_functional_mean(f, result, weights)
     return mapreduce(
@@ -271,3 +279,134 @@ function _sqrt_summary(value::NamedTuple)
     summaries = map(_sqrt_summary, values(value))
     return NamedTuple{keys(value)}(summaries)
 end
+
+"""
+    Statistics.mean(samples::UnweightedSamples)
+    Statistics.mean(f, samples::UnweightedSamples)
+
+Return an ordinary unweighted expectation over logical samples.
+"""
+function Statistics.mean(samples::UnweightedSamples)
+    device = _storage_device(_first_sample_leaf(samples.samples))
+    return _with_backend_device(device) do
+        _unweighted_mean(samples.samples)
+    end
+end
+
+function Statistics.mean(f, samples::UnweightedSamples)
+    device = _storage_device(_first_sample_leaf(samples.samples))
+    return _with_backend_device(device) do
+        if _is_host_storage(_first_sample_leaf(samples.samples))
+            total = mapreduce(
+                index -> f(_sample_at(samples.samples, index)),
+                +,
+                eachindex(Base.OneTo(length(samples))),
+            )
+            return total / length(samples)
+        end
+        return Statistics.mean(_device_functional_values(f, samples))
+    end
+end
+
+"""
+    Statistics.var(samples::UnweightedSamples; corrected=true)
+    Statistics.var(f, samples::UnweightedSamples; corrected=true)
+
+Return the ordinary unweighted sample variance.
+"""
+function Statistics.var(samples::UnweightedSamples; corrected::Bool=true)
+    device = _storage_device(_first_sample_leaf(samples.samples))
+    return _with_backend_device(device) do
+        _unweighted_variance(samples.samples, corrected)
+    end
+end
+
+function Statistics.var(f, samples::UnweightedSamples; corrected::Bool=true)
+    device = _storage_device(_first_sample_leaf(samples.samples))
+    return _with_backend_device(device) do
+        if _is_host_storage(_first_sample_leaf(samples.samples))
+            center = Statistics.mean(f, samples)
+            total = mapreduce(
+                index -> abs2(f(_sample_at(samples.samples, index)) - center),
+                +,
+                eachindex(Base.OneTo(length(samples))),
+            )
+            return total / (length(samples) - Int(corrected))
+        end
+        return Statistics.var(
+            _device_functional_values(f, samples);
+            corrected=corrected,
+        )
+    end
+end
+
+function Statistics.std(samples::UnweightedSamples; corrected::Bool=true)
+    return _sqrt_summary(Statistics.var(samples; corrected=corrected))
+end
+
+function Statistics.std(f, samples::UnweightedSamples; corrected::Bool=true)
+    return sqrt(Statistics.var(f, samples; corrected=corrected))
+end
+
+function Statistics.cov(samples::UnweightedSamples; corrected::Bool=true)
+    device = _storage_device(_first_sample_leaf(samples.samples))
+    return _with_backend_device(device) do
+        _unweighted_covariance(samples.samples, corrected)
+    end
+end
+
+function Statistics.quantile(samples::UnweightedSamples, probability)
+    _is_host_storage(_first_sample_leaf(samples.samples)) || throw(
+        ArgumentError(
+            "quantiles are unavailable for device-resident unweighted samples; " *
+            "transfer the samples to CPU first",
+        ),
+    )
+    return _unweighted_quantile(samples.samples, probability)
+end
+
+Statistics.median(samples::UnweightedSamples) = Statistics.quantile(samples, 0.5)
+
+_unweighted_mean(samples::AbstractVector) = Statistics.mean(samples)
+_unweighted_mean(samples::AbstractMatrix) = vec(Statistics.mean(samples; dims=2))
+function _unweighted_mean(samples::NamedTuple)
+    summaries = map(_unweighted_mean, values(samples))
+    return NamedTuple{keys(samples)}(summaries)
+end
+
+_unweighted_variance(samples::AbstractVector, corrected) =
+    Statistics.var(samples; corrected=corrected)
+_unweighted_variance(samples::AbstractMatrix, corrected) =
+    vec(Statistics.var(samples; dims=2, corrected=corrected))
+function _unweighted_variance(samples::NamedTuple, corrected)
+    summaries = map(
+        sample -> _unweighted_variance(sample, corrected),
+        values(samples),
+    )
+    return NamedTuple{keys(samples)}(summaries)
+end
+
+_unweighted_covariance(samples::AbstractMatrix, corrected) =
+    Statistics.cov(samples; dims=2, corrected=corrected)
+_unweighted_covariance(samples, corrected) =
+    throw(ArgumentError("covariance requires vector-valued samples"))
+
+_unweighted_quantile(samples::AbstractVector{<:Real}, probability) =
+    Statistics.quantile(samples, probability)
+function _unweighted_quantile(samples::AbstractMatrix{<:Real}, probability)
+    rows = map(
+        row -> Statistics.quantile(view(samples, row, :), probability),
+        axes(samples, 1),
+    )
+    probability isa Real && return rows
+    return reduce(vcat, transpose.(rows))
+end
+function _unweighted_quantile(samples::NamedTuple, probability)
+    summaries = map(
+        sample -> _unweighted_quantile(sample, probability),
+        values(samples),
+    )
+    return NamedTuple{keys(samples)}(summaries)
+end
+_unweighted_quantile(samples, probability) =
+    throw(ArgumentError("quantiles require real-valued sample storage"))

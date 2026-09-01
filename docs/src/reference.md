@@ -51,8 +51,12 @@ LogTarget
 ```@docs
 WeightedSamples
 WeightedSampleView
+UnweightedSamples
 normalized_weights
 lognormalizer
+AbstractResamplingMethod
+MultinomialResampling
+resample
 Statistics.mean
 Statistics.var
 Statistics.std

@@ -74,114 +74,6 @@ function _allocate_dm_pmc_workspace(bank, plan, ::Type{T}) where {T}
     )
 end
 
-@kernel function _dm_pmc_finalize_cdf_kernel!(cdf, last_index)
-    @inbounds cdf[last_index] = one(eltype(cdf))
-end
-
-@kernel function _dm_pmc_select_ancestors_kernel!(ancestors, uniforms, cdf, last_index)
-    proposal_slot = @index(Global, Linear)
-    uniform = @inbounds uniforms[proposal_slot]
-    first = 1
-    last = last_index
-    while first < last
-        middle = first + ((last - first) >> 1)
-        if uniform < @inbounds(cdf[middle])
-            last = middle
-        else
-            first = middle + 1
-        end
-    end
-    @inbounds ancestors[proposal_slot] = first
-end
-
-@inline function _dm_pmc_gather_sample!(
-    candidates::AbstractVector,
-    samples::AbstractVector,
-    proposal_slot,
-    ancestor,
-)
-    @inbounds candidates[proposal_slot] = samples[ancestor]
-    return nothing
-end
-
-@inline function _dm_pmc_gather_sample!(
-    candidates::AbstractMatrix,
-    samples::AbstractMatrix,
-    proposal_slot,
-    ancestor,
-)
-    for coordinate in axes(candidates, 1)
-        @inbounds candidates[coordinate, proposal_slot] = samples[coordinate, ancestor]
-    end
-    return nothing
-end
-
-@kernel function _dm_pmc_gather_ancestors_kernel!(candidates, samples, ancestors)
-    proposal_slot = @index(Global, Linear)
-    ancestor = @inbounds ancestors[proposal_slot]
-    _dm_pmc_gather_sample!(candidates, samples, proposal_slot, ancestor)
-end
-
-function _launch_dm_pmc_resampling!(
-    cdf,
-    uniforms,
-    ancestors,
-    samples,
-    candidate_locations,
-    execution,
-)
-    backend = KernelAbstractions.get_backend(cdf)
-    last_index = length(cdf)
-    finalize = _dm_pmc_finalize_cdf_kernel!(backend)
-    finalize(cdf, last_index; ndrange=1, workgroupsize=1)
-    select = _dm_pmc_select_ancestors_kernel!(backend)
-    select(
-        ancestors,
-        uniforms,
-        cdf,
-        last_index;
-        ndrange=length(ancestors),
-        workgroupsize=_native_workgroupsize(execution, length(ancestors)),
-    )
-    gather = _dm_pmc_gather_ancestors_kernel!(backend)
-    gather(
-        candidate_locations,
-        samples,
-        ancestors;
-        ndrange=length(ancestors),
-        workgroupsize=_native_workgroupsize(execution, length(ancestors)),
-    )
-    KernelAbstractions.synchronize(backend)
-    return nothing
-end
-
-function _dm_pmc_resampling_cdf!(
-    cdf,
-    logweights,
-    transfers::_ResultTransferCounter=_ResultTransferCounter(0, 0),
-)
-    maximum_logweight = maximum(logweights)
-    _record_device_scalar_transfer!(
-        transfers,
-        logweights,
-        eltype(logweights),
-        Val(:cdf_maximum),
-    )
-    maximum_logweight == -Inf && throw(AllZeroWeightsError())
-    cdf .= exp.(logweights .- maximum_logweight)
-    total = sum(cdf)
-    _record_device_scalar_transfer!(
-        transfers,
-        cdf,
-        eltype(cdf),
-        Val(:cdf_sum),
-    )
-    isfinite(total) && total > zero(total) || throw(AllZeroWeightsError())
-    cdf ./= total
-    cumsum!(cdf, cdf)
-    return cdf
-end
-
 function _capture_dm_pmc_round(f, round, phase, round_size, completed_rounds)
     try
         return f()
@@ -291,9 +183,9 @@ function _importance_sample_cpu!(
             )
         end
         summary = _capture_dm_pmc_round(round, :resampling, round_size, round - 1) do
-            _dm_pmc_resampling_cdf!(cdf, round_logweights, transfers)
+            _resampling_cdf!(cdf, round_logweights, transfers)
             Random.rand!(sampler.rng, buffers.resampling_uniforms)
-            _launch_dm_pmc_resampling!(
+            _resample_and_gather!(
                 cdf,
                 buffers.resampling_uniforms,
                 workspace.ancestors,

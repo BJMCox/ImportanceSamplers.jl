@@ -1520,9 +1520,9 @@ end
         @test all(argument -> argument isa SubArray, representative_arguments)
         backend = KernelAbstractions.get_backend(buffers.normals)
         round_kernel = IS._mis_round_launch_kernel!(backend)
-        finalize_kernel = IS._dm_pmc_finalize_cdf_kernel!(backend)
-        select_kernel = IS._dm_pmc_select_ancestors_kernel!(backend)
-        gather_kernel = IS._dm_pmc_gather_ancestors_kernel!(backend)
+        finalize_kernel = IS._finalize_resampling_cdf_kernel!(backend)
+        select_kernel = IS._select_resampling_ancestors_kernel!(backend)
+        gather_kernel = IS._gather_resampled_samples_kernel!(backend)
         for (kernel, argument) in (
             (round_kernel, representative_arguments[1]),
             (round_kernel, representative_arguments[2]),
