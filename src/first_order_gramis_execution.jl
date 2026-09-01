@@ -374,7 +374,7 @@ function _pooled_covariance!(
     factors,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for entry in 1:length(pooled_covariance)
+    _threaded_foreach(1:length(pooled_covariance)) do entry
         _pooled_covariance_entry!(pooled_covariance, factors, entry)
     end
     return nothing
@@ -636,7 +636,7 @@ function _repulsion_force!(
     softening,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for proposal_slot in axes(means, 2)
+    _threaded_foreach(axes(means, 2)) do proposal_slot
         _repulsion_slot!(
             repulsion,
             collision_counts,
@@ -993,7 +993,7 @@ function _precondition_gradients!(
     factors,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for proposal_slot in axes(gradients, 2)
+    _threaded_foreach(axes(gradients, 2)) do proposal_slot
         _precondition_gradient_slot!(moves, gradients, factors, proposal_slot)
     end
     _validate_preconditioned_moves!(moves)
@@ -1208,7 +1208,7 @@ function _evaluate_frozen_gradients!(
     locations,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for proposal_slot in axes(locations, 2)
+    _threaded_foreach(axes(locations, 2)) do proposal_slot
         _evaluate_frozen_gradient_slot!(
             values,
             gradients,
@@ -1327,7 +1327,7 @@ function _initialize_backtracking!(
     locations,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for proposal_slot in axes(locations, 2)
+    _threaded_foreach(axes(locations, 2)) do proposal_slot
         _initialize_backtracking_slot!(
             candidate_locations,
             candidate_values,
@@ -1389,7 +1389,7 @@ function _backtracking_trial!(
     trial,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for proposal_slot in axes(locations, 2)
+    _threaded_foreach(axes(locations, 2)) do proposal_slot
         _backtracking_trial_slot!(
             candidate_locations,
             candidate_values,
@@ -1617,7 +1617,7 @@ function _finish_backtracking!(
     locations,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for proposal_slot in axes(locations, 2)
+    _threaded_foreach(axes(locations, 2)) do proposal_slot
         _finish_backtracking_slot!(
             candidate_locations,
             candidate_values,
@@ -2767,7 +2767,7 @@ function _factor_population!(
     info::StridedVector{I},
     ::_ThreadedCPUExecution,
 ) where {T<:Union{Float32,Float64},I<:Signed}
-    Threads.@threads :dynamic for proposal_slot in axes(factors, 3)
+    _threaded_foreach(axes(factors, 3)) do proposal_slot
         _factor_population_slot!(
             factors,
             covariances,
@@ -2807,7 +2807,7 @@ function _factor_ready_population!(
     status,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for proposal_slot in axes(factors, 3)
+    _threaded_foreach(axes(factors, 3)) do proposal_slot
         if @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY
             _factor_population_slot!(
                 factors,

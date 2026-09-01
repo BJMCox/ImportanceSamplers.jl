@@ -1,6 +1,20 @@
 struct _SerialCPUExecution end
 struct _ThreadedCPUExecution end
 
+function _threaded_foreach(f, indices)
+    item_count = length(indices)
+    iszero(item_count) && return nothing
+    task_count = min(Threads.nthreads(:default), item_count)
+    chunk_size = cld(item_count, task_count)
+    @sync for first_position in 1:chunk_size:item_count
+        last_position = min(first_position + chunk_size - 1, item_count)
+        Threads.@spawn for position in first_position:last_position
+            @inbounds f(indices[position])
+        end
+    end
+    return nothing
+end
+
 struct _ReportedTransfer
     count::Int
     bytes::Int
