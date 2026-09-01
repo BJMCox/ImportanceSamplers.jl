@@ -2091,6 +2091,8 @@ end
     squared_totals = @localmem eltype(normalized_weights) (
         _GRAMIS_REDUCTION_WORKGROUP_SIZE,
     )
+    # Slots 1-3: accepted power, rejected power, and accepted ESS.
+    # Slots 4-6: trial power, log maximum, and shifted-weight total.
     tempering_state = @localmem eltype(normalized_weights) (6,)
     group_state = @localmem eltype(starts) (3,)
     if @inbounds(lane[1]) == 1

@@ -353,12 +353,16 @@ function gram_is_kernel_family(name)
     (occursin("frozen", lowered) || occursin("precondition", lowered)) &&
         return :derivative
     (occursin("repulsion", lowered) || occursin("whiten", lowered) ||
-     occursin("minimum_first_order", lowered) || occursin("gemm", lowered) ||
-     occursin("trsm", lowered)) && return :repulsion
+     occursin("minimum_first_order", lowered)) && return :repulsion
+    (occursin("gemm", lowered) || occursin("trsm", lowered)) &&
+        return :linear_algebra
     occursin("logweight", lowered) && return :diagnostics
     return :other
 end
 
+@assert gram_is_kernel_family("volta_sgemm_128x64") === :linear_algebra
+@assert gram_is_kernel_family("minimum_first_order_repulsion_kernel!") ===
+        :repulsion
 
 function gram_is_copy_direction(name)
     matched = match(
@@ -398,6 +402,7 @@ function gram_is_profile_record(profile)
         :derivative,
         :backtracking,
         :repulsion,
+        :linear_algebra,
         :diagnostics,
         :other,
     )
