@@ -268,6 +268,32 @@ later prepared run cannot change an earlier result. User mutation of result
 arrays is possible on CPU but unsupported because it can invalidate estimator
 semantics.
 
+### Weighted summaries
+
+Use Julia's standard `Statistics` functions directly:
+
+```julia
+using Statistics
+
+estimate = mean(result)
+variance = var(result)
+deviation = std(result)
+
+# Expectation and variance of a scalar function of each sample.
+functional_mean = mean(sample -> abs2(sample), result)
+functional_variance = var(sample -> abs2(sample), result)
+```
+
+These methods use self-normalized importance weights. `var`, `std`, and `cov`
+return uncorrected moments of the represented target approximation;
+`corrected=true` is unsupported. `mean`, `var`, `std`, and `cov` keep array
+results on the input device. A device functional must compile there and return
+one concrete scalar per sample.
+
+`quantile(result, p)` and `median(result)` use component-wise weighted
+quantiles. Exact ordering remains CPU-only. Transfer a device result to CPU
+explicitly before calling either function.
+
 ## All-zero weights
 
 If every target evaluation is `-Inf`, the run still returns its samples and raw

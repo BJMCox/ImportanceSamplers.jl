@@ -147,10 +147,15 @@ that observes the handle already busy, including recursive re-entry, throws
 [`SamplerBusyError`](@ref). This check does not synchronize simultaneous
 callers. Placement is fixed once execution begins.
 
-Device-resident `normalized_weights(result)`, `lognormalizer(result)`, and
-array slicing are supported. Scalar indexing, iteration, quantiles, and medians
-are deliberately unavailable because they imply scalar host access. Transfer
-the complete result or a sliced `WeightedSampleView` directly to CPU first.
+Device-resident `normalized_weights(result)`, `lognormalizer(result)`,
+`mean(result)`, `var(result)`, `std(result)`, `cov(result)`, and array slicing
+are supported. Array summaries remain on the input device. Scalar summaries
+return a scalar. Function summaries compile the function for that device and
+require one concrete scalar output per sample.
+
+Scalar indexing, iteration, quantiles, and medians are deliberately unavailable
+because they imply scalar host access or global ordering. Transfer the complete
+result or a sliced `WeightedSampleView` directly to CPU first.
 
 ## Checked support matrix
 

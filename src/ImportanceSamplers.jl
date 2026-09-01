@@ -12,6 +12,7 @@ import LogDensityProblems
 import LogExpFunctions
 import MLDataDevices
 import Random
+import Statistics
 
 export AbstractImportanceSampler,
     AbstractMISScheme,
@@ -79,5 +80,6 @@ include("amis_execution.jl")
 include("static_mis_execution.jl")
 include("dm_pmc_execution.jl")
 include("results.jl")
+include("statistics.jl")
 
 end # module ImportanceSamplers

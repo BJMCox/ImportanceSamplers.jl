@@ -53,6 +53,12 @@ WeightedSamples
 WeightedSampleView
 normalized_weights
 lognormalizer
+Statistics.mean
+Statistics.var
+Statistics.std
+Statistics.cov
+Statistics.quantile
+Statistics.median
 ```
 
 ## Errors
