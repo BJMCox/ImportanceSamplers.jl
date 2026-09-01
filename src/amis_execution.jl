@@ -1417,7 +1417,10 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAMIS, thread
         method=:amis,
         execution=_execution_name(execution),
         threaded=sampler.threaded,
-        factor_execution_policy=_factor_execution_name(sampler.factor_execution),
+        factor_execution_policy=_factor_execution_name(
+            sampler.device,
+            sampler.factor_execution,
+        ),
         rounds=rounds,
         round_sizes=collect(schedule),
         round_ess=round_ess,

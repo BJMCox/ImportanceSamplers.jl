@@ -555,7 +555,10 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedStaticMIS, thre
         ),
         execution=_execution_name(execution),
         threaded=sampler.threaded,
-        factor_execution_policy=_factor_execution_name(sampler.factor_execution),
+        factor_execution_policy=_factor_execution_name(
+            sampler.device,
+            sampler.factor_execution,
+        ),
         nsamples=sampler.algorithm.nsamples,
         failures=0,
         transfers=(count=0, bytes=0),

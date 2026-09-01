@@ -272,6 +272,24 @@ end
         @test selected.logweights ≈ fused.logweights rtol = 32eps(T)
         @test iszero(batch.failures)
     end
+
+    proposal = FactorGaussian(
+        [0.3, -0.7],
+        [1.0e-4 0.0; 1.0e4 1.0e-4],
+    )
+    target = FusedVectorTarget(0.0)
+    selected = _run_native_fused(
+        target,
+        proposal,
+        [0.25, -0.5, -0.75, 1.25],
+        false,
+        2;
+        factor_execution=BatchedFactorExecution(),
+    )
+    expected = map(eachcol(selected.samples)) do sample
+        target(sample) - DensityInterface.logdensityof(proposal, sample)
+    end
+    @test selected.logweights ≈ expected rtol = 64eps(Float64)
 end
 
 @testset "native factor batch preserves target failure priority" begin
@@ -298,7 +316,7 @@ end
     @test decoded.reason_bits == ImportanceSamplers._NATIVE_TARGET_NAN
 end
 
-@testset "prepared sampler selects explicit factor execution" begin
+@testset "prepared sampler selects factor execution" begin
     dimension = 32
     nsamples = 4096
     proposal = FactorGaussian(
@@ -312,6 +330,16 @@ end
         factor_execution=BatchedFactorExecution(),
         threaded=true,
     ) |> OwnedBufferAccelerator()
+
+    default_sampler = prepare_sampler(
+        Random.Xoshiro(0x5010),
+        FusedVectorTarget(0.0),
+        ImportanceSampling(proposal; nsamples);
+        threaded=true,
+    ) |> OwnedBufferAccelerator()
+    default_result = importance_sample!(default_sampler)
+    @test default_result.diagnostics.factor_execution_policy === :batched
+
     @test ImportanceSamplers._use_native_factor_batch_path(
         sampler.device,
         sampler.algorithm.proposal,

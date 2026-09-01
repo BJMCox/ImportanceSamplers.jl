@@ -3565,7 +3565,10 @@ function _importance_sample_cpu!(
                     round,
                     execution,
                     sampler.device,
-                    sampler.factor_execution,
+                    _resolved_factor_execution(
+                        sampler.device,
+                        sampler.factor_execution,
+                    ),
                 )
                 snapshot = _device_failure_snapshot(buffers.failure_scratch.record)
                 _record_reported_transfer!(
@@ -3832,6 +3835,7 @@ function _importance_sample_cpu!(
                 execution=_execution_name(execution),
                 threaded=sampler.threaded,
                 factor_execution_policy=_factor_execution_name(
+                    sampler.device,
                     sampler.factor_execution,
                 ),
                 rounds=rounds,
