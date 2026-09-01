@@ -268,6 +268,64 @@ later prepared run cannot change an earlier result. User mutation of result
 arrays is possible on CPU but unsupported because it can invalidate estimator
 semantics.
 
+### Weighted summaries
+
+Use Julia's standard `Statistics` functions directly:
+
+```julia
+using Statistics
+
+estimate = mean(result)
+variance = var(result)
+deviation = std(result)
+
+# Expectation and variance of a scalar function of each sample.
+functional_mean = mean(sample -> abs2(sample), result)
+functional_variance = var(sample -> abs2(sample), result)
+```
+
+These methods use self-normalized importance weights. `var`, `std`, and `cov`
+return uncorrected moments of the represented target approximation;
+`corrected=true` is unsupported. `mean`, `var`, `std`, and `cov` keep array
+results on the input device. A device functional must compile there and return
+one concrete scalar per sample.
+
+`quantile(result, p)` and `median(result)` use component-wise weighted
+quantiles. Exact ordering remains CPU-only. Transfer a device result to CPU
+explicitly before calling either function.
+
+### Unweighted resampling
+
+Use [`resample`](@ref) when an API needs ordinary draws instead of a weighted
+estimator:
+
+```jldoctest resampling
+using ImportanceSamplers
+using Random
+using Statistics
+
+weighted = WeightedSamples([10.0, 20.0, 30.0], [-Inf, 0.0, -Inf])
+draws = resample(Xoshiro(7), weighted, 4)
+
+(draws.samples, draws[1], mean(draws))
+
+# output
+
+([20.0, 20.0, 20.0, 20.0], 20.0, 20.0)
+```
+
+The default [`MultinomialResampling`](@ref) method makes independent weighted
+draws with replacement. Omit the count to request exactly `length(weighted)`
+draws. The output [`UnweightedSamples`](@ref) contains samples only. It does
+not copy the source importance weights or invent uniform importance weights,
+so keep the original weighted result for evidence, ESS, and weighted
+summaries.
+
+`mean`, `var`, `std`, `cov`, `quantile`, and `median` use ordinary unweighted
+definitions on `UnweightedSamples`. Resampling preserves scalar, vector, and
+named-tuple sample structure and keeps output on the input device. Exact
+quantiles and scalar indexing remain CPU-only.
+
 ## All-zero weights
 
 If every target evaluation is `-Inf`, the run still returns its samples and raw
@@ -297,6 +355,36 @@ advances its stream across calls. Treat that RNG as transferred into the
 single-owner sampler: do not draw from it elsewhere while relying on replay.
 Repeated results are separate, noncumulative estimators and own separate
 arrays.
+
+### Retarget an adapted sampler
+
+Use `retarget` to reuse a committed adaptive proposal with a new log target and
+fresh RNG:
+
+```julia
+adapted = prepare_sampler(rng1, old_logtarget, p1, algorithm)
+importance_sample!(adapted)
+
+warm = retarget(rng2, adapted, new_logtarget, p2)
+result = importance_sample!(warm)
+```
+
+This operation supports `DeterministicMixturePMC`, `AMIS`, and
+`FirstOrderGRAMIS`. It preserves the committed proposal, algorithm controls,
+execution policy, and device. It resets every target-specific history and
+workspace. The old sampler remains usable and keeps its RNG stream.
+
+On CPU, the new sampler owns `rng2`. Accelerator setup consumes one `UInt64`
+from `rng2` after preflight to seed an owned backend RNG. A later backend RNG
+construction failure can therefore consume that value. `rng2` must not be the
+RNG owned by `adapted`.
+
+For an accelerator sampler, retargeting stages the committed proposal in CPU
+memory, allocates fresh CPU workspaces, and transfers the complete new sampler
+to the same device. This is a setup boundary, not an execution fallback. No old
+samples or weights cross targets. The caller must ensure that the reused
+proposal covers the new target's support. Normal preparation still checks known
+target dimensions, callable contracts, and method constraints.
 
 Preparation always returns CPU state. Before its first execution, apply an
 explicit MLDataDevices device to transfer the complete prepared sampler:

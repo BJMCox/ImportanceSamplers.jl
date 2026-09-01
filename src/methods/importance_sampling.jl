@@ -432,6 +432,14 @@ function _transfer_prepared_sampler(
     device::MLDataDevices.AbstractCPUDevice,
     sampler::_PreparedImportanceSampler,
 )
+    return _transfer_prepared_sampler(device, sampler, Val(true))
+end
+
+function _transfer_prepared_sampler(
+    device::MLDataDevices.AbstractCPUDevice,
+    sampler::_PreparedImportanceSampler,
+    ::Val{clone_rng},
+) where {clone_rng}
     sampler.device isa MLDataDevices.AbstractAcceleratorDevice && throw(
         SamplerDeviceError(device, :prepared_migration_unsupported),
     )
@@ -453,7 +461,7 @@ function _transfer_prepared_sampler(
         _algorithm_sample_budget(algorithm),
     )
     return _PreparedImportanceSampler(
-        _clone_rng(device, sampler.rng),
+        clone_rng ? _clone_rng(device, sampler.rng) : sampler.rng,
         random_buffers,
         transferred_target,
         algorithm,
@@ -470,6 +478,14 @@ function _transfer_prepared_sampler(
     device::MLDataDevices.AbstractAcceleratorDevice,
     sampler::_PreparedImportanceSampler,
 )
+    return _transfer_prepared_sampler(device, sampler, Val(true))
+end
+
+function _transfer_prepared_sampler(
+    device::MLDataDevices.AbstractAcceleratorDevice,
+    sampler::_PreparedImportanceSampler,
+    ::Val{clone_rng},
+) where {clone_rng}
     sampler.device isa MLDataDevices.AbstractAcceleratorDevice && throw(
         SamplerDeviceError(device, :prepared_migration_unsupported),
     )
@@ -535,7 +551,7 @@ function _transfer_prepared_sampler(
             random_buffers,
             sampler.factor_execution,
         )
-        source_rng = _clone_rng(device, sampler.rng)
+        source_rng = clone_rng ? _clone_rng(device, sampler.rng) : sampler.rng
         seed = try
             Random.rand(source_rng, UInt64)
         catch
@@ -576,6 +592,119 @@ end
 
 function (device::MLDataDevices.AbstractDevice)(sampler::_PreparedImportanceSampler)
     return _transfer_prepared_sampler(device, sampler)
+end
+
+_restore_retarget_device(source, sampler) =
+    _restore_retarget_device(source, sampler, source.device)
+
+_restore_retarget_device(
+    _source,
+    sampler,
+    ::MLDataDevices.CPUDevice{Missing},
+) = sampler
+
+function _restore_retarget_device(
+    _source,
+    sampler,
+    device::MLDataDevices.AbstractCPUDevice,
+)
+    return _transfer_prepared_sampler(device, sampler, Val(false))
+end
+
+function _restore_retarget_device(
+    _source,
+    sampler,
+    device::MLDataDevices.AbstractAcceleratorDevice,
+)
+    return _transfer_prepared_sampler(device, sampler, Val(false))
+end
+
+function _retarget_algorithm(sampler::_PreparedImportanceSampler)
+    throw(
+        ArgumentError(
+            "retarget supports DeterministicMixturePMC, AMIS, and " *
+            "FirstOrderGRAMIS prepared samplers",
+        ),
+    )
+end
+
+function _retarget_sampler(rng, sampler, target)
+    sampler.running && throw(SamplerBusyError())
+    rng === sampler.rng && throw(
+        ArgumentError("retarget requires an RNG distinct from the source-owned RNG"),
+    )
+    prepared = _prepare_importance_sampler(
+        rng,
+        target,
+        _retarget_algorithm(sampler),
+        sampler.factor_execution,
+        sampler.threaded,
+    )
+    return _restore_retarget_device(sampler, prepared)
+end
+
+"""
+    retarget(rng, sampler, logtarget)
+    retarget(rng, sampler, logtarget, p)
+
+Warm-start a new target from an adaptive sampler's committed proposal.
+
+The returned sampler preserves the source algorithm's round schedule,
+mathematical controls, threading policy, factor execution policy, and device.
+It starts a fresh RNG stream and rebuilds target binding, derivative state,
+adaptation history, workspaces, diagnostics, and failure buffers. Samples,
+weights, and normalizer state from the source are never reused. The source
+sampler remains unchanged and usable.
+
+On CPU, the returned sampler owns the supplied RNG. Accelerator setup consumes
+one `UInt64` after preflight to seed an owned backend RNG. A later backend RNG
+construction failure can therefore consume that value. The supplied RNG must
+differ from the source sampler's owned RNG.
+
+Retargeting supports prepared [`DeterministicMixturePMC`](@ref), [`AMIS`](@ref),
+and `FirstOrderGRAMIS` samplers. Plain and static importance sampling
+have no learned proposal state; call [`prepare_sampler`](@ref) with their
+algorithm instead. Accelerator retargeting stages the committed proposal in CPU
+memory, allocates fresh CPU workspaces, and transfers the complete new sampler
+to the source device. Target support coverage is a caller precondition because
+it cannot be proven for an arbitrary callable. Normal preparation still checks
+known target dimensions, callable contracts, and method constraints.
+"""
+function retarget(
+    rng::Random.AbstractRNG,
+    sampler::_PreparedImportanceSampler,
+    logtarget,
+)
+    target = _PreparedLogTarget(
+        logtarget,
+        _NoTargetContext(),
+        ADTypes.NoAutoDiff(),
+        nothing,
+    )
+    return _retarget_sampler(
+        rng,
+        sampler,
+        target,
+    )
+end
+
+function retarget(
+    rng::Random.AbstractRNG,
+    sampler::_PreparedImportanceSampler,
+    logtarget,
+    context,
+)
+    target = _PreparedLogTarget(
+        logtarget,
+        context,
+        ADTypes.NoAutoDiff(),
+        nothing,
+    )
+    return _retarget_sampler(
+        rng,
+        sampler,
+        target,
+    )
 end
 
 """

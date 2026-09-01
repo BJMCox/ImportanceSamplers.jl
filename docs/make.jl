@@ -3,6 +3,7 @@ using Documenter
 using ImportanceSamplers
 using Markdown
 using Random
+using Statistics
 import MLDataDevices
 
 include(joinpath(@__DIR__, "..", "validation", "cuda_plain_is_capabilities.jl"))

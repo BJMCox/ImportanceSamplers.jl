@@ -214,7 +214,7 @@ end
             uniforms,
         )
 
-        DMPMCKernelIS._launch_dm_pmc_resampling!(
+        DMPMCKernelIS._resample_and_gather!(
             cdf,
             uniforms,
             ancestors,
@@ -254,7 +254,7 @@ end
             ancestors = zeros(Int, length(case.uniforms))
             candidates = zeros(T, length(case.uniforms))
 
-            DMPMCKernelIS._launch_dm_pmc_resampling!(
+            DMPMCKernelIS._resample_and_gather!(
                 copy(case.cdf),
                 case.uniforms,
                 ancestors,

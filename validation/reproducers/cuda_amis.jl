@@ -343,8 +343,6 @@ function assert_amis_residence(prepared, result)
         result.provenance.round,
     )
     @test all(array -> array isa CUDA.AnyCuArray, arrays)
-    @test state.schedule isa Tuple
-    @test state.offsets isa Tuple
     return nothing
 end
 

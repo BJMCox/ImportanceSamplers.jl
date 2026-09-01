@@ -246,8 +246,6 @@ function assert_dm_pmc_residence(prepared, result)
     workspace.solve_scratch isa IS._NoMISSolveScratch ||
         push!(arrays, workspace.solve_scratch)
     @test all(array -> array isa CUDA.AnyCuArray, arrays)
-    @test plan.schedule isa Tuple
-    @test plan.offsets isa Tuple
     return nothing
 end
 

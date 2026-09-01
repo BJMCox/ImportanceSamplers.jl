@@ -1,8 +1,64 @@
 using Test
 using ImportanceSamplers
+using Statistics
 
 struct TestMutableBackedNumber <: Number
     payload::Vector{Int}
+end
+
+@testset "weighted expectations" begin
+    result = WeightedSamples([1.0, 3.0, 10.0], 1000 .+ log.([1.0, 2.0, 1.0]))
+
+    @test (@inferred mean(result)) ≈ 4.25
+    @test (@inferred mean(abs2, result)) ≈ 29.75
+end
+
+@testset "weighted scalar moments" begin
+    result = WeightedSamples([1.0, 3.0, 10.0], 1000 .+ log.([1.0, 2.0, 1.0]))
+
+    @test (@inferred var(result)) ≈ 11.6875
+    @test (@inferred std(result)) ≈ sqrt(11.6875)
+    @test (@inferred var(abs2, result)) ≈ 1655.6875
+    @test (@inferred std(abs2, result)) ≈ sqrt(1655.6875)
+    @test_throws ArgumentError var(result; corrected=true)
+    @test_throws ArgumentError std(result; corrected=true)
+end
+
+@testset "weighted structured moments" begin
+    logweights = 1000 .+ log.([1.0, 2.0, 1.0])
+    samples = [1.0 3.0 10.0; 2.0 4.0 8.0]
+    result = WeightedSamples(samples, logweights)
+
+    @test (@inferred mean(result)) ≈ [4.25, 4.5]
+    @test (@inferred var(result)) ≈ [11.6875, 4.75]
+    @test (@inferred std(result)) ≈ sqrt.([11.6875, 4.75])
+    @test (@inferred cov(result)) ≈ [11.6875 7.375; 7.375 4.75]
+    @test mean(x -> x[1] + 2x[2], result) ≈ 13.25
+    @test var(x -> x[1] + 2x[2], result) ≈ 60.1875
+    @test_throws ArgumentError cov(result; corrected=true)
+
+    structured = WeightedSamples((location=samples[1, :], state=(position=samples,)), logweights)
+    structured_mean = @inferred mean(structured)
+    structured_variance = @inferred var(structured)
+    @test structured_mean.location ≈ 4.25
+    @test structured_mean.state.position ≈ [4.25, 4.5]
+    @test structured_variance.location ≈ 11.6875
+    @test structured_variance.state.position ≈ [11.6875, 4.75]
+end
+
+@testset "weighted quantiles" begin
+    logweights = 1000 .+ log.([1.0, 2.0, 1.0])
+    scalar = WeightedSamples([1.0, 3.0, 10.0], logweights)
+
+    @test (@inferred quantile(scalar, [0.25, 0.5, 0.75])) ≈ [1.75, 2.5, 4.75]
+    @test (@inferred median(scalar)) ≈ 2.5
+
+    matrix = WeightedSamples([1.0 3.0 10.0; 2.0 4.0 8.0], logweights)
+    @test quantile(matrix, 0.5) ≈ [2.5, 3.5]
+    @test median(matrix) ≈ [2.5, 3.5]
+
+    structured = WeightedSamples((location=[1.0, 3.0, 10.0],), logweights)
+    @test quantile(structured, 0.5).location ≈ 2.5
 end
 
 @testset "reported transfer storage" begin

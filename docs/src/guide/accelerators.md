@@ -147,10 +147,20 @@ that observes the handle already busy, including recursive re-entry, throws
 [`SamplerBusyError`](@ref). This check does not synchronize simultaneous
 callers. Placement is fixed once execution begins.
 
-Device-resident `normalized_weights(result)`, `lognormalizer(result)`, and
-array slicing are supported. Scalar indexing, iteration, quantiles, and medians
-are deliberately unavailable because they imply scalar host access. Transfer
-the complete result or a sliced `WeightedSampleView` directly to CPU first.
+Device-resident `normalized_weights(result)`, `lognormalizer(result)`,
+`mean(result)`, `var(result)`, `std(result)`, `cov(result)`, and array slicing
+are supported. Array summaries remain on the input device. Scalar summaries
+return a scalar. Function summaries compile the function for that device and
+require one concrete scalar output per sample.
+
+`resample(rng, result, count)` also stays resident. On CUDA it consumes one
+`UInt64` seed from the supplied RNG, fills device random buffers with an
+owned CUDA RNG, and returns device-resident `UnweightedSamples`. Transfer those
+samples explicitly with `cpu_device()` before scalar indexing.
+
+Scalar indexing, iteration, quantiles, and medians are deliberately unavailable
+because they imply scalar host access or global ordering. Transfer the complete
+result or a sliced `WeightedSampleView` directly to CPU first.
 
 ## Checked support matrix
 

@@ -10,6 +10,7 @@ DeterministicMixturePMC
 FusedFactorExecution
 BatchedFactorExecution
 prepare_sampler
+retarget
 importance_sample
 importance_sample!
 current_proposal
@@ -51,8 +52,18 @@ LogTarget
 ```@docs
 WeightedSamples
 WeightedSampleView
+UnweightedSamples
 normalized_weights
 lognormalizer
+AbstractResamplingMethod
+MultinomialResampling
+resample
+Statistics.mean
+Statistics.var
+Statistics.std
+Statistics.cov
+Statistics.quantile
+Statistics.median
 ```
 
 ## Errors
