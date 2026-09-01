@@ -7,6 +7,7 @@ AbstractImportanceSampler
 ImportanceSampling
 AMIS
 DeterministicMixturePMC
+FirstOrderGRAMIS
 FusedFactorExecution
 BatchedFactorExecution
 prepare_sampler
@@ -77,4 +78,5 @@ SamplerDeviceError
 SamplerExecutionError
 AMISRoundError
 DMPMCRoundError
+FirstOrderGRAMISRoundError
 ```
