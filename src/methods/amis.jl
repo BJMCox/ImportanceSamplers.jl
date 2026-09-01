@@ -82,6 +82,17 @@ _algorithm_proposal(algorithm::AMIS) = algorithm.proposal
 _algorithm_sample_budget(algorithm::AMIS) =
     _adaptive_sample_budget(algorithm.rounds, algorithm.round_size)
 
+function _retarget_algorithm(
+    sampler::_PreparedImportanceSampler{R,B,T,A},
+) where {R,B,T,A<:AMIS}
+    algorithm = sampler.algorithm
+    return AMIS(
+        current_proposal(MLDataDevices.cpu_device(), sampler);
+        rounds=algorithm.rounds,
+        round_size=algorithm.round_size,
+    )
+end
+
 """
     AMISRoundError
 
@@ -374,8 +385,8 @@ function _prepare_transferred_method_state(
     _transferred_target,
 )
     transferred = _PreparedAMIS(
-        Tuple(method_state.schedule),
-        Tuple(method_state.offsets),
+        _HostIntSequence(method_state.schedule),
+        _HostIntSequence(method_state.offsets),
         _copy_to_device(device, method_state.logcounts),
         _copy_amis_history(device, method_state.history),
         _copy_amis_workspace(device, method_state.workspace),

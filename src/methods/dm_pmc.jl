@@ -84,6 +84,17 @@ _algorithm_proposal(algorithm::DeterministicMixturePMC) = algorithm.bank
 _algorithm_sample_budget(algorithm::DeterministicMixturePMC) =
     _adaptive_sample_budget(algorithm.rounds, algorithm.round_size)
 
+function _retarget_algorithm(
+    sampler::_PreparedImportanceSampler{R,B,T,A},
+) where {R,B,T,A<:DeterministicMixturePMC}
+    algorithm = sampler.algorithm
+    return DeterministicMixturePMC(
+        current_proposal(MLDataDevices.cpu_device(), sampler);
+        rounds=algorithm.rounds,
+        round_size=algorithm.round_size,
+    )
+end
+
 """
     current_proposal(sampler)
     current_proposal(destination, sampler)
@@ -225,6 +236,25 @@ struct _DeterministicAllocationPlan{S,C,A,L,O}
     logcoefficients::L
     offsets::O
 end
+
+# Accelerator schedules stay on the host, but their runtime length must not
+# enter the prepared sampler type.
+struct _HostIntSequence
+    values::Tuple{Vararg{Int}}
+end
+
+_HostIntSequence(values::AbstractVector{Int}) = _HostIntSequence(Tuple(values))
+Base.IteratorSize(::Type{_HostIntSequence}) = Base.HasLength()
+Base.IteratorEltype(::Type{_HostIntSequence}) = Base.HasEltype()
+Base.eltype(::Type{_HostIntSequence}) = Int
+Base.length(sequence::_HostIntSequence) = length(sequence.values)
+Base.firstindex(sequence::_HostIntSequence) = firstindex(sequence.values)
+Base.lastindex(sequence::_HostIntSequence) = lastindex(sequence.values)
+Base.eachindex(sequence::_HostIntSequence) = eachindex(sequence.values)
+Base.keys(sequence::_HostIntSequence) = keys(sequence.values)
+Base.getindex(sequence::_HostIntSequence, index::Int) = sequence.values[index]
+Base.iterate(sequence::_HostIntSequence, state...) = iterate(sequence.values, state...)
+Base.last(sequence::_HostIntSequence) = last(sequence.values)
 
 mutable struct _PreparedDMPMC{B,P,W}
     bank::B
@@ -531,11 +561,11 @@ function _prepare_transferred_method_state(
 )
     plan = method_state.plan
     transferred_plan = _DeterministicAllocationPlan(
-        Tuple(plan.schedule),
+        _HostIntSequence(plan.schedule),
         _copy_to_device(device, plan.counts),
         _copy_to_device(device, plan.assignments),
         _copy_to_device(device, plan.logcoefficients),
-        Tuple(plan.offsets),
+        _HostIntSequence(plan.offsets),
     )
     workspace = method_state.workspace
     transferred_workspace = _DMPMCWorkspace(

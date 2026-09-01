@@ -62,6 +62,7 @@ export AbstractImportanceSampler,
     lognormalizer,
     normalized_weights,
     prepare_sampler,
+    retarget,
     resample
 
 include("proposals.jl")

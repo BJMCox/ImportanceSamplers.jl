@@ -652,6 +652,49 @@ _algorithm_proposal(algorithm::FirstOrderGRAMIS) = algorithm.bank
 _algorithm_sample_budget(algorithm::FirstOrderGRAMIS) =
     _adaptive_sample_budget(algorithm.rounds, algorithm.round_size)
 
+struct _ResolvedFirstOrderGRAMISThresholds{V}
+    values::V
+end
+
+@inline function (thresholds::_ResolvedFirstOrderGRAMISThresholds)(
+    round,
+    proposal,
+    _sample_count,
+    _dimension,
+)
+    return thresholds.values[proposal, round]
+end
+
+function _retarget_algorithm(
+    sampler::_PreparedImportanceSampler{R,B,T,A},
+) where {R,B,T,A<:FirstOrderGRAMIS}
+    algorithm = sampler.algorithm
+    method_state = sampler.method_state
+    repulsion_strength, covariance_rate, covariance_ess_threshold =
+        _with_backend_device(sampler.device) do
+            (
+                Array(method_state.repulsion_strength),
+                Array(method_state.covariance_rate),
+                Array(method_state.covariance_ess_threshold),
+            )
+        end
+    return FirstOrderGRAMIS(
+        current_proposal(MLDataDevices.cpu_device(), sampler);
+        rounds=algorithm.rounds,
+        round_size=algorithm.round_size,
+        repulsion_strength,
+        covariance_ess_threshold=_ResolvedFirstOrderGRAMISThresholds(
+            covariance_ess_threshold,
+        ),
+        covariance_rate,
+        covariance_regularization=method_state.covariance_regularization,
+        tempering_tolerance=method_state.tempering_tolerance,
+        tempering_max_iterations=method_state.tempering_max_iterations,
+        repulsion_softening=method_state.repulsion_softening,
+        max_backtracking_trials=method_state.max_backtracking_trials,
+    )
+end
+
 function _allocate_random_buffers(
     ::MLDataDevices.AbstractDevice,
     ::ProposalBank,
@@ -740,11 +783,11 @@ function _prepare_transferred_method_state(
     candidate = _first_order_gramis_state_bank(committed)
     plan = method_state.plan
     transferred_plan = _DeterministicAllocationPlan(
-        Tuple(plan.schedule),
+        _HostIntSequence(plan.schedule),
         _copy_to_device(device, plan.counts),
         _copy_to_device(device, plan.assignments),
         _copy_to_device(device, plan.logcoefficients),
-        Tuple(plan.offsets),
+        _HostIntSequence(plan.offsets),
     )
     binding_sample = view(committed.locations, :, 1)
     bound_gradient = _prepare_bound_gradient(transferred_target, binding_sample, 1)

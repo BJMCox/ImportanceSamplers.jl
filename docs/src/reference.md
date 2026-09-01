@@ -10,6 +10,7 @@ DeterministicMixturePMC
 FusedFactorExecution
 BatchedFactorExecution
 prepare_sampler
+retarget
 importance_sample
 importance_sample!
 current_proposal

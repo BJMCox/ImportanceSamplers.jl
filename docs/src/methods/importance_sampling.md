@@ -356,6 +356,36 @@ single-owner sampler: do not draw from it elsewhere while relying on replay.
 Repeated results are separate, noncumulative estimators and own separate
 arrays.
 
+### Retarget an adapted sampler
+
+Use `retarget` to reuse a committed adaptive proposal with a new log target and
+fresh RNG:
+
+```julia
+adapted = prepare_sampler(rng1, old_logtarget, p1, algorithm)
+importance_sample!(adapted)
+
+warm = retarget(rng2, adapted, new_logtarget, p2)
+result = importance_sample!(warm)
+```
+
+This operation supports `DeterministicMixturePMC`, `AMIS`, and
+`FirstOrderGRAMIS`. It preserves the committed proposal, algorithm controls,
+execution policy, and device. It resets every target-specific history and
+workspace. The old sampler remains usable and keeps its RNG stream.
+
+On CPU, the new sampler owns `rng2`. Accelerator setup consumes one `UInt64`
+from `rng2` after preflight to seed an owned backend RNG. A later backend RNG
+construction failure can therefore consume that value. `rng2` must not be the
+RNG owned by `adapted`.
+
+For an accelerator sampler, retargeting stages the committed proposal in CPU
+memory, allocates fresh CPU workspaces, and transfers the complete new sampler
+to the same device. This is a setup boundary, not an execution fallback. No old
+samples or weights cross targets. The caller must ensure that the reused
+proposal covers the new target's support. Normal preparation still checks known
+target dimensions, callable contracts, and method constraints.
+
 Preparation always returns CPU state. Before its first execution, apply an
 explicit MLDataDevices device to transfer the complete prepared sampler:
 

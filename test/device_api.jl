@@ -1492,8 +1492,6 @@ end
         else
             @test solve_scratch isa IS._NoMISSolveScratch
         end
-        @test plan.schedule isa Tuple
-        @test plan.offsets isa Tuple
         @test getfield(destination, :algorithm) !== getfield(source, :algorithm)
         @test getfield(destination, :algorithm).bank.proposals isa Vector
         @test getfield(destination, :algorithm).bank.masses isa Vector
@@ -1692,8 +1690,6 @@ end
                 buffers.failure_scratch.record.storage,
             ),
         )
-        @test state.schedule isa Tuple
-        @test state.offsets isa Tuple
         @test destination.device === device
         @test KERNEL_ARGUMENT_TEST_CURRENT[] === :caller
         @test KERNEL_ARGUMENT_TEST_INT_SIMILAR_LENGTHS == [1]
