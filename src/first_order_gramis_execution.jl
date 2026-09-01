@@ -312,6 +312,29 @@ function _throw_first_order_gramis_device_derivative_failure(
     )
 end
 
+function _throw_first_order_gramis_device_backtracking_failure(
+    device,
+    failure_record,
+    failure_values,
+    proposal_count,
+    transfers,
+)
+    failure = _first_order_gramis_failure_snapshot!(transfers, failure_record)
+    iszero(failure.count) && return nothing
+    slot = mod1(failure.first_logical_index, proposal_count)
+    value = _first_order_gramis_failure_value(
+        device,
+        failure_values,
+        slot,
+        transfers,
+    )
+    _throw_first_order_gramis_derivative_error(
+        slot,
+        _first_order_gramis_derivative_reason(failure.reason_bits),
+        value,
+    )
+end
+
 @inline function _pooled_covariance_entry!(
     pooled_covariance,
     factors,
@@ -1429,14 +1452,18 @@ function _finish_backtracking!(
     return nothing
 end
 
-@kernel function _initialize_backtracking_kernel!(
+@kernel function _backtrack_means_kernel!(
     candidate_locations,
     candidate_values,
     active_mask,
     steps,
     trials,
+    target,
     frozen_values,
     locations,
+    moves,
+    max_trials,
+    failure_storage,
 )
     proposal_slot = @index(Global, Linear)
     _initialize_backtracking_slot!(
@@ -1449,46 +1476,41 @@ end
         locations,
         proposal_slot,
     )
-end
-
-@kernel function _backtracking_trial_kernel!(
-    candidate_locations,
-    candidate_values,
-    active_mask,
-    steps,
-    trials,
-    target,
-    frozen_values,
-    locations,
-    moves,
-    step,
-    trial,
-)
-    proposal_slot = @index(Global, Linear)
-    _backtracking_trial_slot!(
-        candidate_locations,
-        candidate_values,
-        active_mask,
-        steps,
-        trials,
-        target,
-        frozen_values,
-        locations,
-        moves,
-        step,
-        trial,
-        proposal_slot,
-    )
-end
-
-@kernel function _finish_backtracking_kernel!(
-    candidate_locations,
-    candidate_values,
-    active_mask,
-    frozen_values,
-    locations,
-)
-    proposal_slot = @index(Global, Linear)
+    for trial in 1:max_trials
+        @inbounds active_mask[proposal_slot] || break
+        step = ldexp(one(eltype(steps)), 1 - trial)
+        _backtracking_trial_slot!(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            steps,
+            trials,
+            target,
+            frozen_values,
+            locations,
+            moves,
+            step,
+            trial,
+            proposal_slot,
+        )
+        failure_storage === nothing && continue
+        _, reason, _ = _backtracking_candidate_failure(
+            candidate_values,
+            trials,
+            trial,
+            proposal_slot,
+        )
+        if !iszero(reason)
+            @inbounds active_mask[proposal_slot] = false
+            logical_index = (trial - 1) * size(locations, 2) + proposal_slot
+            _record_native_failure!(
+                failure_storage,
+                logical_index,
+                0,
+                reason,
+            )
+        end
+    end
     _finish_backtracking_slot!(
         candidate_locations,
         candidate_values,
@@ -1497,24 +1519,6 @@ end
         locations,
         proposal_slot,
     )
-end
-
-@kernel function _validate_backtracking_candidates_kernel!(
-    failure_storage,
-    candidate_values,
-    trials,
-    trial,
-)
-    proposal_slot = @index(Global, Linear)
-    _, reason, _ = _backtracking_candidate_failure(
-        candidate_values,
-        trials,
-        trial,
-        proposal_slot,
-    )
-    if !iszero(reason)
-        _record_native_failure!(failure_storage, proposal_slot, 0, reason)
-    end
 end
 
 function _backtrack_means!(
@@ -1540,72 +1544,40 @@ function _backtrack_means!(
         backend,
         proposal_count,
     )
-    initialize_kernel = _initialize_backtracking_kernel!(backend)
-    initialize_kernel(
+    failure_storage = if device === nothing
+        nothing
+    else
+        fill!(
+            failure_record.storage,
+            zero(eltype(failure_record.storage)),
+        )
+        failure_record.storage
+    end
+    kernel = _backtrack_means_kernel!(backend)
+    kernel(
         candidate_locations,
         candidate_values,
         active_mask,
         steps,
         trials,
+        target,
         frozen_values,
-        locations;
-        ndrange=proposal_count,
-        workgroupsize,
-    )
-    trial_kernel = _backtracking_trial_kernel!(backend)
-    for trial in 1:max_trials
-        step = ldexp(one(eltype(steps)), 1 - trial)
-        trial_kernel(
-            candidate_locations,
-            candidate_values,
-            active_mask,
-            steps,
-            trials,
-            target,
-            frozen_values,
-            locations,
-            moves,
-            step,
-            trial;
-            ndrange=proposal_count,
-            workgroupsize,
-        )
-        if device !== nothing
-            KernelAbstractions.synchronize(backend)
-            fill!(
-                failure_record.storage,
-                zero(eltype(failure_record.storage)),
-            )
-            validation_kernel =
-                _validate_backtracking_candidates_kernel!(backend)
-            validation_kernel(
-                failure_record.storage,
-                candidate_values,
-                trials,
-                trial;
-                ndrange=proposal_count,
-                workgroupsize,
-            )
-            KernelAbstractions.synchronize(backend)
-            _throw_first_order_gramis_device_derivative_failure(
-                device,
-                failure_record,
-                candidate_values,
-                transfers,
-            )
-        end
-    end
-    finish_kernel = _finish_backtracking_kernel!(backend)
-    finish_kernel(
-        candidate_locations,
-        candidate_values,
-        active_mask,
-        frozen_values,
-        locations;
+        locations,
+        moves,
+        max_trials,
+        failure_storage;
         ndrange=proposal_count,
         workgroupsize,
     )
     KernelAbstractions.synchronize(backend)
+    device === nothing ||
+        _throw_first_order_gramis_device_backtracking_failure(
+            device,
+            failure_record,
+            candidate_values,
+            proposal_count,
+            transfers,
+        )
     return nothing
 end
 
