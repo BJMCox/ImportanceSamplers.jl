@@ -312,6 +312,29 @@ function _throw_first_order_gramis_device_derivative_failure(
     )
 end
 
+function _throw_first_order_gramis_device_backtracking_failure(
+    device,
+    failure_record,
+    failure_values,
+    proposal_count,
+    transfers,
+)
+    failure = _first_order_gramis_failure_snapshot!(transfers, failure_record)
+    iszero(failure.count) && return nothing
+    slot = mod1(failure.first_logical_index, proposal_count)
+    value = _first_order_gramis_failure_value(
+        device,
+        failure_values,
+        slot,
+        transfers,
+    )
+    _throw_first_order_gramis_derivative_error(
+        slot,
+        _first_order_gramis_derivative_reason(failure.reason_bits),
+        value,
+    )
+end
+
 @inline function _pooled_covariance_entry!(
     pooled_covariance,
     factors,
@@ -374,7 +397,7 @@ function _pooled_covariance!(
     factors,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for entry in 1:length(pooled_covariance)
+    _threaded_foreach(1:length(pooled_covariance)) do entry
         _pooled_covariance_entry!(pooled_covariance, factors, entry)
     end
     return nothing
@@ -636,7 +659,7 @@ function _repulsion_force!(
     softening,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for proposal_slot in axes(means, 2)
+    _threaded_foreach(axes(means, 2)) do proposal_slot
         _repulsion_slot!(
             repulsion,
             collision_counts,
@@ -993,7 +1016,7 @@ function _precondition_gradients!(
     factors,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for proposal_slot in axes(gradients, 2)
+    _threaded_foreach(axes(gradients, 2)) do proposal_slot
         _precondition_gradient_slot!(moves, gradients, factors, proposal_slot)
     end
     _validate_preconditioned_moves!(moves)
@@ -1208,7 +1231,7 @@ function _evaluate_frozen_gradients!(
     locations,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for proposal_slot in axes(locations, 2)
+    _threaded_foreach(axes(locations, 2)) do proposal_slot
         _evaluate_frozen_gradient_slot!(
             values,
             gradients,
@@ -1327,7 +1350,7 @@ function _initialize_backtracking!(
     locations,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for proposal_slot in axes(locations, 2)
+    _threaded_foreach(axes(locations, 2)) do proposal_slot
         _initialize_backtracking_slot!(
             candidate_locations,
             candidate_values,
@@ -1389,7 +1412,7 @@ function _backtracking_trial!(
     trial,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for proposal_slot in axes(locations, 2)
+    _threaded_foreach(axes(locations, 2)) do proposal_slot
         _backtracking_trial_slot!(
             candidate_locations,
             candidate_values,
@@ -1429,14 +1452,18 @@ function _finish_backtracking!(
     return nothing
 end
 
-@kernel function _initialize_backtracking_kernel!(
+@kernel function _backtrack_means_kernel!(
     candidate_locations,
     candidate_values,
     active_mask,
     steps,
     trials,
+    target,
     frozen_values,
     locations,
+    moves,
+    max_trials,
+    failure_storage,
 )
     proposal_slot = @index(Global, Linear)
     _initialize_backtracking_slot!(
@@ -1449,46 +1476,41 @@ end
         locations,
         proposal_slot,
     )
-end
-
-@kernel function _backtracking_trial_kernel!(
-    candidate_locations,
-    candidate_values,
-    active_mask,
-    steps,
-    trials,
-    target,
-    frozen_values,
-    locations,
-    moves,
-    step,
-    trial,
-)
-    proposal_slot = @index(Global, Linear)
-    _backtracking_trial_slot!(
-        candidate_locations,
-        candidate_values,
-        active_mask,
-        steps,
-        trials,
-        target,
-        frozen_values,
-        locations,
-        moves,
-        step,
-        trial,
-        proposal_slot,
-    )
-end
-
-@kernel function _finish_backtracking_kernel!(
-    candidate_locations,
-    candidate_values,
-    active_mask,
-    frozen_values,
-    locations,
-)
-    proposal_slot = @index(Global, Linear)
+    for trial in 1:max_trials
+        @inbounds active_mask[proposal_slot] || break
+        step = ldexp(one(eltype(steps)), 1 - trial)
+        _backtracking_trial_slot!(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            steps,
+            trials,
+            target,
+            frozen_values,
+            locations,
+            moves,
+            step,
+            trial,
+            proposal_slot,
+        )
+        failure_storage === nothing && continue
+        _, reason, _ = _backtracking_candidate_failure(
+            candidate_values,
+            trials,
+            trial,
+            proposal_slot,
+        )
+        if !iszero(reason)
+            @inbounds active_mask[proposal_slot] = false
+            logical_index = (trial - 1) * size(locations, 2) + proposal_slot
+            _record_native_failure!(
+                failure_storage,
+                logical_index,
+                0,
+                reason,
+            )
+        end
+    end
     _finish_backtracking_slot!(
         candidate_locations,
         candidate_values,
@@ -1497,24 +1519,6 @@ end
         locations,
         proposal_slot,
     )
-end
-
-@kernel function _validate_backtracking_candidates_kernel!(
-    failure_storage,
-    candidate_values,
-    trials,
-    trial,
-)
-    proposal_slot = @index(Global, Linear)
-    _, reason, _ = _backtracking_candidate_failure(
-        candidate_values,
-        trials,
-        trial,
-        proposal_slot,
-    )
-    if !iszero(reason)
-        _record_native_failure!(failure_storage, proposal_slot, 0, reason)
-    end
 end
 
 function _backtrack_means!(
@@ -1540,72 +1544,40 @@ function _backtrack_means!(
         backend,
         proposal_count,
     )
-    initialize_kernel = _initialize_backtracking_kernel!(backend)
-    initialize_kernel(
+    failure_storage = if device === nothing
+        nothing
+    else
+        fill!(
+            failure_record.storage,
+            zero(eltype(failure_record.storage)),
+        )
+        failure_record.storage
+    end
+    kernel = _backtrack_means_kernel!(backend)
+    kernel(
         candidate_locations,
         candidate_values,
         active_mask,
         steps,
         trials,
+        target,
         frozen_values,
-        locations;
-        ndrange=proposal_count,
-        workgroupsize,
-    )
-    trial_kernel = _backtracking_trial_kernel!(backend)
-    for trial in 1:max_trials
-        step = ldexp(one(eltype(steps)), 1 - trial)
-        trial_kernel(
-            candidate_locations,
-            candidate_values,
-            active_mask,
-            steps,
-            trials,
-            target,
-            frozen_values,
-            locations,
-            moves,
-            step,
-            trial;
-            ndrange=proposal_count,
-            workgroupsize,
-        )
-        if device !== nothing
-            KernelAbstractions.synchronize(backend)
-            fill!(
-                failure_record.storage,
-                zero(eltype(failure_record.storage)),
-            )
-            validation_kernel =
-                _validate_backtracking_candidates_kernel!(backend)
-            validation_kernel(
-                failure_record.storage,
-                candidate_values,
-                trials,
-                trial;
-                ndrange=proposal_count,
-                workgroupsize,
-            )
-            KernelAbstractions.synchronize(backend)
-            _throw_first_order_gramis_device_derivative_failure(
-                device,
-                failure_record,
-                candidate_values,
-                transfers,
-            )
-        end
-    end
-    finish_kernel = _finish_backtracking_kernel!(backend)
-    finish_kernel(
-        candidate_locations,
-        candidate_values,
-        active_mask,
-        frozen_values,
-        locations;
+        locations,
+        moves,
+        max_trials,
+        failure_storage;
         ndrange=proposal_count,
         workgroupsize,
     )
     KernelAbstractions.synchronize(backend)
+    device === nothing ||
+        _throw_first_order_gramis_device_backtracking_failure(
+            device,
+            failure_record,
+            candidate_values,
+            proposal_count,
+            transfers,
+        )
     return nothing
 end
 
@@ -1617,7 +1589,7 @@ function _finish_backtracking!(
     locations,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for proposal_slot in axes(locations, 2)
+    _threaded_foreach(axes(locations, 2)) do proposal_slot
         _finish_backtracking_slot!(
             candidate_locations,
             candidate_values,
@@ -2767,7 +2739,7 @@ function _factor_population!(
     info::StridedVector{I},
     ::_ThreadedCPUExecution,
 ) where {T<:Union{Float32,Float64},I<:Signed}
-    Threads.@threads :dynamic for proposal_slot in axes(factors, 3)
+    _threaded_foreach(axes(factors, 3)) do proposal_slot
         _factor_population_slot!(
             factors,
             covariances,
@@ -2807,7 +2779,7 @@ function _factor_ready_population!(
     status,
     ::_ThreadedCPUExecution,
 )
-    Threads.@threads :dynamic for proposal_slot in axes(factors, 3)
+    _threaded_foreach(axes(factors, 3)) do proposal_slot
         if @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY
             _factor_population_slot!(
                 factors,
@@ -3565,7 +3537,10 @@ function _importance_sample_cpu!(
                     round,
                     execution,
                     sampler.device,
-                    sampler.factor_execution,
+                    _resolved_factor_execution(
+                        sampler.device,
+                        sampler.factor_execution,
+                    ),
                 )
                 snapshot = _device_failure_snapshot(buffers.failure_scratch.record)
                 _record_reported_transfer!(
@@ -3832,6 +3807,7 @@ function _importance_sample_cpu!(
                 execution=_execution_name(execution),
                 threaded=sampler.threaded,
                 factor_execution_policy=_factor_execution_name(
+                    sampler.device,
                     sampler.factor_execution,
                 ),
                 rounds=rounds,

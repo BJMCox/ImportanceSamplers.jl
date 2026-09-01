@@ -52,12 +52,11 @@ host_result = result |> cpu_device()
 
 ## Factor execution policy
 
-Factor Gaussians use fused sample kernels by default. This path behaves
-consistently across CPU and accelerator workloads and does not guess from a
-machine-specific sample-count threshold.
+Factor Gaussians use fused sample kernels by default on CPU. Accelerators use
+batched matrix multiplication and triangular solves when their extension
+supports that path. This backend rule uses no hardware or sample-count cutoff.
 
-Request batched matrix multiplication and triangular solves explicitly for
-high-dimensional, high-throughput work:
+Override the default explicitly when benchmarking another path:
 
 ```julia
 dimension = 32
@@ -74,9 +73,10 @@ prepared = prepare_sampler(
 prepared = prepared |> device
 ```
 
-The same policy request applies to Base IS, static MIS, DM-PMC, and AMIS. It
+The same policy applies to Base IS, static MIS, DM-PMC, AMIS, and GRAMIS. It
 remains part of the prepared sampler during device transfer. Use
-`FusedFactorExecution()` to state the default explicitly.
+`FusedFactorExecution()` to force fusion or `BatchedFactorExecution()` to force
+batching where supported.
 
 The batch path requires a factor Gaussian, matching scalar storage, and CPU or
 CUDA support. Base IS also requires no sample transform. Static MIS requires a
@@ -85,7 +85,7 @@ cases use the fused path without changing the estimator.
 
 Benchmark both policies on the target device because the crossover depends on
 the factor dimension, backend, scalar type, and hardware. The result records
-the requested policy as `:fused` or `:batched` in
+the resolved default or explicit policy as `:fused` or `:batched` in
 `diagnostics.factor_execution_policy`.
 
 The explicit `CUDADevice` construction avoids MLDataDevices backend

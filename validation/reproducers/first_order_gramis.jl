@@ -197,6 +197,103 @@ function validate_first_order_gramis_repulsion()
     )
 end
 
+function covariance_reproducer_state(::Type{T}) where {T}
+    bank = ProposalBank([
+        FactorGaussian(T[10], reshape(T[2], 1, 1)),
+        FactorGaussian(T[20], reshape(T[3], 1, 1)),
+        FactorGaussian(T[100], reshape(T[4], 1, 1)),
+    ])
+    sampler = prepare_sampler(
+        Xoshiro(0x434149534f524143),
+        LogTarget(CausalTarget(); grad=causal_gradient!),
+        FirstOrderGRAMIS(
+            bank;
+            rounds=1,
+            round_size=12,
+            repulsion_strength=zero(T),
+            covariance_ess_threshold=3,
+        );
+        threaded=false,
+    )
+    state = sampler.method_state
+    state.workspace.samples .= reshape(
+        T[0, 2, 4, 6, 0, 2, 4, 6, 0, 1, 2, 4],
+        1,
+        :,
+    )
+    state.workspace.local_logweights .= T[
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -Inf,
+        log(T(8)),
+        0,
+        0,
+        0,
+    ]
+    return state
+end
+
+function literal_weighted_variance(samples, logweights, power, center)
+    shifted = exp.(power .* (logweights .- maximum(logweights)))
+    weights = shifted ./ sum(shifted)
+    return sum(weights .* abs2.(samples .- center)), weights
+end
+
+function validate_first_order_gramis_covariance_rules()
+    for T in (Float32, Float64)
+        state = covariance_reproducer_state(T)
+        IS._fit_local_covariances!(state, 1, IS._SerialCPUExecution())
+        workspace = state.workspace
+
+        raw_samples = T[0, 2, 4, 6]
+        raw_one, _ = literal_weighted_variance(
+            raw_samples,
+            zeros(T, 4),
+            one(T),
+            T(10),
+        )
+        raw_two, _ = literal_weighted_variance(
+            raw_samples,
+            T[0, 0, 0, -Inf],
+            one(T),
+            T(20),
+        )
+        @test workspace.covariances[1, 1, 1] ≈ raw_one rtol = 8eps(T)
+        @test workspace.covariances[1, 1, 2] ≈ raw_two rtol = 8eps(T)
+
+        power = workspace.tempering_powers[3]
+        tempered_samples = T[0, 1, 2, 4]
+        tempered_logs = T[log(T(8)), 0, 0, 0]
+        _, tempered_weights = literal_weighted_variance(
+            tempered_samples,
+            tempered_logs,
+            power,
+            zero(T),
+        )
+        tempered_center = sum(tempered_weights .* tempered_samples)
+        tempered_variance, _ = literal_weighted_variance(
+            tempered_samples,
+            tempered_logs,
+            power,
+            tempered_center,
+        )
+        @test zero(T) < power < one(T)
+        @test inv(sum(abs2, tempered_weights)) >= T(3)
+        @test workspace.covariances[1, 1, 3] ≈ tempered_variance rtol = 64eps(T)
+    end
+    return (
+        raw_center=:frozen_proposal_mean,
+        tempered_center=:tempered_weighted_mean,
+        scalar_types=(Float32, Float64),
+        status=:passed,
+    )
+end
+
 mutable struct CausalPrefilledRNG{T} <: Random.AbstractRNG
     batches::Vector{Vector{T}}
     next_batch::Int
@@ -423,9 +520,48 @@ function validate_first_order_gramis_causal_rounds()
     )
 end
 
+function validate_first_order_gramis_estimator_identity()
+    counts = [4, 3, 3]
+    total = sum(counts)
+    proposals = Rational{Int}[
+        1//2 1//4 1//4
+        1//4 1//2 1//4
+        1//4 1//4 1//2
+    ]
+    pi_h = Rational{Int}[2//5, -1//7, 3//11]
+    psi = [
+        sum((counts[slot] // total) * proposals[slot, point] for slot in 1:3) for
+        point in 1:3
+    ]
+    pointwise = [
+        sum(
+            (counts[slot] // total) * proposals[slot, point] *
+            pi_h[point] / psi[point] for slot in 1:3
+        ) for point in 1:3
+    ]
+    @test vec(sum(proposals; dims=2)) == fill(1//1, 3)
+    @test pointwise == pi_h
+    @test sum(pointwise) == 204//385
+
+    round_sizes = [10, 13]
+    round_sums = Rational{Int}[17//6, -5//4]
+    combined = sum(
+        (round_sizes[round] // sum(round_sizes)) *
+        (round_sums[round] / round_sizes[round]) for round in 1:2
+    )
+    @test combined == sum(round_sums) / sum(round_sizes) == 19//276
+    return (
+        conditional_unbiasedness=:exact_finite_law,
+        unequal_round_combination=:all_sample_average,
+        status=:passed,
+    )
+end
+
 if abspath(PROGRAM_FILE) == @__FILE__
     display((
         repulsion=validate_first_order_gramis_repulsion(),
+        covariance=validate_first_order_gramis_covariance_rules(),
         causal_rounds=validate_first_order_gramis_causal_rounds(),
+        estimator_identity=validate_first_order_gramis_estimator_identity(),
     ))
 end

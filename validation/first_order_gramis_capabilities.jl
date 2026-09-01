@@ -6,6 +6,8 @@ using Pkg
 using Random
 using Test
 
+include(joinpath(@__DIR__, "first_order_gramis_capability_contract.jl"))
+
 const IS = ImportanceSamplers
 const GRAMIS_CUDA_VALIDATION_SEED = 0x4752414d49534355
 const GRAMIS_CUDA_EXECUTION_SEED = 0x4752414d49534532
@@ -31,6 +33,7 @@ function gram_is_validation_source_provenance(; required=false)
 end
 
 const GRAMIS_CUDA_SOURCE = gram_is_validation_source_provenance(required=true)
+const GRAMIS_CAPABILITY_ROWS = checked_first_order_gramis_capability_rows()
 
 struct CUDAFirstOrderGRAMISTarget{T} end
 struct CUDAFirstOrderGRAMISGradient end
@@ -229,16 +232,15 @@ end
 
 
 function gram_is_cuda_preflight(::Type{T}) where {T}
-    bank = ProposalBank([
-        FactorGaussian(T[-1, 0], T[1 0; 0.1 0.8]),
-        FactorGaussian(T[1, 0], T[0.9 0; -0.2 1.1]),
-    ])
+    row = only(filter(
+        candidate -> candidate.type === T &&
+                     candidate.gradient === :explicit_inplace,
+        GRAMIS_CAPABILITY_ROWS,
+    ))
+    bank = first_order_gramis_capability_bank(T)
     source = prepare_sampler(
         Random.Xoshiro(GRAMIS_CUDA_VALIDATION_SEED),
-        LogTarget(
-            CUDAFirstOrderGRAMISTarget{T}();
-            grad=CUDAFirstOrderGRAMISGradient(),
-        ),
+        first_order_gramis_capability_target(row),
         FirstOrderGRAMIS(
             bank;
             rounds=1,
@@ -271,10 +273,12 @@ function gram_is_cuda_sampler(
     device=:cuda,
     round_two_failure=false,
 ) where {T}
-    bank = ProposalBank([
-        FactorGaussian(T[-1, 0], T[1 0; 0.1 0.8]),
-        FactorGaussian(T[1, 0], T[0.9 0; -0.2 1.1]),
-    ])
+    bank = first_order_gramis_capability_bank(T)
+    row = only(filter(
+        candidate -> candidate.type === T &&
+                     candidate.gradient === :explicit_inplace,
+        GRAMIS_CAPABILITY_ROWS,
+    ))
     gradient = round_two_failure ?
                CUDAFirstOrderGRAMISRoundTwoFailureGradient{T}((
                    -one(T),
@@ -284,10 +288,10 @@ function gram_is_cuda_sampler(
              LogTarget(
         CUDAFirstOrderGRAMISMeanOnlyTarget{T}((-one(T), one(T)));
         grad=CUDAFirstOrderGRAMISZeroGradient(),
-    ) : LogTarget(
+    ) : round_two_failure ? LogTarget(
         CUDAFirstOrderGRAMISTarget{T}();
         grad=gradient,
-    )
+    ) : first_order_gramis_capability_target(row)
     source = prepare_sampler(
         Random.Xoshiro(GRAMIS_CUDA_EXECUTION_SEED),
         target,
@@ -413,6 +417,39 @@ function gram_is_multi_device_restoration_test()
 end
 
 CUDA.allowscalar(false)
+
+@testset "FirstOrderGRAMIS shared capability contract" begin
+    caller_device = CUDA.device()
+    @test CUDA.name(caller_device) == FIRST_ORDER_GRAMIS_CUDA_HARDWARE
+    @test Tuple(
+        (row.type, row.gradient) for row in GRAMIS_CAPABILITY_ROWS
+        if row.cuda.status === :supported
+    ) == ((Float32, :explicit_inplace), (Float64, :explicit_inplace))
+    for (row_index, row) in enumerate(GRAMIS_CAPABILITY_ROWS)
+        row.cpu.status === :supported || continue
+        row.cuda.status === :rejected || continue
+        source = prepare_sampler(
+            Random.Xoshiro(GRAMIS_CUDA_VALIDATION_SEED + row_index),
+            first_order_gramis_capability_target(row),
+            FirstOrderGRAMIS(
+                first_order_gramis_capability_bank(row.type);
+                rounds=1,
+                round_size=8,
+                repulsion_strength=zero(row.type),
+            );
+            threaded=true,
+        )
+        rejection = try
+            gram_is_cuda_device()(source)
+            nothing
+        catch error
+            error
+        end
+        @test rejection isa SamplerDeviceError
+        @test rejection.reason === row.cuda.reason
+    end
+    @test CUDA.device() == caller_device
+end
 
 @testset "FirstOrderGRAMIS CUDA population Cholesky capabilities" begin
     caller_device = CUDA.device()
@@ -616,9 +653,14 @@ end
 end
 @testset "FirstOrderGRAMIS CUDA end-to-end sampler" begin
     caller_device = CUDA.device()
-    for (T, strength) in ((Float32, 0f0), (Float64, 0.1))
+    for row in GRAMIS_CAPABILITY_ROWS
+        row.cuda.status === :supported || continue
+        T = row.type
+        strength = T === Float32 ? zero(T) : T(0.1)
         sampler = gram_is_cuda_sampler(T; repulsion_strength=strength)
         result = importance_sample!(sampler)
+        @test eltype(result.samples) === T
+        @test eltype(result.logweights) === T
         @test result.diagnostics.transfers.count <= 192
         @test result.diagnostics.transfers.bytes <= 4_096
         @test IS._backend_state_resident(
@@ -740,7 +782,20 @@ const GRAMIS_CUDA_CAPABILITY_RESULT = (
     status=:passed,
     environment=gram_is_cuda_validation_environment(),
     coverage=(
-        scalar_types=(Float32, Float64),
+        scalar_types=Tuple(
+            row.type for row in GRAMIS_CAPABILITY_ROWS
+            if row.cuda.status === :supported
+        ),
+        capability_rows=Tuple((
+            label=row.label,
+            type=row.type,
+            gradient=row.gradient,
+            cuda_status=row.cuda.status,
+            cuda_reason=row.cuda.reason,
+            hardware=row.cuda.hardware,
+            context=row.cuda.context,
+            evidence=row.cuda.evidence,
+        ) for row in GRAMIS_CAPABILITY_ROWS),
         residence=true,
         cpu_reference_agreement=true,
         all_zero_fallback=true,

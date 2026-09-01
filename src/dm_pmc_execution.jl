@@ -219,7 +219,10 @@ function _importance_sample_cpu!(
         method=:deterministic_mixture_pmc,
         execution=_execution_name(execution),
         threaded=sampler.threaded,
-        factor_execution_policy=_factor_execution_name(sampler.factor_execution),
+        factor_execution_policy=_factor_execution_name(
+            sampler.device,
+            sampler.factor_execution,
+        ),
         rounds=sampler.algorithm.rounds,
         round_sizes=collect(plan.schedule),
         round_ess=round_ess,

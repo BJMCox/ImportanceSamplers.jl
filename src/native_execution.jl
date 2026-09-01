@@ -192,9 +192,27 @@ end
 
 _factor_batch_supported(device) = false
 _factor_batch_supported(::MLDataDevices.AbstractCPUDevice) = true
+_resolved_factor_execution(::MLDataDevices.AbstractCPUDevice, ::_DefaultFactorExecution) =
+    FusedFactorExecution()
+_resolved_factor_execution(device, ::_DefaultFactorExecution) =
+    _factor_batch_supported(device) ? BatchedFactorExecution() :
+    FusedFactorExecution()
+_resolved_factor_execution(device, factor_execution) = factor_execution
+_factor_execution_name(device, ::_DefaultFactorExecution) =
+    _factor_execution_name(
+        _resolved_factor_execution(device, _DefaultFactorExecution()),
+    )
+_factor_execution_name(device, factor_execution) =
+    _factor_execution_name(factor_execution)
 _use_factor_batch_path(device, source, ::FusedFactorExecution) = false
 _use_factor_batch_path(device, source, ::BatchedFactorExecution) =
     _factor_batch_supported(device)
+_use_factor_batch_path(device, source, ::_DefaultFactorExecution) =
+    _use_factor_batch_path(
+        device,
+        source,
+        _resolved_factor_execution(device, _DefaultFactorExecution()),
+    )
 
 @inline function _packed_gaussian_logdensity!(
     bank::Union{_PackedFactorGaussianBank,_AMISFactorHistory},

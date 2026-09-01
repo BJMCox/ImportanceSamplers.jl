@@ -277,7 +277,6 @@ struct UnsupportedFactorExecution <: ImportanceSamplers._AbstractFactorExecution
 
     @test getfield(identity_sampler, :rng) === identity_rng
     @test getfield(identity_sampler, :device) isa MLDataDevices.CPUDevice
-    @test getfield(identity_sampler, :factor_execution) isa FusedFactorExecution
     @test getfield(identity_sampler, :threaded) === false
     @test nameof(typeof(identity_sampler)) ∉ names(ImportanceSamplers)
 

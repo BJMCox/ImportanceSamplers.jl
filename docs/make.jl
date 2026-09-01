@@ -10,6 +10,12 @@ include(joinpath(@__DIR__, "..", "validation", "cuda_plain_is_capabilities.jl"))
 include(joinpath(@__DIR__, "..", "validation", "static_mis_capabilities.jl"))
 include(joinpath(@__DIR__, "..", "validation", "dm_pmc_capabilities.jl"))
 include(joinpath(@__DIR__, "..", "validation", "amis_capabilities.jl"))
+include(joinpath(
+    @__DIR__,
+    "..",
+    "validation",
+    "first_order_gramis_capability_contract.jl",
+))
 
 struct CapabilityGaussian end
 
@@ -352,6 +358,69 @@ end
 const DM_PMC_CAPABILITY_TABLE = checked_dm_pmc_capability_table()
 const AMIS_CAPABILITY_TABLE = Markdown.parse(checked_amis_capability_table())
 
+function checked_first_order_gramis_capability_table()
+    rows = checked_first_order_gramis_capability_rows()
+    table_rows = map(enumerate(rows)) do (row_index, row)
+        bank = first_order_gramis_capability_bank(row.type)
+        for threaded in (false, true)
+            sampler = prepare_sampler(
+                Xoshiro(0x4752414d49530000 + 2row_index + threaded),
+                first_order_gramis_capability_target(row),
+                FirstOrderGRAMIS(
+                    bank;
+                    rounds=2,
+                    round_size=8,
+                    repulsion_strength=zero(row.type),
+                );
+                threaded,
+            )
+            for call in 1:2
+                result = importance_sample!(sampler)
+                length(result) == 16 || error(
+                    "FirstOrderGRAMIS CPU row $(row.label), call $call returned " *
+                    "the wrong count",
+                )
+                eltype(result.samples) === row.type || error(
+                    "FirstOrderGRAMIS CPU row $(row.label) changed sample type",
+                )
+                eltype(result.logweights) === row.type || error(
+                    "FirstOrderGRAMIS CPU row $(row.label) changed weight type",
+                )
+                result.diagnostics.round_sizes == [8, 8] || error(
+                    "FirstOrderGRAMIS CPU row $(row.label) changed its schedule",
+                )
+            end
+            proposal = current_proposal(sampler)
+            all(
+                candidate -> eltype(candidate.location) === row.type,
+                proposal.proposals,
+            ) || error(
+                "FirstOrderGRAMIS CPU row $(row.label) changed proposal type",
+            )
+        end
+
+        gradient = (
+            explicit_inplace="explicit in-place",
+            explicit_outofplace="explicit out-of-place",
+            logdensityproblems="bare first-order LogDensityProblems",
+        )[row.gradient]
+        cuda_contract = row.cuda.status === :supported ?
+                        "context-free explicit in-place support" :
+                        "rejection `$(row.cuda.reason)`"
+        cuda = "A100 validator contract: $cuda_contract; " *
+               "not validated for this revision"
+        return "| `$(row.type)` | $gradient | serial, threaded request, and " *
+               "repeated prepared execution | $cuda |"
+    end
+    return Markdown.parse(
+        "| Scalar type | Gradient form | Docs-build CPU evidence | CUDA validator contract |\n" *
+        "|:--|:--|:--|:--|\n" * join(table_rows, '\n'),
+    )
+end
+
+const FIRST_ORDER_GRAMIS_CAPABILITY_TABLE =
+    checked_first_order_gramis_capability_table()
+
 makedocs(
     modules=[ImportanceSamplers],
     sitename="ImportanceSamplers.jl",
@@ -370,6 +439,7 @@ makedocs(
             "Static multiple importance sampling" => "methods/static_mis.md",
             "Adaptive multiple importance sampling" => "methods/amis.md",
             "Deterministic-mixture population Monte Carlo" => "methods/dm_pmc.md",
+            "First-order GRAMIS-CAIS" => "methods/first_order_gramis.md",
         ],
         "Guides" => [
             "Native proposals" => "guide/native_proposals.md",
@@ -385,6 +455,7 @@ makedocs(
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/validation/reproducers/(cuda_)?static_mis\.jl$",
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/dm_pmc|examples/(dm_pmc|numerical_integration)|validation/reproducers/(cuda_dm_pmc|dm_pmc_global))\.jl$",
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/amis|examples/amis|validation/reproducers/(cuda_)?amis)\.jl$",
+        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(examples/first_order_gramis|validation/reproducers/(cuda_)?first_order_gramis)\.jl$",
     ],
     warnonly=false,
 )

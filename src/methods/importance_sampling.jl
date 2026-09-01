@@ -189,6 +189,8 @@ end
 
 abstract type _AbstractFactorExecution end
 
+struct _DefaultFactorExecution <: _AbstractFactorExecution end
+
 """
     FusedFactorExecution()
 
@@ -210,9 +212,14 @@ _factor_execution_name(::FusedFactorExecution) = :fused
 _factor_execution_name(::BatchedFactorExecution) = :batched
 
 function _validate_factor_execution(factor_execution)
-    factor_execution isa Union{FusedFactorExecution,BatchedFactorExecution} || throw(
+    isnothing(factor_execution) && return _DefaultFactorExecution()
+    factor_execution isa Union{
+        _DefaultFactorExecution,
+        FusedFactorExecution,
+        BatchedFactorExecution,
+    } || throw(
         ArgumentError(
-            "factor_execution must be FusedFactorExecution() or " *
+            "factor_execution must be nothing, FusedFactorExecution(), or " *
             "BatchedFactorExecution()",
         ),
     )
@@ -234,9 +241,9 @@ end
 
 """
     prepare_sampler(rng, logtarget, algorithm;
-                    factor_execution=FusedFactorExecution(), threaded=true)
+                    factor_execution=nothing, threaded=true)
     prepare_sampler(rng, logtarget, p, algorithm;
-                    factor_execution=FusedFactorExecution(), threaded=true)
+                    factor_execution=nothing, threaded=true)
 
 Bind a target, optional context `p`, algorithm, CPU execution policy, and RNG
 into a reusable prepared sampler.
@@ -264,16 +271,15 @@ Native CUDA execution requires `threaded=true` and keeps returned arrays on the
 device. Set `threaded=false` for serial CPU evaluation. On CPU,
 `threaded=true` falls back to serial execution when Julia has one default
 thread; accelerator launch policy does not depend on host thread count.
-`factor_execution=FusedFactorExecution()` selects the stable default factor
-path. Use `BatchedFactorExecution()` to request batched factor-Gaussian matrix
-operations when supported; other cases use the fused path. Benchmark that
-explicit choice locally.
+The default factor path is fused on CPU and batched on accelerators that support
+factor batching. Use `FusedFactorExecution()` or `BatchedFactorExecution()` to
+override that choice; unsupported batched cases use the fused path.
 """
 function prepare_sampler(
     rng::Random.AbstractRNG,
     logtarget,
     algorithm::AbstractImportanceSampler;
-    factor_execution=FusedFactorExecution(),
+    factor_execution=nothing,
     threaded=true,
 )
     target = _PreparedLogTarget(
@@ -296,7 +302,7 @@ function prepare_sampler(
     logtarget,
     context,
     algorithm::AbstractImportanceSampler;
-    factor_execution=FusedFactorExecution(),
+    factor_execution=nothing,
     threaded=true,
 )
     target = _PreparedLogTarget(
@@ -709,9 +715,9 @@ end
 
 """
     importance_sample(rng, logtarget, algorithm;
-                      factor_execution=FusedFactorExecution(), threaded=true)
+                      factor_execution=nothing, threaded=true)
     importance_sample(rng, logtarget, p, algorithm;
-                      factor_execution=FusedFactorExecution(), threaded=true)
+                      factor_execution=nothing, threaded=true)
 
 Run one complete importance-sampling estimator.
 
@@ -728,7 +734,7 @@ function importance_sample(
     rng::Random.AbstractRNG,
     logtarget,
     algorithm::AbstractImportanceSampler;
-    factor_execution=FusedFactorExecution(),
+    factor_execution=nothing,
     threaded=true,
 )
     sampler = prepare_sampler(
@@ -746,7 +752,7 @@ function importance_sample(
     logtarget,
     context,
     algorithm::AbstractImportanceSampler;
-    factor_execution=FusedFactorExecution(),
+    factor_execution=nothing,
     threaded=true,
 )
     sampler = prepare_sampler(
@@ -809,7 +815,10 @@ function _importance_sample_cpu!(sampler, ::_SingleProposalMethodState, threaded
         method=:importance_sampling,
         execution=_execution_name(execution),
         threaded=sampler.threaded,
-        factor_execution_policy=_factor_execution_name(sampler.factor_execution),
+        factor_execution_policy=_factor_execution_name(
+            sampler.device,
+            sampler.factor_execution,
+        ),
         nsamples=sampler.algorithm.nsamples,
         failures=0,
         transfers=transfers,

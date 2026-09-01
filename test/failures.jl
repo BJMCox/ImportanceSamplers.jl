@@ -1379,7 +1379,15 @@ struct GRAMISDerivativeFailureGradient{T}
     value::T
 end
 
+struct GRAMISOrderedBacktrackingFailureTarget{T} end
+
 (target::GRAMISDerivativeFailureValue)(sample) = target.value
+
+function (::GRAMISOrderedBacktrackingFailureTarget{T})(sample) where {T}
+    value = only(sample)
+    (value == T(10.5) || value == T(0.25)) && return T(NaN)
+    return T(-Inf)
+end
 
 function (gradient::GRAMISDerivativeFailureGradient)(destination, sample)
     fill!(destination, gradient.value)
@@ -1529,6 +1537,43 @@ end
                 @test failure.reason === :candidate_value_nonfinite
             end
         end
+    end
+
+    T = Float64
+    locations = reshape(T[0, 10], 1, :)
+    candidate_locations = similar(locations)
+    frozen_values = zeros(T, 2)
+    candidate_values = similar(frozen_values)
+    active_mask = similar(frozen_values, Bool)
+    steps = similar(frozen_values)
+    trials = similar(frozen_values, Int)
+    failure_record = ImportanceSamplers._DeviceFailureRecord(zeros(UInt64, 3))
+    transfers = ImportanceSamplers._ResultTransferCounter(0, 0)
+    failure = caught_exception() do
+        ImportanceSamplers._backtrack_means!(
+            candidate_locations,
+            candidate_values,
+            active_mask,
+            steps,
+            trials,
+            GRAMISOrderedBacktrackingFailureTarget{T}(),
+            frozen_values,
+            locations,
+            ones(T, 1, 2),
+            3,
+            ImportanceSamplers._KernelExecution(
+                ImportanceSamplers._SerialCPUExecution(),
+            );
+            device=:test,
+            failure_record,
+            transfers,
+        )
+    end
+    @test failure isa ImportanceSamplers._FirstOrderGRAMISDerivativeError
+    if failure isa ImportanceSamplers._FirstOrderGRAMISDerivativeError
+        @test failure.proposal_slot == 2
+        @test failure.reason === :candidate_value_nonfinite
+        @test isnan(failure.value)
     end
 end
 
