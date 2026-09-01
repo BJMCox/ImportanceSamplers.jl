@@ -698,6 +698,44 @@ function run_static_mis_prefilled_factor_batch(
     return (; samples, logweights, proposal_ids, failure_storage)
 end
 
+@testset "batched factor execution accepts capacity-sized solve scratch" begin
+    T = Float64
+    bank = ISK._pack_native_gaussian_bank(ProposalBank([
+        FactorGaussian(T[-1, 1], T[1 0; 0.5 2]),
+        FactorGaussian(T[1, -1], T[2 0; -0.5 1]),
+    ]))
+    assignments = [1, 2, 1]
+    sample_count = length(assignments)
+    capacity = sample_count + 2
+    normals = T[1, -2, -1, 2, 0.5, -0.5, 7, 8, 9, 10]
+    samples = Matrix{T}(undef, 2, sample_count)
+    logweights = Vector{T}(undef, sample_count)
+    proposal_ids = Vector{Int}(undef, sample_count)
+    failures = zeros(UInt64, 3)
+    solve_scratch = ISK._allocate_mis_solve_scratch(normals, bank, capacity)
+    target = ISK._NativeDeviceTarget{T,StaticMISKernelVectorTarget{T}}(
+        StaticMISKernelVectorTarget{T}(),
+    )
+
+    ISK._launch_factor_batch_mis_round!(
+        samples,
+        ISK._MISRoundOutput(logweights, proposal_ids),
+        failures,
+        normals,
+        target,
+        bank,
+        assignments,
+        ISK._FullMixtureDenominator(),
+        solve_scratch,
+        ISK._SerialCPUExecution(),
+    )
+
+    @test all(isfinite, samples)
+    @test all(isfinite, logweights)
+    @test proposal_ids == [1, 2, 1]
+    @test iszero(failures)
+end
+
 function static_mis_prefilled_launch_allocated!(
     result,
     bank,

@@ -339,6 +339,7 @@ function _launch_prefilled_amis_factor_batch!(
                 execution,
                 new_round_ids,
                 new_round_ids,
+                nothing,
             )
         end
 
@@ -357,6 +358,7 @@ function _launch_prefilled_amis_factor_batch!(
             execution,
             current_round_ids,
             current_round_ids,
+            nothing,
         )
 
         KernelAbstractions.synchronize(backend)
@@ -722,7 +724,11 @@ function _fit_amis_proposal!(
         variance += abs2(centered)
     end
     previous_variance = abs2(@inbounds(history.scales[previous_slot]))
-    variance += sqrt(eps(T)) * previous_variance
+    variance += _scale_aware_ridge(
+        previous_variance,
+        1,
+        sqrt(eps(T)),
+    )
     workspace.covariance[1] = variance
 
     phase = :factorization
@@ -776,7 +782,11 @@ function _fit_amis_proposal!(
     @inbounds for column in 1:dimension, row in column:dimension
         previous_trace += abs2(history.factors[row, column, previous_slot])
     end
-    ridge = sqrt(eps(T)) * previous_trace / T(dimension)
+    ridge = _scale_aware_ridge(
+        previous_trace,
+        dimension,
+        sqrt(eps(T)),
+    )
     @inbounds for coordinate in 1:dimension
         covariance[coordinate, coordinate] += ridge
     end
@@ -821,7 +831,12 @@ function _amis_potrf!(
 end
 
 @kernel function _add_amis_scalar_ridge_kernel!(covariance, scales, previous_slot)
-    covariance[1] += sqrt(eps(eltype(covariance))) * abs2(scales[previous_slot])
+    T = eltype(covariance)
+    covariance[1] += _scale_aware_ridge(
+        abs2(scales[previous_slot]),
+        1,
+        sqrt(eps(T)),
+    )
 end
 
 @kernel function _add_amis_factor_ridge_kernel!(
@@ -835,7 +850,11 @@ end
     for column in 1:dimension, row in column:dimension
         previous_trace += abs2(factors[row, column, previous_slot])
     end
-    ridge = sqrt(eps(T)) * previous_trace / T(dimension)
+    ridge = _scale_aware_ridge(
+        previous_trace,
+        dimension,
+        sqrt(eps(T)),
+    )
     for coordinate in 1:dimension
         covariance[coordinate, coordinate] += ridge
     end

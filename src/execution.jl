@@ -86,6 +86,10 @@ function _logweight_summary(
         eltype(logweights),
         Val(:logweight_maximum),
     )
+    maximum_logweight == eltype(logweights)(-Inf) && return (
+        ess=zero(eltype(logweights)),
+        lognormalizer=eltype(logweights)(-Inf),
+    )
     scaled_sum = mapreduce(
         value -> exp(value - maximum_logweight),
         +,
@@ -129,6 +133,14 @@ end
         ess=abs2(scaled_sum) / scaled_square_sum,
         lognormalizer=maximum_logweight + log(scaled_sum) - log(T(sample_count)),
     )
+end
+
+@inline function _scale_aware_ridge(
+    previous_trace,
+    dimension,
+    regularization::T,
+) where {T}
+    return regularization * previous_trace / T(dimension)
 end
 
 struct _KernelExecution{E}

@@ -608,6 +608,8 @@ end
 
 _native_workgroupsize(::_SerialCPUExecution, nsamples) = nsamples
 _native_workgroupsize(::_ThreadedCPUExecution, nsamples) = nothing
+@inline _native_workgroupsize(execution::_KernelExecution, nsamples) =
+    _native_workgroupsize(execution.cpu_execution, nsamples)
 
 _native_failure_location(::_NoSampleTransform, block) = nothing
 _native_failure_location(::_NativeScalarTransform, block) = nothing
@@ -765,6 +767,9 @@ function _launch_native_factor_batch!(
         zero(eltype(logweights)),
         failure_record.storage,
         execution,
+        nothing,
+        nothing,
+        nothing,
     )
     backend = KernelAbstractions.get_backend(normal_buffer)
     finish_kernel = _native_factor_batch_finish_kernel!(backend)

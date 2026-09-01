@@ -22,8 +22,28 @@ end
 
 _resolve_adaptive_schedule(rounds, round_size::Int) = fill(round_size, rounds)
 _resolve_adaptive_schedule(rounds, round_size::Vector{Int}) = copy(round_size)
-_adaptive_sample_budget(rounds, round_size::Int) = rounds * round_size
-_adaptive_sample_budget(rounds, round_size::Vector{Int}) = sum(round_size)
+
+function _adaptive_sample_budget(rounds, round_size::Int)
+    return try
+        Base.checked_mul(rounds, round_size)
+    catch error
+        error isa OverflowError || rethrow()
+        throw(ArgumentError("total adaptive sample count exceeds Int"))
+    end
+end
+
+function _adaptive_sample_budget(rounds, round_size::Vector{Int})
+    total = 0
+    for count in round_size
+        total = try
+            Base.checked_add(total, count)
+        catch error
+            error isa OverflowError || rethrow()
+            throw(ArgumentError("total adaptive sample count exceeds Int"))
+        end
+    end
+    return total
+end
 
 """
     DeterministicMixturePMC(bank; rounds, round_size)
@@ -198,7 +218,7 @@ function _dm_pmc_with_location(proposal::_GaussianProposal, location)
     )
 end
 
-struct _DMPMCAllocationPlan{S,C,A,L,O}
+struct _DeterministicAllocationPlan{S,C,A,L,O}
     schedule::S
     counts::C
     assignments::A
@@ -208,8 +228,37 @@ end
 
 mutable struct _PreparedDMPMC{B,P,W}
     bank::B
+    run_bank::B
     plan::P
     workspace::W
+end
+
+function _dm_pmc_with_locations(bank::_PackedDiagonalGaussianBank, locations)
+    return _PackedDiagonalGaussianBank(
+        locations,
+        bank.scales,
+        bank.lognormalizers,
+        bank.logmasses,
+        bank.cdf,
+        bank.proposal_ids,
+        bank.layout,
+    )
+end
+
+function _dm_pmc_with_locations(bank::_PackedFactorGaussianBank, locations)
+    return _PackedFactorGaussianBank(
+        locations,
+        bank.factors,
+        bank.lognormalizers,
+        bank.logmasses,
+        bank.cdf,
+        bank.proposal_ids,
+    )
+end
+
+function _dm_pmc_run_bank(bank)
+    locations = similar(bank.locations)
+    return _dm_pmc_with_locations(bank, locations)
 end
 
 _accelerator_method_state_limit(
@@ -338,9 +387,16 @@ function _dm_pmc_round_counts(
     return counts
 end
 
-function _dm_pmc_allocation_plan(bank, active_masses, schedule)
+function _deterministic_allocation_plan(bank, active_masses, schedule)
     active_count = length(bank.proposal_ids)
     rounds = length(schedule)
+    sample_budget = _adaptive_sample_budget(rounds, schedule)
+    try
+        Base.checked_add(1, sample_budget)
+    catch error
+        error isa OverflowError || rethrow()
+        throw(ArgumentError("adaptive allocation offsets exceed Int"))
+    end
     counts = Matrix{Int}(undef, active_count, rounds)
     assignments = zeros(Int, maximum(schedule), rounds)
     logcoefficients = Matrix{eltype(active_masses)}(undef, active_count, rounds)
@@ -376,7 +432,7 @@ function _dm_pmc_allocation_plan(bank, active_masses, schedule)
         offsets[round + 1] = offsets[round] + round_size
     end
 
-    return _DMPMCAllocationPlan(
+    return _DeterministicAllocationPlan(
         schedule,
         counts,
         assignments,
@@ -389,7 +445,7 @@ function _prepare_dm_pmc_state(algorithm::DeterministicMixturePMC)
     schedule = _resolve_adaptive_schedule(algorithm.rounds, algorithm.round_size)
     bank = _prepare_dm_pmc_bank(algorithm.bank)
     active_masses = algorithm.bank.masses[bank.proposal_ids]
-    plan = _dm_pmc_allocation_plan(bank, active_masses, schedule)
+    plan = _deterministic_allocation_plan(bank, active_masses, schedule)
     return bank, plan
 end
 
@@ -400,7 +456,7 @@ function _prepare_method_state(algorithm::DeterministicMixturePMC)
         plan,
         eltype(bank.lognormalizers),
     )
-    return _PreparedDMPMC(bank, plan, workspace)
+    return _PreparedDMPMC(bank, _dm_pmc_run_bank(bank), plan, workspace)
 end
 
 function _prepare_method_state(algorithm::DeterministicMixturePMC, prepared_target)
@@ -413,7 +469,7 @@ function _prepare_method_state(algorithm::DeterministicMixturePMC, prepared_targ
         typeof(binding_sample),
     )
     workspace = _allocate_dm_pmc_workspace(bank, plan, log_type)
-    return _PreparedDMPMC(bank, plan, workspace)
+    return _PreparedDMPMC(bank, _dm_pmc_run_bank(bank), plan, workspace)
 end
 
 function _allocate_random_buffers(
@@ -471,9 +527,10 @@ function _prepare_transferred_method_state(
     device,
     algorithm::DeterministicMixturePMC,
     method_state::_PreparedDMPMC,
+    _transferred_target,
 )
     plan = method_state.plan
-    transferred_plan = _DMPMCAllocationPlan(
+    transferred_plan = _DeterministicAllocationPlan(
         Tuple(plan.schedule),
         _copy_to_device(device, plan.counts),
         _copy_to_device(device, plan.assignments),
@@ -490,8 +547,10 @@ function _prepare_transferred_method_state(
         _copy_to_device(device, workspace.ancestors),
         _copy_to_device(device, workspace.candidate_locations),
     )
+    transferred_bank = _copy_packed_gaussian_bank(device, method_state.bank)
     return _PreparedDMPMC(
-        _copy_packed_gaussian_bank(device, method_state.bank),
+        transferred_bank,
+        _dm_pmc_run_bank(transferred_bank),
         transferred_plan,
         transferred_workspace,
     )
@@ -536,7 +595,7 @@ function _preflight_accelerator_method(
 
     round_kernel = _mis_round_launch_kernel!(backend)
     denominator =
-        _DMPMCRoundDenominator(plan.logcoefficients, representative_round)
+        _RealizedMixtureDenominator(plan.logcoefficients, representative_round)
     for argument in (
         round_views.samples,
         round_views.logweights,

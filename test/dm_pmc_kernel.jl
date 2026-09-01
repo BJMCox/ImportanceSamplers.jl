@@ -9,7 +9,60 @@ const DMPMCKernelIS = ImportanceSamplers
 @testset "DM-PMC private execution types" begin
     @test isdefined(DMPMCKernelIS, :_DMPMCRandomBuffers)
     @test isdefined(DMPMCKernelIS, :_DMPMCWorkspace)
-    @test isdefined(DMPMCKernelIS, :_DMPMCRoundDenominator)
+    @test isdefined(DMPMCKernelIS, :_RealizedMixtureDenominator)
+end
+
+@testset "realized mixture denominator characterization" begin
+    for T in (Float32, Float64)
+        bank = DMPMCKernelIS._pack_native_gaussian_bank(
+            ProposalBank(
+                [SphericalGaussian(T(-1), one(T)), SphericalGaussian(T(1), one(T))],
+                T[1, 1],
+            ),
+        )
+        logcoefficients = T[
+            log(T(3) / T(4)) log(T(1) / T(4))
+            log(T(1) / T(4)) log(T(3) / T(4))
+        ]
+        left = DMPMCKernelIS._RealizedMixtureDenominator(logcoefficients, 1)
+        right = DMPMCKernelIS._RealizedMixtureDenominator(logcoefficients, 2)
+        sample = T[-1]
+        no_scratch = DMPMCKernelIS._NoMISSolveScratch()
+        left_value, left_generating, left_reason =
+            DMPMCKernelIS._mis_logdenominator_core(
+                T,
+                bank,
+                left,
+                1,
+                sample,
+                no_scratch,
+                1,
+            )
+        right_value, right_generating, right_reason =
+            DMPMCKernelIS._mis_logdenominator_core(
+                T,
+                bank,
+                right,
+                1,
+                sample,
+                no_scratch,
+                1,
+            )
+        lognormalizer = -T(0.5) * log(T(2pi))
+
+        @test DMPMCKernelIS._factor_batch_logcoefficients(bank, left) ==
+              view(logcoefficients, :, 1)
+        @test DMPMCKernelIS._mis_term_bounds(bank, left, 1) == (1, 2)
+        @test DMPMCKernelIS._mis_denominator_term(T, bank, left, 2) ==
+              (2, logcoefficients[2, 1])
+        @test left_value ≈
+              lognormalizer + log(T(3) / T(4) + T(1) / T(4) * exp(T(-2)))
+        @test right_value ≈
+              lognormalizer + log(T(1) / T(4) + T(3) / T(4) * exp(T(-2)))
+        @test left_generating == right_generating == lognormalizer
+        @test iszero(left_reason)
+        @test iszero(right_reason)
+    end
 end
 
 function run_dm_pmc_prefilled_round(bank, normals, assignments, target, execution)
@@ -18,7 +71,7 @@ function run_dm_pmc_prefilled_round(bank, normals, assignments, target, executio
     logweights = Vector{T}(undef, length(assignments))
     proposal_ids = Vector{Int}(undef, length(assignments))
     failure_storage = zeros(UInt64, 3)
-    denominator = DMPMCKernelIS._DMPMCRoundDenominator(
+    denominator = DMPMCKernelIS._RealizedMixtureDenominator(
         reshape(T[log(T(3) / T(4)), log(T(1) / T(4))], 2, 1),
         1,
     )
@@ -50,7 +103,7 @@ function dm_pmc_prefilled_launch_allocated!(
     target,
 )
     T = eltype(result.logweights)
-    denominator = DMPMCKernelIS._DMPMCRoundDenominator(
+    denominator = DMPMCKernelIS._RealizedMixtureDenominator(
         reshape(T[log(T(3) / T(4)), log(T(1) / T(4))], 2, 1),
         1,
     )
@@ -227,13 +280,16 @@ end
         concentrated = DMPMCKernelIS._logweight_summary(
             T[floatmax(T), -floatmax(T)],
         )
+        all_zero = DMPMCKernelIS._logweight_summary(T[-Inf, -Inf])
 
         @test equal_positive.ess === T(2)
         @test equal_negative.ess === T(2)
         @test concentrated.ess === one(T)
+        @test all_zero.ess === zero(T)
         @test isfinite(equal_positive.lognormalizer)
         @test isfinite(equal_negative.lognormalizer)
         @test isfinite(concentrated.lognormalizer)
+        @test all_zero.lognormalizer === T(-Inf)
     end
 end
 

@@ -84,10 +84,10 @@ resolved round sizes, per-round log normalizers, and per-round normalized-weight
 concentration ESS. This ESS describes weight concentration; it is not a
 variance-equivalent sample count or an automatic stopping rule.
 
-A failed round is not partially committed or resampled. [`DMPMCRoundError`](@ref)
-records its round, phase, cause, and committed-round count. The sampler retains
-the last committed population and its RNG remains advanced. Earlier returned
-results remain unchanged after both later successes and failures.
+A failed call does not commit its run population. [`DMPMCRoundError`](@ref)
+records its round, phase, cause, and completed-round count. The sampler retains
+its pre-call population while its RNG remains advanced. Earlier returned results
+remain unchanged after both later successes and failures.
 
 ## Linear-normalizer guarantee
 

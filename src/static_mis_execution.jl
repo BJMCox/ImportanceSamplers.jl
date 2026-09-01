@@ -40,6 +40,7 @@ function _prepare_transferred_method_state(
         _PackedDiagonalGaussianBank,
         _PackedFactorGaussianBank,
     }},
+    _transferred_target,
 )
     transferred_bank = _copy_packed_gaussian_bank(device, method_state.bank)
     design = method_state.design
@@ -240,6 +241,7 @@ function _preflight_packed_static_mis_kernel_target(
         buffers.assignments,
         method_state.design.denominator,
         buffers.solve_scratch,
+        nothing,
     )
         _preflight_kernel_argument(device, sampling_kernel, argument)
     end
@@ -300,7 +302,7 @@ function _launch_packed_static_mis!(
     ) ? _launch_factor_batch_mis_round! : _launch_mis_round!
     launch(
         samples,
-        _MISRoundOutput(logweights, proposal_ids),
+        _MISRoundOutput(logweights, proposal_ids, nothing),
         buffers.failure_scratch.record.storage,
         buffers.normal,
         target,

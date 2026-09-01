@@ -1,5 +1,7 @@
 """
     LogTarget(logdensity)
+    LogTarget(logdensity, adtype; grad=nothing)
+    LogTarget(logdensity; grad=nothing)
 
 Mark `logdensity` as a package callable target.
 
@@ -10,8 +12,23 @@ and must return a `Float32` or `Float64` unnormalized log density. For CUDA,
 use a device-compatible callable and pass numerical arrays through `p`; opaque
 closure captures cannot be transferred reliably.
 """
-struct LogTarget{F}
+struct LogTarget{F,A<:ADTypes.AbstractADType,G}
     logdensity::F
+    adtype::A
+    grad::G
+end
+
+LogTarget(f, adtype::ADTypes.AbstractADType; grad=nothing) =
+    LogTarget(f, adtype, grad)
+LogTarget(f; grad=nothing) = LogTarget(f, ADTypes.NoAutoDiff(), grad)
+
+struct _NoTargetContext end
+
+struct _PreparedLogTarget{F,P,A<:ADTypes.AbstractADType,G}
+    logdensity::F
+    context::P
+    adtype::A
+    gradient::G
 end
 
 abstract type _BoundTarget end
@@ -33,6 +50,8 @@ struct _BoundDensityInterfaceTarget{T} <: _BoundTarget
     target::T
 end
 
+Adapt.@adapt_structure LogTarget
+Adapt.@adapt_structure _PreparedLogTarget
 Adapt.@adapt_structure _BoundContextFreeTarget
 Adapt.@adapt_structure _BoundContextualTarget
 Adapt.@adapt_structure _BoundLogDensityProblemsTarget
@@ -67,44 +86,32 @@ _copy_target_callable(device::MLDataDevices.AbstractDevice, target) =
 
 function _transfer_prepared_target(
     device::MLDataDevices.AbstractDevice,
-    target::_ContextFreePreparedTarget,
+    target::_PreparedLogTarget,
 )
-    return _ContextFreePreparedTarget(_copy_target_callable(device, target.target))
-end
-
-function _transfer_prepared_target(
-    device::MLDataDevices.AbstractDevice,
-    target::_ContextualPreparedTarget,
-)
-    return _ContextualPreparedTarget(
-        _copy_target_callable(device, target.target),
+    return _PreparedLogTarget(
+        _copy_target_callable(device, target.logdensity),
         _copy_to_device(device, target.context),
+        _copy_to_device(device, target.adtype),
+        _copy_target_callable(device, target.gradient),
     )
 end
 
 _transfer_prepared_target(device::MLDataDevices.AbstractDevice, target::_BoundTarget) =
     _copy_to_device(device, target)
 
-function _target_has_opaque_host_closure(target::_ContextFreePreparedTarget)
-    return _has_opaque_host_closure(target.target)
+function _target_has_opaque_host_closure(target::_PreparedLogTarget)
+    return _has_opaque_host_closure(target.logdensity) ||
+           _has_opaque_host_closure(target.gradient) ||
+           _has_opaque_host_closure(target.context)
 end
 
 function _target_has_opaque_host_closure(
-    target::_ContextFreePreparedTarget,
+    target::_PreparedLogTarget,
     device::MLDataDevices.AbstractDevice,
 )
-    return _target_callable_has_opaque_host_closure(target.target, device)
-end
-
-function _target_has_opaque_host_closure(target::_ContextualPreparedTarget)
-    return _has_opaque_host_closure(target.target)
-end
-
-function _target_has_opaque_host_closure(
-    target::_ContextualPreparedTarget,
-    device::MLDataDevices.AbstractDevice,
-)
-    return _target_callable_has_opaque_host_closure(target.target, device)
+    return _target_callable_has_opaque_host_closure(target.logdensity, device) ||
+           _target_callable_has_opaque_host_closure(target.gradient, device) ||
+           _has_opaque_host_closure(target.context)
 end
 
 function _target_callable_has_opaque_host_closure(
@@ -131,19 +138,14 @@ _target_has_opaque_host_closure(
     device::MLDataDevices.AbstractDevice,
 ) = _target_has_opaque_host_closure(target)
 
-function _target_transfer_rewrites_opaque_closure(
-    target::_ContextFreePreparedTarget,
-)
-    return !(target.target isa Function) &&
-           _has_opaque_host_closure(target.target)
+function _target_transfer_rewrites_opaque_closure(target::_PreparedLogTarget)
+    return _field_transfer_rewrites_opaque_closure(target.logdensity) ||
+           _field_transfer_rewrites_opaque_closure(target.gradient) ||
+           _field_transfer_rewrites_opaque_closure(target.context)
 end
 
-function _target_transfer_rewrites_opaque_closure(
-    target::_ContextualPreparedTarget,
-)
-    return !(target.target isa Function) &&
-           _has_opaque_host_closure(target.target)
-end
+_field_transfer_rewrites_opaque_closure(value) =
+    !(value isa Function) && _has_opaque_host_closure(value)
 
 function _target_transfer_rewrites_opaque_closure(target::_BoundTarget)
     return _target_has_opaque_host_closure(target)
@@ -231,11 +233,21 @@ end
 _proposal_dimension(proposal) = nothing
 
 function _prepare_target(target::LogTarget, proposal)
-    return _ContextFreePreparedTarget(target.logdensity)
+    return _PreparedLogTarget(
+        target.logdensity,
+        _NoTargetContext(),
+        target.adtype,
+        target.grad,
+    )
 end
 
 function _prepare_target(target::LogTarget, context, proposal)
-    return _ContextualPreparedTarget(target.logdensity, context)
+    return _PreparedLogTarget(
+        target.logdensity,
+        context,
+        target.adtype,
+        target.grad,
+    )
 end
 
 function _prepare_target(target, proposal)
@@ -263,11 +275,16 @@ function _prepare_target(target, proposal)
         )
     end
 
-    return _ContextFreePreparedTarget(target)
+    return _PreparedLogTarget(
+        target,
+        _NoTargetContext(),
+        ADTypes.NoAutoDiff(),
+        nothing,
+    )
 end
 
 function _prepare_target(target, context, proposal)
-    return _ContextualPreparedTarget(target, context)
+    return _PreparedLogTarget(target, context, ADTypes.NoAutoDiff(), nothing)
 end
 
 function _bind_context_free_callable(logdensity, sample)

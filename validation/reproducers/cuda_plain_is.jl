@@ -688,7 +688,7 @@ function validate_explicit_physical_device()
         end
         prepared_proposal = getfield(algorithm, :proposal)
         if case_index == 1
-            callable = getfield(prepared_target, :target)
+            callable = getfield(prepared_target, :logdensity)
             @test CUDA.device(callable.offset) == selected_device
         else
             @test CUDA.device(prepared_proposal.location) == selected_device
@@ -827,7 +827,7 @@ function validate_callable_and_view_transfers(device, ::Type{T}) where {T}
         );
         threaded=true,
     ) |> device
-    transferred_target = getfield(getfield(prepared, :target), :target)
+    transferred_target = getfield(getfield(prepared, :target), :logdensity)
     @test transferred_target isa AdaptableCUDAFunction
     @test transferred_target !== target
     @test transferred_target.offset isa CuArray{T,1}

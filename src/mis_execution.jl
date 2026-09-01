@@ -64,6 +64,30 @@ end
     return value, generating_logdensity, reason
 end
 
+struct _RealizedMixtureDenominator{L}
+    logcoefficients::L
+    round::Int
+end
+Adapt.@adapt_structure _RealizedMixtureDenominator
+
+_factor_batch_logcoefficients(bank, denominator::_RealizedMixtureDenominator) =
+    view(denominator.logcoefficients, :, denominator.round)
+
+@inline _mis_term_bounds(bank, ::_RealizedMixtureDenominator, generating_slot) =
+    (1, _active_proposal_count(bank))
+
+@inline function _mis_denominator_term(
+    ::Type{T},
+    bank,
+    denominator::_RealizedMixtureDenominator,
+    term_index,
+) where {T}
+    return term_index, convert(
+        T,
+        @inbounds(denominator.logcoefficients[term_index, denominator.round]),
+    )
+end
+
 @inline _append_logmixture(lognumerator, logcoefficient, logdensity) =
     LogExpFunctions.logaddexp(lognumerator, logcoefficient + logdensity)
 
@@ -72,10 +96,58 @@ end
 
 struct _NoMISSolveScratch end
 
-struct _MISRoundOutput{W,I}
+struct _MISAdaptationOutput{T,Q}
+    logtargets::T
+    generating_logdensities::Q
+end
+
+Adapt.@adapt_structure _MISAdaptationOutput
+
+@inline _store_mis_adaptation!(::Nothing, args...) = nothing
+
+@inline function _store_mis_adaptation!(
+    output::_MISAdaptationOutput,
+    sample_index,
+    logtarget,
+    generating_logdensity,
+)
+    @inbounds output.logtargets[sample_index] = logtarget
+    @inbounds output.generating_logdensities[sample_index] = generating_logdensity
+    return nothing
+end
+
+@inline function _store_mis_adaptation!(
+    output::_MISAdaptationOutput,
+    sample_index,
+    value,
+    ::Val{:target},
+)
+    @inbounds output.logtargets[sample_index] = value
+    return nothing
+end
+
+@inline function _store_mis_adaptation!(
+    output::_MISAdaptationOutput,
+    assignments,
+    sample_index,
+    proposal_slot,
+    value,
+    ::Val{:generating},
+)
+    if _factor_batch_is_generating(assignments, sample_index, proposal_slot)
+        @inbounds output.generating_logdensities[sample_index] = value
+    end
+    return nothing
+end
+
+struct _MISRoundOutput{W,I,A}
     logweights::W
     proposal_ids::I
+    adaptation::A
 end
+
+_MISRoundOutput(logweights, proposal_ids) =
+    _MISRoundOutput(logweights, proposal_ids, nothing)
 
 struct _AMISRoundOutput{T,N,W,R,L}
     logtargets::T
@@ -109,6 +181,7 @@ end
     proposal_slot,
     assignments,
     valid_samples,
+    adaptation,
     failure_storage,
 )
     sample_index = @index(Global, Linear)
@@ -120,6 +193,14 @@ end
         end
         logdensity = _factor_batch_slot_value(lognormalizers, proposal_slot) -
                      T(0.5) * squared_radius
+        _store_mis_adaptation!(
+            adaptation,
+            assignments,
+            sample_index,
+            proposal_slot,
+            logdensity,
+            Val(:generating),
+        )
         reason = (
             isnan(logdensity) ||
             logdensity == -Inf && _factor_batch_is_generating(
@@ -160,6 +241,7 @@ function _launch_factor_batch_logmixture!(
     execution,
     assignments=nothing,
     valid_samples=nothing,
+    adaptation=nothing,
 )
     factor = _factor_batch_factor(factor_source, proposal_slot)
     location = _factor_batch_location(factor_source, proposal_slot)
@@ -175,6 +257,7 @@ function _launch_factor_batch_logmixture!(
         proposal_slot,
         assignments,
         valid_samples,
+        adaptation,
         failure_storage;
         ndrange=length(lognumerators),
         workgroupsize=_native_workgroupsize(execution, length(lognumerators)),
@@ -216,11 +299,13 @@ end
     target,
     bank,
     assignments,
+    adaptation,
 )
     sample_index = @index(Global, Linear)
     T = eltype(logtargets)
     @inbounds logtargets[sample_index] = T(-Inf)
     @inbounds proposal_ids[sample_index] = 0
+    _store_mis_adaptation!(adaptation, sample_index, T(-Inf), T(-Inf))
     generating_slot = @inbounds assignments[sample_index]
     dimension = _mis_dimension(bank)
     normal_offset = (sample_index - 1) * dimension + 1
@@ -254,6 +339,12 @@ end
         else
             @inbounds logtargets[sample_index] = target_log
             @inbounds proposal_ids[sample_index] = bank.proposal_ids[generating_slot]
+            _store_mis_adaptation!(
+                adaptation,
+                sample_index,
+                target_log,
+                Val(:target),
+            )
         end
     end
 end
@@ -307,7 +398,8 @@ function _launch_factor_batch_mis_round!(
         normal_buffer,
         target,
         bank,
-        assignments;
+        assignments,
+        output.adaptation;
         ndrange=sample_count,
         workgroupsize=_native_workgroupsize(execution, sample_count),
     )
@@ -316,10 +408,11 @@ function _launch_factor_batch_mis_round!(
     fill!(logdenominators, eltype(logdenominators)(-Inf))
     logcoefficients = _factor_batch_logcoefficients(bank, denominator)
     isnothing(logcoefficients) && error("unsupported factor-batch denominator")
+    round_solve_scratch = view(solve_scratch, :, 1:sample_count)
     for proposal_slot in axes(bank.locations, 2)
         _launch_factor_batch_logmixture!(
             logdenominators,
-            solve_scratch,
+            round_solve_scratch,
             samples,
             bank,
             proposal_slot,
@@ -328,6 +421,7 @@ function _launch_factor_batch_mis_round!(
             execution,
             assignments,
             output.proposal_ids,
+            output.adaptation,
         )
     end
 
@@ -397,7 +491,7 @@ end
             0,
             _NATIVE_GENERATED_NONFINITE,
         )
-        return false, T(-Inf), T(-Inf), generating_slot
+        return false, T(-Inf), T(-Inf), generating_slot, T(-Inf)
     else
         sample = _native_sample_at(samples, sample_index)
         target_log, target_reason, target_failed = target(sample, sample_index)
@@ -408,17 +502,18 @@ end
                 0,
                 target_reason,
             )
-            return false, T(-Inf), T(-Inf), generating_slot
+            return false, T(-Inf), T(-Inf), generating_slot, T(-Inf)
         else
-            denominator, _, denominator_reason = _mis_logdenominator_core(
-                typeof(target_log),
-                bank,
-                denominator_policy,
-                generating_slot,
-                sample,
-                solve_scratch,
-                sample_index,
-            )
+            denominator, generating_logdensity, denominator_reason =
+                _mis_logdenominator_core(
+                    typeof(target_log),
+                    bank,
+                    denominator_policy,
+                    generating_slot,
+                    sample,
+                    solve_scratch,
+                    sample_index,
+                )
             if !iszero(denominator_reason)
                 _record_native_failure!(
                     failure_storage,
@@ -426,9 +521,15 @@ end
                     0,
                     denominator_reason,
                 )
-                return false, T(-Inf), T(-Inf), generating_slot
+                return false, T(-Inf), T(-Inf), generating_slot, T(-Inf)
             end
-            return true, target_log, denominator, generating_slot
+            return (
+                true,
+                target_log,
+                denominator,
+                generating_slot,
+                generating_logdensity,
+            )
         end
     end
 end
@@ -444,25 +545,37 @@ end
     assignments,
     denominator,
     solve_scratch,
+    adaptation,
 )
     sample_index = @index(Global, Linear)
-    valid, target_log, logdenominator, generating_slot = _mis_round_values!(
-        eltype(logweights),
-        sample_index,
-        samples,
-        failure_storage,
-        normal_buffer,
-        target,
-        bank,
-        assignments,
-        denominator,
-        solve_scratch,
-    )
+    T = eltype(logweights)
+    @inbounds logweights[sample_index] = T(-Inf)
+    @inbounds proposal_ids[sample_index] = 0
+    _store_mis_adaptation!(adaptation, sample_index, T(-Inf), T(-Inf))
+    valid, target_log, logdenominator, generating_slot, generating_logdensity =
+        _mis_round_values!(
+            T,
+            sample_index,
+            samples,
+            failure_storage,
+            normal_buffer,
+            target,
+            bank,
+            assignments,
+            denominator,
+            solve_scratch,
+        )
     if valid
         logweight, reason = _subtract_logweight(target_log, logdenominator)
         if iszero(reason)
             @inbounds logweights[sample_index] = logweight
             @inbounds proposal_ids[sample_index] = bank.proposal_ids[generating_slot]
+            _store_mis_adaptation!(
+                adaptation,
+                sample_index,
+                target_log,
+                generating_logdensity,
+            )
         else
             _record_native_failure!(failure_storage, sample_index, 0, reason)
         end
@@ -490,7 +603,7 @@ end
     @inbounds logtargets[sample_index] = T(-Inf)
     @inbounds lognumerators[sample_index] = zero(T)
     @inbounds logweights[sample_index] = T(-Inf)
-    valid, target_log, lognumerator, _ = _mis_round_values!(
+    valid, target_log, lognumerator, _, _ = _mis_round_values!(
         T,
         sample_index,
         samples,
@@ -519,6 +632,32 @@ end
     end
 end
 
+@inline function _mis_round_kernel_arguments(
+    samples,
+    output::_MISRoundOutput,
+    failure_storage,
+    normal_buffer,
+    target,
+    bank,
+    assignments,
+    denominator,
+    solve_scratch,
+)
+    return (
+        samples,
+        output.logweights,
+        output.proposal_ids,
+        failure_storage,
+        normal_buffer,
+        target,
+        bank,
+        assignments,
+        denominator,
+        solve_scratch,
+        output.adaptation,
+    )
+end
+
 function _launch_mis_round!(
     samples,
     output::_MISRoundOutput,
@@ -534,16 +673,17 @@ function _launch_mis_round!(
     backend = KernelAbstractions.get_backend(normal_buffer)
     kernel = _mis_round_launch_kernel!(backend)
     kernel(
-        samples,
-        output.logweights,
-        output.proposal_ids,
-        failure_storage,
-        normal_buffer,
-        target,
-        bank,
-        assignments,
-        denominator,
-        solve_scratch;
+        _mis_round_kernel_arguments(
+            samples,
+            output,
+            failure_storage,
+            normal_buffer,
+            target,
+            bank,
+            assignments,
+            denominator,
+            solve_scratch,
+        )...;
         ndrange=length(output.logweights),
         workgroupsize=_native_workgroupsize(
             execution,

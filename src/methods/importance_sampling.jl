@@ -187,15 +187,6 @@ function Base.showerror(io::IO, error::SamplerExecutionError)
     showerror(io, error.captured)
 end
 
-struct _ContextFreePreparedTarget{T}
-    target::T
-end
-
-struct _ContextualPreparedTarget{T,P}
-    target::T
-    context::P
-end
-
 abstract type _AbstractFactorExecution end
 
 """
@@ -285,7 +276,12 @@ function prepare_sampler(
     factor_execution=FusedFactorExecution(),
     threaded=true,
 )
-    target = _ContextFreePreparedTarget(logtarget)
+    target = _PreparedLogTarget(
+        logtarget,
+        _NoTargetContext(),
+        ADTypes.NoAutoDiff(),
+        nothing,
+    )
     return _prepare_importance_sampler(
         rng,
         target,
@@ -303,7 +299,12 @@ function prepare_sampler(
     factor_execution=FusedFactorExecution(),
     threaded=true,
 )
-    target = _ContextualPreparedTarget(logtarget, context)
+    target = _PreparedLogTarget(
+        logtarget,
+        context,
+        ADTypes.NoAutoDiff(),
+        nothing,
+    )
     return _prepare_importance_sampler(
         rng,
         target,
@@ -371,7 +372,7 @@ end
 _copy_accelerator_algorithm(device, algorithm, method_state) =
     _copy_algorithm(device, algorithm)
 
-_prepare_transferred_method_state(device, algorithm, method_state) =
+_prepare_transferred_method_state(device, algorithm, method_state, _transferred_target) =
     _prepare_method_state(algorithm)
 
 _accelerator_method_state_limit(method_state) = nothing
@@ -497,11 +498,12 @@ function _transfer_prepared_sampler(
             sampler.algorithm,
             sampler.method_state,
         )
-        target = _transfer_prepared_target(device, sampler.target)
+        transferred_target = _transfer_prepared_target(device, sampler.target)
         method_state = _prepare_transferred_method_state(
             device,
             algorithm,
             sampler.method_state,
+            transferred_target,
         )
         random_buffers = _allocate_random_buffers(
             device,
@@ -521,13 +523,13 @@ function _transfer_prepared_sampler(
             _transferred_backend_state(
                 algorithm,
                 method_state,
-                target,
+                transferred_target,
                 random_buffers,
             ),
         )
         _preflight_accelerator_method(
             device,
-            target,
+            transferred_target,
             algorithm,
             method_state,
             random_buffers,
@@ -547,7 +549,7 @@ function _transfer_prepared_sampler(
         destination = _PreparedImportanceSampler(
             backend_rng,
             random_buffers,
-            target,
+            transferred_target,
             algorithm,
             method_state,
             device,
@@ -849,20 +851,26 @@ function _draw_prepared_batch(sampler)
     return batch
 end
 
-function _resolve_prepared_target(target::_ContextFreePreparedTarget, proposal)
-    return _prepare_target(target.target, proposal)
+function _resolve_prepared_target(
+    target::_PreparedLogTarget{F,_NoTargetContext},
+    proposal,
+) where {F}
+    return _prepare_target(target.logdensity, proposal)
 end
 
-function _resolve_prepared_target(target::_ContextualPreparedTarget, proposal)
-    return _prepare_target(target.target, target.context, proposal)
+function _resolve_prepared_target(target::_PreparedLogTarget, proposal)
+    return _prepare_target(target.logdensity, target.context, proposal)
 end
 
-function _bind_resolved_target(target::_ContextFreePreparedTarget, sample)
-    return _bind_context_free_callable(target.target, sample)
+function _bind_resolved_target(
+    target::_PreparedLogTarget{F,_NoTargetContext},
+    sample,
+) where {F}
+    return _bind_context_free_callable(target.logdensity, sample)
 end
 
-function _bind_resolved_target(target::_ContextualPreparedTarget, sample)
-    return _bind_contextual_callable(target.target, target.context, sample)
+function _bind_resolved_target(target::_PreparedLogTarget, sample)
+    return _bind_contextual_callable(target.logdensity, target.context, sample)
 end
 
 function _bind_prepared_target(target, samples)

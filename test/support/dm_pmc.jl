@@ -1,4 +1,5 @@
 import DensityInterface
+import KernelAbstractions
 import LogExpFunctions
 import Random
 
@@ -38,6 +39,58 @@ function Random.rand!(rng::DMPMCPrefilledRNG, destination::AbstractArray)
     copyto!(destination, 1, batch, 1, length(destination))
     rng.uniform_index += 1
     return destination
+end
+
+struct DMPMCResultFailurePrototype{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
+    storage::A
+end
+
+struct DMPMCResultFailureArray{T,N,A<:AbstractArray{T,N}} <: AbstractArray{T,N}
+    storage::A
+end
+
+for ArrayType in (DMPMCResultFailurePrototype, DMPMCResultFailureArray)
+    @eval begin
+        Base.size(array::$ArrayType) = size(array.storage)
+        Base.IndexStyle(::Type{<:$ArrayType}) = IndexLinear()
+        Base.getindex(array::$ArrayType, indices...) = getindex(array.storage, indices...)
+        Base.setindex!(array::$ArrayType, value, indices...) =
+            setindex!(array.storage, value, indices...)
+        KernelAbstractions.get_backend(array::$ArrayType) =
+            KernelAbstractions.get_backend(array.storage)
+    end
+end
+
+function Base.similar(
+    array::DMPMCResultFailurePrototype,
+    ::Type{T},
+    dimensions::Dims{N},
+) where {T,N}
+    return DMPMCResultFailureArray(similar(array.storage, T, dimensions))
+end
+
+Base.require_one_based_indexing(::DMPMCResultFailureArray) =
+    error("intentional DM-PMC result validation failure")
+
+function dm_pmc_result_failure_sampler(sampler)
+    old_buffers = sampler.random_buffers
+    buffers = ImportanceSamplers._DMPMCRandomBuffers(
+        DMPMCResultFailurePrototype(old_buffers.normals),
+        old_buffers.resampling_uniforms,
+        old_buffers.failure_scratch,
+    )
+    return ImportanceSamplers._PreparedImportanceSampler(
+        sampler.rng,
+        buffers,
+        sampler.target,
+        sampler.algorithm,
+        sampler.method_state,
+        sampler.device,
+        sampler.factor_execution,
+        sampler.threaded,
+        false,
+        false,
+    )
 end
 
 struct DMPMCMixtureTarget{T,V<:AbstractVector{T}}

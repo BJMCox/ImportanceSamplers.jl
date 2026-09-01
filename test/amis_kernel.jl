@@ -273,6 +273,53 @@ function amis_kernel_scalar_values(samples)
     return samples isa AbstractVector ? samples : vec(samples)
 end
 
+@testset "AMIS scale-aware ridge characterization" begin
+    expected = (
+        Float32 => (
+            scalar="01000000001000000011101111000000",
+            dense=[
+                "01000000000000000010011110011001" "00111110100000000000000000000000"
+                "00111110100000000000000000000000" "01000000101000000001001111001101"
+            ],
+        ),
+        Float64 => (
+            scalar="0100000000000100000000000000000000010101001000000000000000000000",
+            dense=[
+                "0100000000000000000000000000000000001110000000000000000000000000" "0011111111010000000000000000000000000000000000000000000000000000"
+                "0011111111010000000000000000000000000000000000000000000000000000" "0100000000010100000000000000000000000111000000000000000000000000"
+            ],
+        ),
+    )
+    for T in (Float32, Float64)
+        scalar_covariance = T[2.5]
+        scales = T[3.25]
+        backend = KernelAbstractions.get_backend(scalar_covariance)
+        scalar_kernel = AMISKernelIS._add_amis_scalar_ridge_kernel!(backend)
+        scalar_kernel(
+            scalar_covariance,
+            scales,
+            1;
+            ndrange=1,
+        )
+        KernelAbstractions.synchronize(backend)
+
+        dense_covariance = T[2 0.25; 0.25 5]
+        factors = reshape(T[2 1 0 3], 2, 2, 1)
+        dense_kernel = AMISKernelIS._add_amis_factor_ridge_kernel!(backend)
+        dense_kernel(
+            dense_covariance,
+            factors,
+            1;
+            ndrange=1,
+        )
+        KernelAbstractions.synchronize(backend)
+
+        frozen = Dict(expected)[T]
+        @test bitstring(only(scalar_covariance)) == frozen.scalar
+        @test bitstring.(dense_covariance) == frozen.dense
+    end
+end
+
 @testset "AMIS old-sample zero mixture contributions are valid" begin
     for T in (Float32, Float64), factor in (Val(false), Val(true))
         state = configure_amis_kernel_state(T, factor)

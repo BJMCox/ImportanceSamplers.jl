@@ -1,11 +1,10 @@
 """
     DMPMCRoundError
 
-Exception thrown when a DM-PMC round cannot complete atomically. `round` and
-`phase` locate the failure, `cause` stores the underlying exception, and
-`diagnostics` reports the requested round size and number of previously
-committed rounds. The prepared sampler retains its last committed proposal
-population.
+Exception thrown when a DM-PMC round cannot complete. `round` and `phase`
+locate the failure, `cause` stores the underlying exception, and `diagnostics`
+reports the requested round size and number of completed rounds. The prepared
+sampler retains its pre-call proposal population.
 """
 struct DMPMCRoundError{E,D<:NamedTuple} <: Exception
     round::Int
@@ -34,30 +33,6 @@ struct _DMPMCWorkspace{S,W,I,Q,C,A,L}
     resampling_cdf::C
     ancestors::A
     candidate_locations::L
-end
-
-struct _DMPMCRoundDenominator{L}
-    logcoefficients::L
-    round::Int
-end
-Adapt.@adapt_structure _DMPMCRoundDenominator
-
-_factor_batch_logcoefficients(bank, denominator::_DMPMCRoundDenominator) =
-    view(denominator.logcoefficients, :, denominator.round)
-
-@inline _mis_term_bounds(bank, ::_DMPMCRoundDenominator, generating_slot) =
-    (1, _active_proposal_count(bank))
-
-@inline function _mis_denominator_term(
-    ::Type{T},
-    bank,
-    denominator::_DMPMCRoundDenominator,
-    term_index,
-) where {T}
-    return term_index, convert(
-        T,
-        @inbounds(denominator.logcoefficients[term_index, denominator.round]),
-    )
 end
 
 _dm_pmc_binding_sample(
@@ -207,7 +182,7 @@ function _dm_pmc_resampling_cdf!(
     return cdf
 end
 
-function _capture_dm_pmc_round(f, round, phase, round_size, committed_rounds)
+function _capture_dm_pmc_round(f, round, phase, round_size, completed_rounds)
     try
         return f()
     catch cause
@@ -217,7 +192,7 @@ function _capture_dm_pmc_round(f, round, phase, round_size, committed_rounds)
                 round,
                 phase,
                 cause,
-                (round_size=round_size, committed_rounds=committed_rounds),
+                (round_size=round_size, completed_rounds=completed_rounds),
             ),
         )
     end
@@ -229,7 +204,9 @@ function _importance_sample_cpu!(
     threaded,
 )
     execution = threaded ? _ThreadedCPUExecution() : _SerialCPUExecution()
-    bank = method_state.bank
+    committed_bank = method_state.bank
+    bank = method_state.run_bank
+    copyto!(bank.locations, committed_bank.locations)
     plan = method_state.plan
     workspace = method_state.workspace
     buffers = sampler.random_buffers
@@ -279,7 +256,7 @@ function _importance_sample_cpu!(
             Random.randn!(sampler.rng, buffers.normals)
         end
         _capture_dm_pmc_round(round, :sample_and_weight, round_size, round - 1) do
-            denominator = _DMPMCRoundDenominator(plan.logcoefficients, round)
+            denominator = _RealizedMixtureDenominator(plan.logcoefficients, round)
             launch = _use_factor_batch_mis_path(
                 sampler.device,
                 bank,
@@ -289,7 +266,7 @@ function _importance_sample_cpu!(
             ) ? _launch_factor_batch_mis_round! : _launch_mis_round!
             launch(
                 round_samples,
-                _MISRoundOutput(round_logweights, round_proposal_ids),
+                _MISRoundOutput(round_logweights, round_proposal_ids, nothing),
                 buffers.failure_scratch.record.storage,
                 buffers.normals,
                 target_evaluator,
@@ -334,7 +311,7 @@ function _importance_sample_cpu!(
             fill!(view(round_ids, output_indices), round)
             copyto!(view(proposal_ids, output_indices), round_proposal_ids)
         end
-        _capture_dm_pmc_round(round, :commit_population, round_size, round - 1) do
+        _capture_dm_pmc_round(round, :advance_population, round_size, round - 1) do
             copyto!(bank.locations, workspace.candidate_locations)
             KernelAbstractions.synchronize(
                 KernelAbstractions.get_backend(bank.locations),
@@ -358,10 +335,20 @@ function _importance_sample_cpu!(
         failures=0,
         transfers=transfers,
     )
-    return _adopt_validated_weighted_samples(
-        samples,
-        logweights;
-        provenance=(round=round_ids, proposal_id=proposal_ids),
-        diagnostics=diagnostics,
-    )
+    final_round = lastindex(plan.schedule)
+    result = _capture_dm_pmc_round(
+        final_round,
+        :result_construction,
+        plan.schedule[final_round],
+        final_round,
+    ) do
+        _adopt_validated_weighted_samples(
+            samples,
+            logweights;
+            provenance=(round=round_ids, proposal_id=proposal_ids),
+            diagnostics=diagnostics,
+        )
+    end
+    method_state.bank, method_state.run_bank = bank, committed_bank
+    return result
 end
