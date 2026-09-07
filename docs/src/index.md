@@ -49,8 +49,9 @@ target and algorithm arguments. The proposal alone determines sample shape.
   complete assignment/denominator schemes, provenance, and CPU/CUDA limits.
 - [Adaptive multiple importance sampling](@ref) covers retrospective temporal
   mixtures and learned Gaussian state.
-- [Deterministic-mixture population Monte Carlo](@ref) covers adaptive spatial
-  mixtures, global resampling, retained proposal state, and CPU/CUDA limits.
+- [DM-PMC, GR-PMC, and LR-PMC](@ref) covers adaptive spatial
+  mixtures, global and local resampling, retained proposal state, and CPU/CUDA
+  limits.
 - [First-order GRAMIS-CAIS](@ref) covers gradient moves, robust local covariance
   fitting, repulsion, causal rounds, and CPU/CUDA limits.
 - [Native proposals](@ref) explains the Gaussian scale and factor contracts.

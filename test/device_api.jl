@@ -1632,6 +1632,60 @@ end
     @test serial_error.reason === :serial_accelerator
     @test rand(getfield(serial_source, :rng), UInt64) ==
           rand(expected_serial_rng, UInt64)
+
+    empty!(KERNEL_ARGUMENT_TEST_ARGUMENTS)
+    local_source = prepare_sampler(
+        Random.Xoshiro(0x2226),
+        static_mis_device_target,
+        (shift=[0.25],),
+        DeterministicMixturePMC(
+            diagonal_bank;
+            rounds=2,
+            round_size=6,
+            resampling=LocalResampling(),
+        );
+        threaded=true,
+    )
+    local_destination = device(local_source)
+    local_state = getfield(local_destination, :method_state)
+    local_workspace = local_state.workspace
+    local_views = IS._dm_pmc_round_views(local_state, 1)
+    backend = KernelAbstractions.get_backend(local_workspace.round_logweights)
+    buffers = getfield(local_destination, :random_buffers)
+    preflight_cases = (
+        (
+            IS._local_logweight_maxima_kernel!(backend),
+            (
+                local_workspace.resampling_maxima,
+                local_views.logweights,
+                local_state.plan.counts,
+            ),
+        ),
+        (
+            IS._local_scaled_weights_kernel!(backend),
+            (
+                local_views.cdf,
+                local_views.logweights,
+                local_views.assignments,
+                local_workspace.resampling_maxima,
+            ),
+        ),
+        (
+            IS._cooperative_local_resample_locations_kernel!(backend),
+            (
+                local_workspace.candidate_locations,
+                local_workspace.ancestors,
+                local_views.samples,
+                local_views.cdf,
+                buffers.resampling_uniforms,
+                local_state.plan.counts,
+            ),
+        ),
+    )
+    for (kernel, arguments) in preflight_cases, argument in arguments
+        @test (typeof(kernel), typeof(kernel_argument_test_adapt(argument))) in
+              KERNEL_ARGUMENT_TEST_ARGUMENTS
+    end
 end
 
 @testset "AMIS accelerator transfer, preflight, and snapshots" begin

@@ -161,6 +161,7 @@ function dm_pmc_scalar_oracle(
     normal_batches,
     uniform_batches,
     target,
+    resampling=:global,
 )
     T = eltype(initial_locations)
     locations = copy(initial_locations)
@@ -190,13 +191,31 @@ function dm_pmc_scalar_oracle(
             end
             round_logweights[sample_index] = target(sample) - denominator
         end
-        normalized = exp.(round_logweights .- LogExpFunctions.logsumexp(round_logweights))
-        cdf = cumsum(normalized)
-        cdf[end] = one(T)
-        ancestors = dm_pmc_multinomial_oracle(
-            cdf,
-            view(uniform_batches[round], 1:length(locations)),
-        )
+        ancestors = if resampling === :global
+            normalized = exp.(
+                round_logweights .- LogExpFunctions.logsumexp(round_logweights),
+            )
+            cdf = cumsum(normalized)
+            cdf[end] = one(T)
+            dm_pmc_multinomial_oracle(
+                cdf,
+                view(uniform_batches[round], 1:length(locations)),
+            )
+        else
+            map(eachindex(locations)) do slot
+                indices = findall(==(slot), assignments)
+                local_logweights = round_logweights[indices]
+                normalized = exp.(
+                    local_logweights .- LogExpFunctions.logsumexp(local_logweights),
+                )
+                cdf = cumsum(normalized)
+                cdf[end] = one(T)
+                indices[only(dm_pmc_multinomial_oracle(
+                    cdf,
+                    view(uniform_batches[round], slot:slot),
+                ))]
+            end
+        end
         locations .= round_samples[ancestors]
         append!(samples, round_samples)
         append!(logweights, round_logweights)
@@ -205,6 +224,13 @@ function dm_pmc_scalar_oracle(
         push!(round_ancestors, ancestors)
     end
     return (; samples, logweights, rounds, proposal_ids=generated_ids, locations, round_ancestors)
+end
+
+struct DMPMCLeftEmptyTarget{T<:AbstractFloat} end
+
+function (::DMPMCLeftEmptyTarget{T})(sample) where {T}
+    sample < zero(sample) && return T(-Inf)
+    return -T(0.5) * abs2(sample)
 end
 
 mutable struct DMPMCGenericProposal

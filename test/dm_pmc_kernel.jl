@@ -317,6 +317,7 @@ end
         :failure_snapshot,
         :cdf_maximum,
         :cdf_sum,
+        :local_resampling_validity,
         :logweight_maximum,
         :logweight_scaled_sum,
         :logweight_scaled_square_sum,
@@ -324,10 +325,18 @@ end
     )
     @test transfers.reasons.failure_snapshot.count == 1
     @test transfers.reasons.failure_snapshot.bytes == 3sizeof(UInt64)
-    for reason in fieldnames(typeof(transfers.reasons))[2:(end - 1)]
+    for reason in (
+        :cdf_maximum,
+        :cdf_sum,
+        :logweight_maximum,
+        :logweight_scaled_sum,
+        :logweight_scaled_square_sum,
+    )
         @test getfield(transfers.reasons, reason).count == 1
         @test getfield(transfers.reasons, reason).bytes == sizeof(Float32)
     end
+    @test iszero(transfers.reasons.local_resampling_validity.count)
+    @test iszero(transfers.reasons.local_resampling_validity.bytes)
     @test iszero(transfers.reasons.covariance_diagnostic.count)
     @test iszero(transfers.reasons.covariance_diagnostic.bytes)
 end

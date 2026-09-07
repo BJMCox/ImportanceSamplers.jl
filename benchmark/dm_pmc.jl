@@ -19,10 +19,12 @@ const DM_PMC_BENCHMARK_TYPES = (Float32, Float64)
 const DM_PMC_BENCHMARK_BANKS = (:diagonal, :factor)
 const DM_PMC_BENCHMARK_DIMENSIONS = (4, 16)
 const DM_PMC_BENCHMARK_PROPOSALS = (4, 16)
+const DM_PMC_BENCHMARK_RESAMPLING = (:global, :local)
 const DM_PMC_TRANSFER_REASONS = (
     :failure_snapshot,
     :cdf_maximum,
     :cdf_sum,
+    :local_resampling_validity,
     :logweight_maximum,
     :logweight_scaled_sum,
     :logweight_scaled_square_sum,
@@ -32,6 +34,9 @@ const DM_PMC_TRANSFER_REASONS = (
 struct DMPMCNormalTarget{T<:AbstractFloat}
     scale::T
 end
+
+dm_pmc_resampling(::Val{:global}) = GlobalResampling()
+dm_pmc_resampling(::Val{:local}) = LocalResampling()
 
 @inline function (target::DMPMCNormalTarget{T})(sample) where {T}
     squared_radius = zero(T)
@@ -109,6 +114,7 @@ function dm_pmc_prepare_cell(cell, device_kind, seed=DM_PMC_BENCHMARK_SEED)
         bank;
         rounds=cell.rounds,
         round_size=cell.round_size,
+        resampling=dm_pmc_resampling(Val(cell.resampling)),
     )
     source = prepare_sampler(
         Xoshiro(seed),
@@ -228,6 +234,9 @@ function dm_pmc_validate_paired_result(result, cell, device_kind)
     all(isfinite, result.diagnostics.round_lognormalizers) || error(
         "benchmark produced nonfinite round log normalizers",
     )
+    result.diagnostics.resampling === cell.resampling || error(
+        "benchmark used the wrong resampling policy",
+    )
     return (;
         total_samples=length(result),
         flattened_weight_concentration_ess=dm_pmc_flattened_weight_concentration_ess(
@@ -328,6 +337,7 @@ function dm_pmc_benchmark_cell(cell, device_kind)
         proposals=cell.proposals,
         rounds=cell.rounds,
         round_size=cell.round_size,
+        resampling=cell.resampling,
         total_samples,
         preparation_seconds=preparation_record.median_seconds,
         preparation_host_allocations=preparation_record.host_allocations,
@@ -357,7 +367,7 @@ end
 
 function dm_pmc_benchmark_cases()
     if DM_PMC_BENCHMARK_SMOKE
-        return (
+        bases = (
             (
                 scalar_type=Float32,
                 bank=:diagonal,
@@ -375,6 +385,10 @@ function dm_pmc_benchmark_cases()
                 round_size=DM_PMC_BENCHMARK_ROUND_SIZE,
             ),
         )
+        return Tuple(
+            merge(base, (; resampling)) for base in bases for
+            resampling in DM_PMC_BENCHMARK_RESAMPLING
+        )
     end
     return Tuple(
         (;
@@ -384,8 +398,11 @@ function dm_pmc_benchmark_cases()
             proposals,
             rounds=DM_PMC_BENCHMARK_ROUNDS,
             round_size=DM_PMC_BENCHMARK_ROUND_SIZE,
+            resampling,
         ) for T in DM_PMC_BENCHMARK_TYPES for bank in DM_PMC_BENCHMARK_BANKS for
-        dimension in DM_PMC_BENCHMARK_DIMENSIONS for proposals in DM_PMC_BENCHMARK_PROPOSALS
+        dimension in DM_PMC_BENCHMARK_DIMENSIONS for
+        proposals in DM_PMC_BENCHMARK_PROPOSALS for
+        resampling in DM_PMC_BENCHMARK_RESAMPLING
     )
 end
 
@@ -441,7 +458,7 @@ function dm_pmc_benchmark_main()
     rows = [
         dm_pmc_benchmark_cell(cell, device) for device in devices for cell in cases
     ]
-    expected_rows = length(devices) * (DM_PMC_BENCHMARK_SMOKE ? 2 : 16)
+    expected_rows = length(devices) * (DM_PMC_BENCHMARK_SMOKE ? 4 : 32)
     length(rows) == expected_rows || error(
         "benchmark matrix is incomplete: observed=$(length(rows)), expected=$expected_rows",
     )

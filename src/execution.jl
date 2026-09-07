@@ -24,6 +24,7 @@ mutable struct _ReportedTransferReasons
     failure_snapshot::_ReportedTransfer
     cdf_maximum::_ReportedTransfer
     cdf_sum::_ReportedTransfer
+    local_resampling_validity::_ReportedTransfer
     logweight_maximum::_ReportedTransfer
     logweight_scaled_sum::_ReportedTransfer
     logweight_scaled_square_sum::_ReportedTransfer
@@ -32,6 +33,7 @@ end
 
 function _ReportedTransferReasons()
     return _ReportedTransferReasons(
+        _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),

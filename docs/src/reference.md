@@ -7,6 +7,9 @@ AbstractImportanceSampler
 ImportanceSampling
 AMIS
 DeterministicMixturePMC
+AbstractPMCResamplingPolicy
+GlobalResampling
+LocalResampling
 FirstOrderGRAMIS
 FusedFactorExecution
 BatchedFactorExecution

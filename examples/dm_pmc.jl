@@ -19,7 +19,11 @@ function bimodal_logtarget(sample)::Float64
     return largest + log(exp(left - largest) + exp(right - largest)) - log(2)
 end
 
-function main(; rounds=6, round_size=10_000)
+function main(;
+    rounds=6,
+    round_size=10_000,
+    resampling=GlobalResampling(),
+)
     # Four native Gaussian proposals give the initial population broad mode coverage.
     bank = ProposalBank([
         FactorGaussian([-4.0, 0.0], [1.2 0.0; 0.2 1.0]),
@@ -29,7 +33,8 @@ function main(; rounds=6, round_size=10_000)
     ])
 
     # round_size is the number of samples in each adaptive round.
-    algorithm = DeterministicMixturePMC(bank; rounds, round_size)
+    # Use LocalResampling() to retain one proposal lineage per sample group.
+    algorithm = DeterministicMixturePMC(bank; rounds, round_size, resampling)
     sampler = prepare_sampler(
         Xoshiro(0x444d504d43455841),
         bimodal_logtarget,
@@ -49,6 +54,7 @@ function main(; rounds=6, round_size=10_000)
         concentration_ess=inv(sum(abs2, weights)),
         final_locations=[copy(proposal.location) for proposal in learned.proposals],
         round_concentration_ess=result.diagnostics.round_ess,
+        resampling=result.diagnostics.resampling,
     )
 
     # These ESS values describe normalized-weight concentration, not variance-equivalent counts.
