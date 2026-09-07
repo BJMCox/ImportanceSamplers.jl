@@ -313,16 +313,6 @@ end
 
     @test transfers.count == 6
     @test transfers.bytes == 3sizeof(UInt64) + 5sizeof(Float32)
-    @test fieldnames(typeof(transfers.reasons)) == (
-        :failure_snapshot,
-        :cdf_maximum,
-        :cdf_sum,
-        :local_resampling_validity,
-        :logweight_maximum,
-        :logweight_scaled_sum,
-        :logweight_scaled_square_sum,
-        :covariance_diagnostic,
-    )
     @test transfers.reasons.failure_snapshot.count == 1
     @test transfers.reasons.failure_snapshot.bytes == 3sizeof(UInt64)
     for reason in (

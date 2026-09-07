@@ -25,6 +25,7 @@ mutable struct _ReportedTransferReasons
     cdf_maximum::_ReportedTransfer
     cdf_sum::_ReportedTransfer
     local_resampling_validity::_ReportedTransfer
+    local_mean_validity::_ReportedTransfer
     logweight_maximum::_ReportedTransfer
     logweight_scaled_sum::_ReportedTransfer
     logweight_scaled_square_sum::_ReportedTransfer
@@ -33,6 +34,7 @@ end
 
 function _ReportedTransferReasons()
     return _ReportedTransferReasons(
+        _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),
@@ -188,6 +190,11 @@ struct _DMPMCRandomBuffers{N,U,F}
     failure_scratch::F
 end
 
+struct _PopulationNormalBuffers{N,F}
+    normals::N
+    failure_scratch::F
+end
+
 struct _DeviceFailureRecord{A}
     storage::A
 end
@@ -313,6 +320,7 @@ _native_failure_scratch(
         _RandomBuffers,
         _PackedStaticMISRandomBuffers,
         _DMPMCRandomBuffers,
+        _PopulationNormalBuffers,
     },
 ) = buffers.failure_scratch
 

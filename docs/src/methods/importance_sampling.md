@@ -369,7 +369,7 @@ warm = retarget(rng2, adapted, new_logtarget, p2)
 result = importance_sample!(warm)
 ```
 
-This operation supports `DeterministicMixturePMC`, `AMIS`, and
+This operation supports `DeterministicMixturePMC`, `APIS`, `AMIS`, and
 `FirstOrderGRAMIS`. It preserves the committed proposal, algorithm controls,
 execution policy, and device. It resets every target-specific history and
 workspace. The old sampler remains usable and keeps its RNG stream.

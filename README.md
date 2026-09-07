@@ -40,6 +40,8 @@ target returns a `Float32` or `Float64` log density; the sampler never applies
   device contracts.
 - [Adaptive multiple importance sampling](docs/src/methods/amis.md) explains
   retrospective temporal-mixture weights and learned Gaussian state.
+- [Adaptive population importance sampling](docs/src/methods/apis.md) explains
+  epoch-local deterministic-mixture weights and proposal-local mean updates.
 - [Nonlinear population Monte Carlo](docs/src/methods/npmc.md) explains clipped
   proposal adaptation with ordinary importance weights for estimation.
 - [Deterministic-mixture population Monte Carlo](docs/src/methods/dm_pmc.md)
@@ -65,6 +67,8 @@ Static MIS has an analytic CPU
 [`cuda_static_mis.jl`](validation/reproducers/cuda_static_mis.jl) reproducer.
 The concise end-to-end workflow is
 [`examples/static_mis.jl`](examples/static_mis.jl).
+The teaching [`examples/apis.jl`](examples/apis.jl) demonstrates fixed-scale
+population adaptation and retained learned state.
 The runnable
 [`logistic_regression.jl`](examples/logistic_regression.jl) example performs
 end-to-end Bayesian inference for an intercept and two regression slopes. It

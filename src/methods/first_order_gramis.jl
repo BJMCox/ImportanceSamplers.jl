@@ -712,7 +712,7 @@ function _allocate_random_buffers(
 end
 
 function _copy_algorithm(device, algorithm::FirstOrderGRAMIS)
-    copied_bank = _copy_dm_pmc_bank(device, algorithm.bank)
+    copied_bank = _copy_population_bank(device, algorithm.bank)
     return FirstOrderGRAMIS(
         copied_bank;
         rounds=algorithm.rounds,

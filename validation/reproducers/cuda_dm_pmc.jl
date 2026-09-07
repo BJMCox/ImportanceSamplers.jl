@@ -89,7 +89,7 @@ function prefilled_trajectory!(sampler, normal_batches, uniform_batches)
     execution = IS._ThreadedCPUExecution()
     target = IS._bind_resolved_target(
         sampler.target,
-        IS._dm_pmc_binding_sample(bank),
+        IS._population_binding_sample(bank),
     )
     target_evaluator, target_failures = IS._native_target_evaluator(
         backend,
