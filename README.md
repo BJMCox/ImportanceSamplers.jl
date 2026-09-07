@@ -41,7 +41,8 @@ target returns a `Float32` or `Float64` log density; the sampler never applies
 - [Adaptive multiple importance sampling](docs/src/methods/amis.md) explains
   retrospective temporal-mixture weights and learned Gaussian state.
 - [Deterministic-mixture population Monte Carlo](docs/src/methods/dm_pmc.md)
-  explains adaptive spatial mixtures, global resampling, and retained state.
+  explains adaptive spatial mixtures, global and local resampling, and retained
+  state.
 - [First-order GRAMIS-CAIS](docs/src/methods/first_order_gramis.md) explains
   the gradient move, robust local covariance fit, repulsion, and causal rounds.
 - [Native proposals](docs/src/guide/native_proposals.md) documents spherical,

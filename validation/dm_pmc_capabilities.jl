@@ -11,6 +11,7 @@ const DM_PMC_CUDA_CAPABILITY_ROWS = (
     (label=:unequal_round_sizes, type=Float64, bank=:diagonal),
     (label=:duplicate_resampled_ancestors, type=Float64, bank=:diagonal),
     (label=:repeated_prepared_execution, type=Float64, bank=:factor),
+    (label=:local_resampling, type=Float32, bank=:diagonal),
 )
 
 dm_pmc_diagonal_tolerance(::Type{T}) where {T} = T(4096) * eps(T)

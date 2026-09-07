@@ -128,10 +128,16 @@ end
         ]);
         rounds=2,
         round_size=8,
+        resampling=LocalResampling(),
     )
     assert_retarget_equivalent(
         dm_algorithm,
-        bank -> DeterministicMixturePMC(bank; rounds=2, round_size=8),
+        bank -> DeterministicMixturePMC(
+            bank;
+            rounds=2,
+            round_size=8,
+            resampling=LocalResampling(),
+        ),
         retarget_logdensity,
         (offset=0.0, location=-0.5),
         retarget_logdensity,

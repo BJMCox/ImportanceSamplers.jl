@@ -2,6 +2,30 @@ mutable struct _ValidatedDeterministicMixturePMCToken end
 const _VALIDATED_DETERMINISTIC_MIXTURE_PMC_TOKEN =
     _ValidatedDeterministicMixturePMCToken()
 
+"""
+    AbstractPMCResamplingPolicy
+
+Abstract supertype for DM-PMC ancestor-selection scopes.
+"""
+abstract type AbstractPMCResamplingPolicy end
+
+"""
+    GlobalResampling()
+
+Select every next-round proposal location from the complete weighted round.
+"""
+struct GlobalResampling <: AbstractPMCResamplingPolicy end
+
+"""
+    LocalResampling()
+
+Select each next-round proposal location from its own weighted sample group.
+"""
+struct LocalResampling <: AbstractPMCResamplingPolicy end
+
+_pmc_resampling_name(::GlobalResampling) = :global
+_pmc_resampling_name(::LocalResampling) = :local
+
 function _validate_adaptive_schedule(rounds, round_size)
     rounds isa Int && rounds > 0 || throw(ArgumentError("rounds must be a positive Int"))
     if round_size isa Int
@@ -46,36 +70,55 @@ function _adaptive_sample_budget(rounds, round_size::Vector{Int})
 end
 
 """
-    DeterministicMixturePMC(bank; rounds, round_size)
+    DeterministicMixturePMC(
+        bank;
+        rounds,
+        round_size,
+        resampling=GlobalResampling(),
+    )
 
 Configure deterministic-mixture population Monte Carlo with a fixed round
 schedule. `round_size` is either one positive `Int` repeated for every round or
-a positive `Vector{Int}` with one entry per round.
+a positive `Vector{Int}` with one entry per round. `resampling` selects global
+or local ancestor selection while keeping the same deterministic-mixture
+weights.
 """
-struct DeterministicMixturePMC{B<:ProposalBank,S} <: AbstractImportanceSampler
+struct DeterministicMixturePMC{
+    B<:ProposalBank,
+    S,
+    R<:AbstractPMCResamplingPolicy,
+} <: AbstractImportanceSampler
     bank::B
     rounds::Int
     round_size::S
+    resampling::R
 
     function DeterministicMixturePMC(
         bank::B,
         rounds::Int,
         round_size::S,
+        resampling::R,
         token::_ValidatedDeterministicMixturePMCToken,
-    ) where {B<:ProposalBank,S}
+    ) where {B<:ProposalBank,S,R<:AbstractPMCResamplingPolicy}
         token === _VALIDATED_DETERMINISTIC_MIXTURE_PMC_TOKEN || throw(
             ArgumentError("invalid internal algorithm-construction token"),
         )
-        return new{B,S}(bank, rounds, round_size)
+        return new{B,S,R}(bank, rounds, round_size, resampling)
     end
 end
 
-function DeterministicMixturePMC(bank::ProposalBank; rounds, round_size)
+function DeterministicMixturePMC(
+    bank::ProposalBank;
+    rounds,
+    round_size,
+    resampling::AbstractPMCResamplingPolicy=GlobalResampling(),
+)
     validated_round_size = _validate_adaptive_schedule(rounds, round_size)
     return DeterministicMixturePMC(
         bank,
         rounds,
         validated_round_size,
+        resampling,
         _VALIDATED_DETERMINISTIC_MIXTURE_PMC_TOKEN,
     )
 end
@@ -92,6 +135,7 @@ function _retarget_algorithm(
         current_proposal(MLDataDevices.cpu_device(), sampler);
         rounds=algorithm.rounds,
         round_size=algorithm.round_size,
+        resampling=algorithm.resampling,
     )
 end
 
@@ -574,6 +618,7 @@ function _prepare_transferred_method_state(
         _copy_to_device(device, workspace.round_proposal_ids),
         _copy_to_device(device, workspace.solve_scratch),
         _copy_to_device(device, workspace.resampling_cdf),
+        _copy_to_device(device, workspace.resampling_maxima),
         _copy_to_device(device, workspace.ancestors),
         _copy_to_device(device, workspace.candidate_locations),
     )
@@ -651,6 +696,29 @@ function _preflight_accelerator_method(
         _preflight_kernel_argument(device, batch_kernel, target_argument)
     end
 
+    _preflight_dm_pmc_resampling(
+        device,
+        backend,
+        round_views,
+        workspace,
+        buffers,
+        plan,
+        representative_round,
+        algorithm.resampling,
+    )
+    return nothing
+end
+
+function _preflight_dm_pmc_resampling(
+    device,
+    backend,
+    round_views,
+    workspace,
+    buffers,
+    _plan,
+    _round,
+    ::GlobalResampling,
+)
     finalize_kernel = _finalize_resampling_cdf_kernel!(backend)
     for argument in (round_views.cdf, round_views.round_size)
         _preflight_kernel_argument(device, finalize_kernel, argument)
@@ -671,6 +739,50 @@ function _preflight_accelerator_method(
         workspace.ancestors,
     )
         _preflight_kernel_argument(device, gather_kernel, argument)
+    end
+    return nothing
+end
+
+function _preflight_dm_pmc_resampling(
+    device,
+    backend,
+    round_views,
+    workspace,
+    buffers,
+    plan,
+    round,
+    ::LocalResampling,
+)
+    maxima_kernel = _local_logweight_maxima_kernel!(backend)
+    for argument in (
+        workspace.resampling_maxima,
+        round_views.logweights,
+        plan.counts,
+        round,
+    )
+        _preflight_kernel_argument(device, maxima_kernel, argument)
+    end
+    scale_kernel = _local_scaled_weights_kernel!(backend)
+    for argument in (
+        round_views.cdf,
+        round_views.logweights,
+        round_views.assignments,
+        workspace.resampling_maxima,
+        round,
+    )
+        _preflight_kernel_argument(device, scale_kernel, argument)
+    end
+    select_kernel = _cooperative_local_resample_locations_kernel!(backend)
+    for argument in (
+        workspace.candidate_locations,
+        workspace.ancestors,
+        round_views.samples,
+        round_views.cdf,
+        buffers.resampling_uniforms,
+        plan.counts,
+        round,
+    )
+        _preflight_kernel_argument(device, select_kernel, argument)
     end
     return nothing
 end
@@ -859,6 +971,7 @@ function _copy_algorithm(device, algorithm::DeterministicMixturePMC)
         _copy_dm_pmc_bank(device, algorithm.bank);
         rounds=algorithm.rounds,
         round_size=algorithm.round_size,
+        resampling=algorithm.resampling,
     )
 end
 

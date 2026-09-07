@@ -15,6 +15,7 @@ import Random
 import Statistics
 
 export AbstractImportanceSampler,
+    AbstractPMCResamplingPolicy,
     AbstractMISScheme,
     AbstractProposalFamily,
     AbstractProposalPopulation,
@@ -35,6 +36,8 @@ export AbstractImportanceSampler,
     FirstOrderGRAMISRoundError,
     FusedFactorExecution,
     ImportanceSampling,
+    GlobalResampling,
+    LocalResampling,
     IdentityTransform,
     IntervalTransform,
     InvalidTransformError,

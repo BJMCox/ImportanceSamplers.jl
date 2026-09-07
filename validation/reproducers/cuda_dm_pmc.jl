@@ -131,9 +131,9 @@ function prefilled_trajectory!(sampler, normal_batches, uniform_batches)
             target_failures,
             IS._NoSampleTransform(),
         )
-        IS._dm_pmc_resampling_cdf!(cdf, round_logweights)
+        IS._resampling_cdf!(cdf, round_logweights)
         copyto!(buffers.resampling_uniforms, uniform_batches[round])
-        IS._launch_dm_pmc_resampling!(
+        IS._resample_and_gather!(
             cdf,
             buffers.resampling_uniforms,
             workspace.ancestors,
@@ -261,17 +261,24 @@ function reported_transfer_record(transfers)
     return (count=transfers.count, bytes=transfers.bytes, reasons)
 end
 
-function assert_dm_pmc_reported_transfers(transfers, rounds, ::Type{T}) where {T}
+function assert_dm_pmc_reported_transfers(
+    transfers,
+    rounds,
+    ::Type{T},
+    resampling=GlobalResampling(),
+) where {T}
     record = reported_transfer_record(transfers)
-    @test record.count == 6rounds
-    @test record.bytes == rounds * (3sizeof(UInt64) + 5sizeof(T))
+    is_local = resampling isa LocalResampling
+    @test record.count == (is_local ? 5rounds : 6rounds)
+    expected_bytes = is_local ?
+                     3sizeof(UInt64) + sizeof(Int) + 3sizeof(T) :
+                     3sizeof(UInt64) + 5sizeof(T)
+    @test record.bytes == rounds * expected_bytes
     @test record.reasons.failure_snapshot == (
         count=rounds,
         bytes=rounds * 3sizeof(UInt64),
     )
     for reason in (
-        :cdf_maximum,
-        :cdf_sum,
         :logweight_maximum,
         :logweight_scaled_sum,
         :logweight_scaled_square_sum,
@@ -281,6 +288,22 @@ function assert_dm_pmc_reported_transfers(transfers, rounds, ::Type{T}) where {T
             bytes=rounds * sizeof(T),
         )
     end
+    if is_local
+        @test record.reasons.local_resampling_validity == (
+            count=rounds,
+            bytes=rounds * sizeof(Int),
+        )
+        @test iszero(record.reasons.cdf_maximum.count)
+        @test iszero(record.reasons.cdf_sum.count)
+    else
+        for reason in (:cdf_maximum, :cdf_sum)
+            @test getfield(record.reasons, reason) == (
+                count=rounds,
+                bytes=rounds * sizeof(T),
+            )
+        end
+        @test iszero(record.reasons.local_resampling_validity.count)
+    end
     return record
 end
 
@@ -289,6 +312,7 @@ function public_execution_case(
     ::Type{T},
     kind;
     repeated=false,
+    resampling=GlobalResampling(),
 ) where {T}
     schedule = [9, 11, 13]
     bank = dm_pmc_validation_bank(T, Val(kind))
@@ -299,6 +323,7 @@ function public_execution_case(
             bank;
             rounds=length(schedule),
             round_size=schedule,
+            resampling,
         );
         threaded=true,
     )
@@ -344,12 +369,14 @@ function public_execution_case(
         diagnostics.transfers,
         length(schedule),
         T,
+        resampling,
     )
     @test length(first_result) == sum(schedule)
     @test first_snapshot.round == expected_rounds
     @test first_snapshot.proposal_id == expected_proposal_ids
     @test all(isfinite, first_snapshot.logweights)
     @test diagnostics.method === :deterministic_mixture_pmc
+    @test diagnostics.resampling === IS._pmc_resampling_name(resampling)
     @test diagnostics.execution === :threaded
     @test diagnostics.threaded
     @test diagnostics.rounds == length(schedule)
@@ -360,6 +387,19 @@ function public_execution_case(
     @test all(isfinite, diagnostics.round_lognormalizers)
     @test diagnostics.failures == 0
     @test retained_after_first != initial_locations
+
+    if resampling isa LocalResampling
+        final_round = lastindex(schedule)
+        final_indices = findall(==(final_round), first_snapshot.round)
+        for (slot, proposal_id) in pairs(active_ids)
+            generated = filter(final_indices) do index
+                first_snapshot.proposal_id[index] == proposal_id
+            end
+            @test any(generated) do index
+                first_snapshot.samples[:, index] == retained_after_first[:, slot]
+            end
+        end
+    end
 
     second_transfers = nothing
     earlier_result_independent = nothing
@@ -382,6 +422,7 @@ function public_execution_case(
             second_result.diagnostics.transfers,
             length(schedule),
             T,
+            resampling,
         )
         earlier_result_independent = true
         retained_population_repeated = true
@@ -401,6 +442,7 @@ function public_execution_case(
         retained_population=true,
         retained_population_repeated,
         earlier_result_independent,
+        resampling=IS._pmc_resampling_name(resampling),
     )
 end
 
@@ -478,7 +520,7 @@ function strict_resampling_and_ess_case(::Type{T}) where {T}
     ancestors = CUDA.zeros(Int, 4)
     samples = CuArray(reshape(T.(1:16), 4, 4))
     candidates = similar(samples)
-    IS._launch_dm_pmc_resampling!(
+    IS._resample_and_gather!(
         cdf,
         uniforms,
         ancestors,
@@ -634,6 +676,12 @@ function main()
         Float64 => strict_resampling_and_ess_case(Float64),
     )
     factor_batches = [factor_batch_case(device, T) for T in (Float32, Float64)]
+    local_resampling = public_execution_case(
+        device,
+        Float32,
+        :diagonal;
+        resampling=LocalResampling(),
+    )
     @test Tuple(row.label for row in DM_PMC_CUDA_CAPABILITY_ROWS) == (
         :float32_diagonal,
         :float64_diagonal,
@@ -643,6 +691,7 @@ function main()
         :unequal_round_sizes,
         :duplicate_resampled_ancestors,
         :repeated_prepared_execution,
+        :local_resampling,
     )
     rows = (
         float32_diagonal=(
@@ -671,6 +720,7 @@ function main()
             public_execution[(Float64, :factor)],
             (; transfer_scaling),
         ),
+        local_resampling=(public_execution=local_resampling,),
     )
     @test all(row -> hasproperty(rows, row.label), DM_PMC_CUDA_CAPABILITY_ROWS)
     @test CUDA.device() == caller_device
@@ -680,6 +730,7 @@ function main()
         private_prefilled_parity,
         public_execution,
         factor_batches,
+        local_resampling,
         rows,
     )
 end

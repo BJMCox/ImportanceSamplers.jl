@@ -1,9 +1,11 @@
-# Deterministic-mixture population Monte Carlo
+# DM-PMC, GR-PMC, and LR-PMC
 
-[`DeterministicMixturePMC`](@ref) implements fixed-population DM-PMC with global
-multinomial resampling. The first-release method follows Elvira et al.,
-[“Improving Population Monte Carlo”](https://victorelvira.github.io/assets/papers/elvira2017improving_pre.pdf),
-and does not implement the paper's local or glocal variants.
+[`DeterministicMixturePMC`](@ref) implements fixed-population DM-PMC with the
+global and local multinomial resampling variants from Elvira et al.,
+[“Improving Population Monte Carlo”](https://victorelvira.github.io/assets/papers/elvira2017improving_pre.pdf).
+[`GlobalResampling`](@ref) is the default. [`LocalResampling`](@ref) changes only
+the ancestor-selection scope; both variants use the same deterministic-mixture
+weights.
 
 ## Minimal prepared execution
 
@@ -15,7 +17,12 @@ bank = ProposalBank([
     FactorGaussian([-2.0, 0.0], [1.0 0.0; 0.4 0.8]),
     FactorGaussian([ 2.0, 0.0], [1.0 0.0; -0.4 0.8]),
 ])
-algorithm = DeterministicMixturePMC(bank; rounds=6, round_size=10_000)
+algorithm = DeterministicMixturePMC(
+    bank;
+    rounds=6,
+    round_size=10_000,
+    resampling=LocalResampling(),
+)
 sampler = prepare_sampler(Xoshiro(42), logtarget, algorithm)
 samples = importance_sample!(sampler)
 ```
@@ -61,10 +68,23 @@ realized-count extension.
 
 After a complete round has valid weights, global multinomial resampling draws
 one ancestor for each proposal from the whole round. Duplicate ancestors are
-allowed and can reduce population diversity. The selected values become the
-next locations in slot order. Spherical scales, diagonal scales, and lower
-triangular factors remain fixed. Resampling also occurs after the final round,
-and that final population is retained for the next prepared call.
+allowed and can reduce population diversity.
+
+Local multinomial resampling instead draws one ancestor from each proposal's
+own weighted sample group. Every proposal therefore contributes exactly one
+next-round location. The weights still use the complete spatial-mixture
+denominator, so proposals cooperate through weighting even though ancestor
+selection remains local. A group containing only zero weights fails the round.
+
+The selected values become the next locations in slot order. Spherical scales,
+diagonal scales, and lower triangular factors remain fixed. Resampling also
+occurs after the final round, and that final population is retained for the
+next prepared call.
+
+The paper's GR-PMC and LR-PMC laws draw the same count ``K`` from every
+proposal. This exact case uses equal bank masses and a `round_size` divisible by
+the active proposal count, giving ``K = round_size / N``. Unequal masses or a
+nondivisible count use the package's documented realized-count extension.
 
 ## Complete results, provenance, and failure
 
@@ -131,10 +151,12 @@ same row exercised by the A100 reproducer.
 Main.DM_PMC_CAPABILITY_TABLE
 ```
 
-AMDGPU and Metal are unclaimed. CUDA reports six explicit small scalar transfer
-reasons per round: failure snapshot, CDF maximum and sum, and summary maximum,
-scaled sum, and scaled-square sum. This is ``O(\text{rounds})`` source-level
-accounting; it does not instrument hidden runtime or library transfers.
+AMDGPU and Metal are unclaimed. Global CUDA resampling reports six explicit
+small scalar transfer reasons per round: failure snapshot, CDF maximum and sum,
+and summary maximum, scaled sum, and scaled-square sum. Local CUDA resampling
+replaces the two CDF transfers with one group-validity transfer. This is
+``O(\text{rounds})`` source-level accounting; it does not instrument hidden
+runtime or library transfers.
 
 ## Reproducers, benchmark, and examples
 

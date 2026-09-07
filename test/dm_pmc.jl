@@ -26,8 +26,6 @@ const DMPMCIS = ImportanceSamplers
     @test varied.round_size == [50, 100, 200]
     @test varied.round_size !== input_schedule
     @test fixed isa AbstractImportanceSampler
-    @test fieldnames(typeof(fixed)) == (:bank, :rounds, :round_size)
-
     input_schedule[1] = 1
     @test varied.round_size == [50, 100, 200]
     resolved = @inferred DMPMCIS._resolve_adaptive_schedule(
@@ -809,6 +807,120 @@ end
         @test result.diagnostics.transfers.count == 0
         @test result.diagnostics.transfers.bytes == 0
     end
+end
+
+@testset "local resampling keeps one survivor per proposal" begin
+    bank = ProposalBank([
+        SphericalGaussian(-2.0, 1.0),
+        SphericalGaussian(2.0, 1.0),
+    ])
+    algorithm = DeterministicMixturePMC(
+        bank;
+        rounds=1,
+        round_size=4,
+        resampling=LocalResampling(),
+    )
+    rng = DMPMCPrefilledRNG([[-1.0, 1.0, -1.0, 1.0]], [[0.5, 0.5]])
+    sampler = prepare_sampler(rng, DMPMCTarget{Float64}(), algorithm; threaded=false)
+
+    result = importance_sample!(sampler)
+    proposal = current_proposal(sampler)
+
+    @test result.samples == [-3.0, -1.0, 1.0, 3.0]
+    @test [component.location for component in proposal.proposals] == [-1.0, 1.0]
+end
+
+@testset "local resampling matches the independent all-round oracle" begin
+    for T in (Float32, Float64)
+        case = make_dm_pmc_oracle_case(T)
+        algorithm = DeterministicMixturePMC(
+            case.bank;
+            rounds=3,
+            round_size=case.schedule,
+            resampling=LocalResampling(),
+        )
+        sampler = prepare_sampler(
+            DMPMCPrefilledRNG(case.normal_batches, case.uniform_batches),
+            DMPMCTarget{T}(),
+            algorithm;
+            threaded=false,
+        )
+        oracle = dm_pmc_scalar_oracle(
+            vec(copy(sampler.method_state.bank.locations)),
+            vec(copy(sampler.method_state.bank.scales)),
+            sampler.method_state.bank.proposal_ids,
+            sampler.method_state.plan,
+            case.normal_batches,
+            case.uniform_batches,
+            DMPMCTarget{T}(),
+            :local,
+        )
+
+        result = importance_sample!(sampler)
+
+        @test result.samples ≈ oracle.samples rtol = 32eps(T)
+        @test result.logweights ≈ oracle.logweights rtol = 64eps(T)
+        @test result.provenance.round == oracle.rounds
+        @test result.provenance.proposal_id == oracle.proposal_ids
+        @test vec(sampler.method_state.bank.locations) ≈ oracle.locations rtol = 32eps(T)
+        @test result.diagnostics.resampling === :local
+    end
+end
+
+@testset "global policy is the compatible default" begin
+    case = make_dm_pmc_oracle_case(Float64)
+    make_sampler(; resampling...) = prepare_sampler(
+        DMPMCPrefilledRNG(case.normal_batches, case.uniform_batches),
+        DMPMCTarget{Float64}(),
+        DeterministicMixturePMC(
+            case.bank;
+            rounds=3,
+            round_size=case.schedule,
+            resampling...,
+        );
+        threaded=false,
+    )
+    default = make_sampler()
+    explicit = make_sampler(resampling=GlobalResampling())
+
+    default_result = importance_sample!(default)
+    explicit_result = importance_sample!(explicit)
+
+    @test default_result.samples == explicit_result.samples
+    @test default_result.logweights == explicit_result.logweights
+    default_proposal = current_proposal(default)
+    explicit_proposal = current_proposal(explicit)
+    @test default_proposal.masses == explicit_proposal.masses
+    @test [proposal.location for proposal in default_proposal.proposals] ==
+          [proposal.location for proposal in explicit_proposal.proposals]
+    @test default_result.diagnostics.resampling === :global
+end
+
+@testset "local empty group fails without committing the population" begin
+    bank = ProposalBank([
+        SphericalGaussian(-2.0, 1.0),
+        SphericalGaussian(2.0, 1.0),
+    ])
+    algorithm = DeterministicMixturePMC(
+        bank;
+        rounds=1,
+        round_size=4,
+        resampling=LocalResampling(),
+    )
+    rng = DMPMCPrefilledRNG([[-1.0, 1.0, -1.0, 1.0]], [[0.5, 0.5]])
+    sampler = prepare_sampler(rng, DMPMCLeftEmptyTarget{Float64}(), algorithm)
+    initial = current_proposal(sampler)
+
+    error = caught_dm_pmc_error() do
+        importance_sample!(sampler)
+    end
+
+    @test error.phase === :resampling
+    @test error.cause isa AllZeroWeightsError
+    retained = current_proposal(sampler)
+    @test retained.masses == initial.masses
+    @test [proposal.location for proposal in retained.proposals] ==
+          [proposal.location for proposal in initial.proposals]
 end
 
 @testset "DM-PMC prepared state persists without result aliasing" begin
