@@ -23,7 +23,9 @@ Zero-mass proposals remain in the configuration and retain their stable
 one-based IDs, but are neither assigned nor evaluated. Positive-mass proposals
 must share a sample dimension. Generic CPU execution additionally requires one
 concrete proposal element type. Native Gaussian banks with one scalar/vector
-layout and floating type may be packed during preparation.
+layout and floating type may be packed during preparation. Loading
+Distributions.jl converts `Normal` and conventional `MvNormal` entries to these
+native forms during construction.
 
 `ProposalBank` deliberately implements neither `rand` nor
 `DensityInterface.logdensityof`: a bank is a proposal population, not a mixture
@@ -77,7 +79,7 @@ struct ProposalBank{P<:AbstractVector,M<:AbstractVector} <: AbstractProposalPopu
             normalized_masses,
             "final normalization",
         )
-        copied_proposals = copy(proposals)
+        copied_proposals = _prepare_proposal_inputs(proposals)
         return new{typeof(copied_proposals),typeof(normalized_masses)}(
             copied_proposals,
             normalized_masses,

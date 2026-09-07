@@ -132,6 +132,50 @@ end
     @test_throws DimensionMismatch DensityInterface.logdensityof(factor, zeros(3))
 end
 
+@testset "native Student-t analytic densities" begin
+    scalar = SphericalStudentT(1.0, 1.25, 2.5)
+    scalar_sample = -0.75
+    scalar_radius = abs2((scalar_sample - 1.25) / 2.5)
+    scalar_expected = -log(pi) - log(2.5) - log1p(scalar_radius)
+    @test DensityInterface.logdensityof(scalar, scalar_sample) ≈ scalar_expected
+
+    spherical = SphericalStudentT(1.0, Float64[1, -1], 2.0)
+    spherical_radius = 1 + 4
+    spherical_expected = -log(2pi) - 2log(2.0) - 1.5log1p(spherical_radius)
+    @test DensityInterface.logdensityof(spherical, Float64[3, -5]) ≈
+          spherical_expected
+
+    diagonal = DiagonalStudentT(3.0, Float64[1, -1], Float64[2, 4])
+    diagonal_radius = 1 + 1
+    diagonal_expected = -log(2pi) - log(2 * 4) - 2.5log1p(diagonal_radius / 3)
+    @test DensityInterface.logdensityof(diagonal, Float64[3, 3]) ≈
+          diagonal_expected
+
+    factor = FactorStudentT(2.0, Float64[0, 0], Float64[2 0; 0.5 1.5])
+    @test DensityInterface.logdensityof(factor, Float64[2, 2]) ≈
+          -log(2pi) - log(3.0) - 2log1p(2 / 2)
+end
+
+@testset "native Student-t validation and draws" begin
+    for dof in (0.0, -1.0, Inf, NaN)
+        @test_throws ArgumentError SphericalStudentT(dof, 0.0, 1.0)
+    end
+    @test_throws ArgumentError SphericalStudentT(3.0f0, 0.0, 1.0)
+    @test_throws ArgumentError DiagonalStudentT(3.0, 0.0, 1.0)
+    @test_throws ArgumentError FactorStudentT(3.0, 0.0, 1.0)
+
+    for T in (Float32, Float64)
+        scalar = SphericalStudentT(T(7), T(1), T(2))
+        factor = FactorStudentT(T(8), T[1, -2], T[1.25 0; 0.4 0.8])
+        scalar_draw = @inferred rand(Random.Xoshiro(41), scalar)
+        factor_draw = @inferred rand(Random.Xoshiro(42), factor)
+        @test scalar_draw isa T
+        @test factor_draw isa Vector{T}
+        @test @inferred(DensityInterface.logdensityof(scalar, scalar_draw)) isa T
+        @test @inferred(DensityInterface.logdensityof(factor, factor_draw)) isa T
+    end
+end
+
 @testset "native Gaussian subnormal scales" begin
     for T in (Float32, Float64)
         scale = nextfloat(zero(T))
@@ -204,6 +248,29 @@ function _empirical_mean_covariance(draws)
     centered = draws .- mean
     covariance = centered * transpose(centered) / (nsamples - 1)
     return mean, covariance
+end
+
+@testset "native Student-t seeded moments and self-target weights" begin
+    dof = 8.0
+    location = Float64[1, -2]
+    factor = Float64[1.25 0; 0.4 0.8]
+    proposal = FactorStudentT(dof, location, factor)
+    draws = _draw_matrix(Random.Xoshiro(0x71c9), proposal, 40_000)
+    observed_mean, observed_covariance = _empirical_mean_covariance(draws)
+    expected_covariance = dof / (dof - 2) * factor * transpose(factor)
+    @test observed_mean ≈ location atol = 0.035
+    @test observed_covariance ≈ expected_covariance atol = 0.065
+
+    target = let proposal = proposal
+        sample -> DensityInterface.logdensityof(proposal, sample)
+    end
+    result = importance_sample(
+        Random.Xoshiro(0x0bc3),
+        target,
+        ImportanceSampling(proposal; nsamples=128);
+        threaded=false,
+    )
+    @test maximum(abs, result.logweights) <= 64eps()
 end
 
 @testset "native Gaussian seeded moments" begin

@@ -24,7 +24,9 @@ Configure plain or static multiple importance sampling.
 `DensityInterface.logdensityof(proposal, sample)` for the same normalized
 measure. `nsamples` must be a positive `Int` and is the exact number of samples
 returned by every run. Generic proposals execute on CPU; the native Gaussian
-and transform subset also supports prepared CUDA execution.
+and transform subset also supports prepared CUDA execution. Loading
+Distributions.jl adds automatic native conversion for `Normal` and conventional
+`MvNormal` proposals.
 
 When the first argument is a [`ProposalBank`](@ref), `mis_scheme` selects one of
 the four complete assignment/denominator contracts described by
@@ -54,7 +56,7 @@ end
 function ImportanceSampling(proposal; nsamples)
     nsamples isa Int && nsamples > 0 || throw(ArgumentError("nsamples must be a positive Int"))
     return ImportanceSampling(
-        proposal,
+        _prepare_proposal_input(proposal),
         nsamples,
         _SingleProposalScheme(),
         _VALIDATED_IMPORTANCE_SAMPLING_TOKEN,

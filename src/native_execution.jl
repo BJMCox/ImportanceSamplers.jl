@@ -94,11 +94,62 @@ end
 )
     logabsjac, reason = _native_inverse_sample!(coordinates, offset, sample, transform)
     iszero(reason) || return base.lognormalizer, _NATIVE_PROPOSAL_INVALID
-    return _native_gaussian_logdensity!(base, coordinates, offset) - logabsjac, UInt16(0)
+    return _native_proposal_logdensity!(base, coordinates, offset) - logabsjac, UInt16(0)
+end
+
+struct _ScaledNormals{A,T}
+    values::A
+    multiplier::T
+end
+
+@inline Base.getindex(normals::_ScaledNormals, index) =
+    @inbounds(normals.values[index]) * normals.multiplier
+
+@inline _native_radial_multiplier(::_GaussianProposal, normals, uniforms, offset, slot) =
+    (one(eltype(normals)), UInt16(0))
+
+@inline function _native_radial_multiplier(
+    proposal::_StudentTProposal,
+    normals,
+    uniforms,
+    offset,
+    slot,
+)
+    dof = proposal.family.dof
+    dimension = _gaussian_dimension(proposal.location)
+    if isone(dof)
+        denominator = abs(@inbounds normals[offset + dimension])
+        isfinite(denominator) && denominator > zero(dof) ||
+            return zero(dof), _NATIVE_PROPOSAL_DRAW_EXHAUSTED
+        return inv(denominator), UInt16(0)
+    end
+
+    shape = dof / typeof(dof)(2)
+    adjusted_shape = shape < one(shape) ? shape + one(shape) : shape
+    gamma_offset, coefficient = _gamma_parameters(adjusted_shape)
+    uniform_offset = (slot - 1) * _native_uniform_stride(proposal)
+    for attempt in 1:_STUDENT_T_GAMMA_ATTEMPTS
+        normal = @inbounds normals[offset + dimension + attempt - 1]
+        uniform = @inbounds uniforms[uniform_offset + attempt]
+        gamma, accepted = _gamma_candidate(gamma_offset, coefficient, normal, uniform)
+        accepted || continue
+        if shape < one(shape)
+            correction = @inbounds uniforms[
+                uniform_offset + _STUDENT_T_GAMMA_ATTEMPTS + 1
+            ]
+            correction > zero(shape) ||
+                return zero(shape), _NATIVE_PROPOSAL_DRAW_EXHAUSTED
+            gamma *= correction^inv(shape)
+        end
+        isfinite(gamma) && gamma > zero(shape) ||
+            return zero(shape), _NATIVE_PROPOSAL_DRAW_EXHAUSTED
+        return sqrt(dof / (typeof(dof)(2) * gamma)), UInt16(0)
+    end
+    return zero(shape), _NATIVE_PROPOSAL_DRAW_EXHAUSTED
 end
 
 @inline function _native_gaussian_coordinate(
-    base::_GaussianProposal,
+    base::Union{_GaussianProposal,_StudentTProposal},
     normals,
     offset,
     coordinate,
@@ -564,60 +615,72 @@ end
     )
 end
 
-@kernel function _native_gaussian_fused_kernel!(
+@kernel function _native_fused_kernel!(
     samples,
     logweights,
     failure_storage,
+    uniform_buffer,
     normal_buffer,
     target,
     base,
     transform,
 )
     slot = @index(Global, Linear)
-    dimension = _gaussian_dimension(base.location)
-    normal_offset = (slot - 1) * dimension + 1
-    _, reason, block = _native_generate_sample!(
-        samples,
-        slot,
+    normal_offset = (slot - 1) * _native_normal_stride(base) + 1
+    multiplier, multiplier_reason = _native_radial_multiplier(
         base,
-        transform,
         normal_buffer,
+        uniform_buffer,
         normal_offset,
+        slot,
     )
-    if !iszero(reason)
-        _record_native_failure!(failure_storage, slot, block, reason)
+    if !iszero(multiplier_reason)
+        _record_native_failure!(failure_storage, slot, 0, multiplier_reason)
     else
-        sample = _native_sample_at(samples, slot)
-        target_log, target_reason, target_failed = target(sample, slot)
-        if target_failed
-            iszero(target_reason) ||
-                _record_native_failure!(failure_storage, slot, 0, target_reason)
+        normals = _ScaledNormals(normal_buffer, multiplier)
+        _, reason, block = _native_generate_sample!(
+            samples,
+            slot,
+            base,
+            transform,
+            normals,
+            normal_offset,
+        )
+        if !iszero(reason)
+            _record_native_failure!(failure_storage, slot, block, reason)
         else
-            proposal_log, density_reason = _native_generated_logdensity(
-                base,
-                transform,
-                sample,
-                normal_buffer,
-                normal_offset,
-            )
-            proposal_reason = iszero(density_reason) ?
-                              _native_proposal_reason(proposal_log) : density_reason
-            if !iszero(proposal_reason)
-                _record_native_failure!(failure_storage, slot, 0, proposal_reason)
+            sample = _native_sample_at(samples, slot)
+            target_log, target_reason, target_failed = target(sample, slot)
+            if target_failed
+                iszero(target_reason) ||
+                    _record_native_failure!(failure_storage, slot, 0, target_reason)
             else
-                logweight, logweight_reason = _subtract_logweight(
-                    target_log,
-                    proposal_log,
+                proposal_log, density_reason = _native_generated_logdensity(
+                    base,
+                    transform,
+                    sample,
+                    normal_buffer,
+                    normal_offset,
                 )
-                if iszero(logweight_reason)
-                    @inbounds logweights[slot] = logweight
+                proposal_reason = iszero(density_reason) ?
+                                  _native_proposal_reason(proposal_log) : density_reason
+                if !iszero(proposal_reason)
+                    _record_native_failure!(failure_storage, slot, 0, proposal_reason)
                 else
-                    _record_native_failure!(
-                        failure_storage,
-                        slot,
-                        0,
-                        logweight_reason,
+                    logweight, logweight_reason = _subtract_logweight(
+                        target_log,
+                        proposal_log,
                     )
+                    if iszero(logweight_reason)
+                        @inbounds logweights[slot] = logweight
+                    else
+                        _record_native_failure!(
+                            failure_storage,
+                            slot,
+                            0,
+                            logweight_reason,
+                        )
+                    end
                 end
             end
         end
@@ -644,6 +707,9 @@ function _throw_native_failure(snapshot, transform)
             _native_transform_failure_reason(bits),
             _native_failure_location(transform, snapshot.first_block),
         )
+        throw(SamplerExecutionError(:proposal_draw, index, CapturedException(cause, backtrace())))
+    elseif bits & _NATIVE_PROPOSAL_DRAW_EXHAUSTED != 0
+        cause = ErrorException("Student-t radial sampler exhausted its random buffer")
         throw(SamplerExecutionError(:proposal_draw, index, CapturedException(cause, backtrace())))
     elseif bits & _NATIVE_GENERATED_NONFINITE != 0
         cause = DomainError(bits, "generated proposal samples must contain only finite values")
@@ -688,6 +754,7 @@ function _launch_native_fused!(
     samples,
     logweights,
     failure_record,
+    uniform_buffer,
     normal_buffer,
     target,
     base,
@@ -695,11 +762,12 @@ function _launch_native_fused!(
     execution,
 )
     backend = KernelAbstractions.get_backend(normal_buffer)
-    kernel = _native_gaussian_fused_kernel!(backend)
+    kernel = _native_fused_kernel!(backend)
     kernel(
         samples,
         logweights,
         failure_record.storage,
+        uniform_buffer,
         normal_buffer,
         target,
         base,
@@ -810,6 +878,7 @@ function _use_native_factor_batch_path(
     factor_execution,
 )
     return transform isa _NoSampleTransform &&
+           base isa _GaussianProposal &&
            base.scale isa _FactorGaussianScale &&
            _use_factor_batch_path(device, base, factor_execution)
 end

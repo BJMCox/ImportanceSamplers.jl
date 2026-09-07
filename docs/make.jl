@@ -452,7 +452,7 @@ makedocs(
     checkdocs=:exports,
     linkcheck=true,
     linkcheck_ignore=[
-        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/validation/reproducers/(cuda_)?static_mis\.jl$",
+        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/validation/reproducers/((cuda_)?static_mis|cuda_student_t)\.jl$",
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/dm_pmc|examples/(dm_pmc|numerical_integration)|validation/reproducers/(cuda_dm_pmc|dm_pmc_global))\.jl$",
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/amis|examples/amis|validation/reproducers/(cuda_)?amis)\.jl$",
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(examples/first_order_gramis|validation/reproducers/(cuda_)?first_order_gramis)\.jl$",

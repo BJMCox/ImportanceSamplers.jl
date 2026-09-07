@@ -18,9 +18,11 @@ Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 
 [weakdeps]
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 
 [extensions]
 ImportanceSamplersCUDAExt = "CUDA"
+ImportanceSamplersDistributionsExt = "Distributions"
 
 [compat]
 ADTypes = "1.24.0"
@@ -28,6 +30,7 @@ Adapt = "4.7.0"
 CUDA = "6.2"
 DensityInterface = "0.4.0"
 DifferentiationInterface = "0.7.21"
+Distributions = "0.25"
 ForwardDiff = "1.4.5"
 KernelAbstractions = "0.9.42"
 LinearAlgebra = "1.12.0"
@@ -39,8 +42,9 @@ Statistics = "1.11.4"
 julia = "1.12"
 
 [extras]
+Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["ForwardDiff", "Test"]
+test = ["Distributions", "ForwardDiff", "Test"]

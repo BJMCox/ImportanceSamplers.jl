@@ -37,6 +37,9 @@ AbstractRadialProposalFamily
 SphericalGaussian
 DiagonalGaussian
 FactorGaussian
+SphericalStudentT
+DiagonalStudentT
+FactorStudentT
 ProductProposal
 TransformedProposal
 AbstractSampleTransform

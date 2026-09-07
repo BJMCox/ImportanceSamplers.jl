@@ -14,6 +14,13 @@ abstract type AbstractRadialProposalFamily <: AbstractProposalFamily end
 
 struct GaussianFamily <: AbstractRadialProposalFamily end
 
+struct StudentTFamily{T} <: AbstractRadialProposalFamily
+    dof::T
+end
+
+_prepare_proposal_input(proposal) = proposal
+_prepare_proposal_inputs(proposals) = copy(proposals)
+
 """
     ProductProposal(blocks::NamedTuple)
 
@@ -57,7 +64,8 @@ struct TransformedProposal{B,T}
     end
 end
 
-TransformedProposal(base, transform) = _prepare_transformed_proposal(base, transform)
+TransformedProposal(base, transform) =
+    _prepare_transformed_proposal(_prepare_proposal_input(base), transform)
 
 struct _SphericalGaussianScale{T}
     scale::T
@@ -78,12 +86,24 @@ struct _GaussianProposal{F,L,S,T}
     lognormalizer::T
 end
 
+struct _StudentTProposal{F,L,S,T}
+    family::F
+    location::L
+    scale::S
+    lognormalizer::T
+end
+
+const _NativeRadialProposal = Union{_GaussianProposal,_StudentTProposal}
+
 _accelerator_proposal_limit(::_GaussianProposal) = nothing
+_accelerator_proposal_limit(::_StudentTProposal) = nothing
 
 Adapt.@adapt_structure _SphericalGaussianScale
 Adapt.@adapt_structure _DiagonalGaussianScale
 Adapt.@adapt_structure _FactorGaussianScale
 Adapt.@adapt_structure _GaussianProposal
+Adapt.@adapt_structure StudentTFamily
+Adapt.@adapt_structure _StudentTProposal
 
 const _NativeGaussianFloat = Union{Float32,Float64}
 
@@ -272,6 +292,146 @@ function FactorGaussian(location, factor)
     )
 end
 
+function _validated_student_t_dof(dof::T, ::Type{T}) where {T<:_NativeGaussianFloat}
+    isfinite(dof) && dof > zero(T) || throw(
+        ArgumentError("degrees of freedom must be finite and positive"),
+    )
+    return dof
+end
+
+function _validated_student_t_dof(dof, ::Type{T}) where {T}
+    throw(
+        ArgumentError(
+            "degrees of freedom must have the same Float32 or Float64 type as location",
+        ),
+    )
+end
+
+@inline function _positive_loggamma(value::Float64)
+    shifted = value < 1.0 ? value + 1.0 : value
+    z = shifted - 1.0
+    series = 0.99999999999980993
+    coefficients = (
+        676.5203681218851,
+        -1259.1392167224028,
+        771.32342877765313,
+        -176.61502916214059,
+        12.507343278686905,
+        -0.13857109526572012,
+        9.9843695780195716e-6,
+        1.5056327351493116e-7,
+    )
+    for index in eachindex(coefficients)
+        series += coefficients[index] / (z + Float64(index))
+    end
+    shifted_sum = z + 7.5
+    result = 0.9189385332046727 +
+             (z + 0.5) * log(shifted_sum) - shifted_sum + log(series)
+    return value < 1.0 ? result - log(value) : result
+end
+
+function _student_t_lognormalizer(
+    ::Type{T},
+    dof::T,
+    dimension,
+    logabsdet::T,
+) where {T<:_NativeGaussianFloat}
+    work_dof = Float64(dof)
+    half_dimension = 0.5 * Float64(dimension)
+    value = _positive_loggamma(0.5 * (work_dof + Float64(dimension))) -
+            _positive_loggamma(0.5 * work_dof) -
+            half_dimension * log(work_dof * pi) - Float64(logabsdet)
+    return T(value)
+end
+
+function _student_t_proposal(dof, location, scale, logabsdet)
+    T = _gaussian_float_type(location)
+    stored_dof = _validated_student_t_dof(dof, T)
+    lognormalizer = _student_t_lognormalizer(
+        T,
+        stored_dof,
+        _gaussian_dimension(location),
+        logabsdet,
+    )
+    return _StudentTProposal(
+        StudentTFamily(stored_dof),
+        location,
+        scale,
+        lognormalizer,
+    )
+end
+
+"""
+    SphericalStudentT(dof, location, scale)
+
+Construct a normalized scalar or spherical multivariate Student-t proposal.
+`dof`, `location`, and `scale` must share a `Float32` or `Float64` type.
+The scale is the standard elliptical scale, not the standard deviation.
+"""
+function SphericalStudentT(dof, location, scale)
+    stored_location = _validated_gaussian_location(location)
+    T = _gaussian_float_type(stored_location)
+    stored_scale = _validated_gaussian_scale(scale, T)
+    dimension = _gaussian_dimension(stored_location)
+    return _student_t_proposal(
+        dof,
+        stored_location,
+        _SphericalGaussianScale(stored_scale),
+        T(dimension) * log(stored_scale),
+    )
+end
+
+"""
+    DiagonalStudentT(dof, location, scales)
+
+Construct a normalized multivariate Student-t proposal with diagonal elliptical
+scales. The scales are not marginal standard deviations.
+"""
+function DiagonalStudentT(dof, location, scales)
+    stored_location = _validated_gaussian_location(location)
+    stored_location isa AbstractVector || throw(
+        ArgumentError("DiagonalStudentT requires a vector location"),
+    )
+    T = _gaussian_float_type(stored_location)
+    stored_scales = _validated_diagonal_scales(
+        scales,
+        T,
+        length(stored_location),
+    )
+    return _student_t_proposal(
+        dof,
+        stored_location,
+        _DiagonalGaussianScale(stored_scales),
+        sum(log, stored_scales),
+    )
+end
+
+"""
+    FactorStudentT(dof, location, factor)
+
+Construct a normalized multivariate Student-t proposal with elliptical scale
+matrix `factor * factor'`. Density evaluation uses triangular solves.
+"""
+function FactorStudentT(dof, location, factor)
+    stored_location = _validated_gaussian_location(location)
+    stored_location isa AbstractVector || throw(
+        ArgumentError("FactorStudentT requires a vector location"),
+    )
+    T = _gaussian_float_type(stored_location)
+    stored_factor = _validate_gaussian_factor(
+        _copied_gaussian_factor(factor),
+        stored_location,
+        T,
+    )
+    logabsdet = sum(index -> log(stored_factor[index, index]), axes(stored_factor, 1))
+    return _student_t_proposal(
+        dof,
+        stored_location,
+        _FactorGaussianScale(stored_factor),
+        logabsdet,
+    )
+end
+
 function _draw_gaussian(
     rng::Random.AbstractRNG,
     location::T,
@@ -424,6 +584,23 @@ end
            oftype(proposal.lognormalizer, 0.5) * squared_radius
 end
 
+@inline _native_proposal_logdensity!(proposal::_GaussianProposal, coordinates, offset) =
+    _native_gaussian_logdensity!(proposal, coordinates, offset)
+
+@inline function _native_proposal_logdensity!(proposal::_StudentTProposal, coordinates, offset)
+    squared_radius = _native_gaussian_squared_radius!(
+        proposal.location,
+        proposal.scale,
+        coordinates,
+        offset,
+    )
+    dof = proposal.family.dof
+    dimension = _gaussian_dimension(proposal.location)
+    return proposal.lognormalizer -
+           (dof + typeof(dof)(dimension)) / typeof(dof)(2) *
+           log1p(squared_radius / dof)
+end
+
 function _gaussian_from_normal(
     location::AbstractVector{T},
     scale,
@@ -461,6 +638,73 @@ end
 
 function Random.rand(rng::Random.AbstractRNG, proposal::_GaussianProposal)
     return _draw_gaussian(rng, proposal.location, proposal.scale)
+end
+
+@inline function _gamma_parameters(shape::T) where {T}
+    offset = shape - T(1 / 3)
+    return offset, inv(sqrt(T(9) * offset))
+end
+
+@inline function _gamma_candidate(offset::T, coefficient::T, normal::T, uniform::T) where {T}
+    root = one(T) + coefficient * normal
+    root > zero(T) || return zero(T), false
+    cube = root * root * root
+    accepted = uniform < one(T) - T(0.0331) * abs2(abs2(normal)) ||
+               log(uniform) < T(0.5) * abs2(normal) +
+                              offset * (one(T) - cube + log(cube))
+    return offset * cube, accepted
+end
+
+function _rand_unit_gamma(rng::Random.AbstractRNG, shape::T) where {T<:_NativeGaussianFloat}
+    adjusted_shape = shape < one(T) ? shape + one(T) : shape
+    offset, coefficient = _gamma_parameters(adjusted_shape)
+    while true
+        gamma, accepted = _gamma_candidate(
+            offset,
+            coefficient,
+            Random.randn(rng, T),
+            Random.rand(rng, T),
+        )
+        accepted || continue
+        shape >= one(T) && return gamma
+        correction = Random.rand(rng, T)
+        correction > zero(T) && return gamma * correction^inv(shape)
+    end
+end
+
+function _student_t_multiplier(
+    rng::Random.AbstractRNG,
+    dof::T,
+) where {T<:_NativeGaussianFloat}
+    dof == one(T) && return inv(abs(Random.randn(rng, T)))
+    chi_square = T(2) * _rand_unit_gamma(rng, dof / T(2))
+    return sqrt(dof / chi_square)
+end
+
+function _draw_student_t(
+    rng::Random.AbstractRNG,
+    proposal::_StudentTProposal{F,T},
+) where {F,T<:_NativeGaussianFloat}
+    multiplier = _student_t_multiplier(rng, proposal.family.dof)
+    normal = Random.randn(rng, T) * multiplier
+    return _gaussian_affine_coordinate(
+        proposal.location,
+        proposal.scale.scale,
+        normal,
+    )
+end
+
+function _draw_student_t(
+    rng::Random.AbstractRNG,
+    proposal::_StudentTProposal{F,Vector{T}},
+) where {F,T<:_NativeGaussianFloat}
+    normals = Random.randn(rng, T, length(proposal.location))
+    normals .*= _student_t_multiplier(rng, proposal.family.dof)
+    return _gaussian_from_normal(proposal.location, proposal.scale, normals)
+end
+
+function Random.rand(rng::Random.AbstractRNG, proposal::_StudentTProposal)
+    return _draw_student_t(rng, proposal)
 end
 
 function _check_gaussian_sample_length(location, sample)
@@ -536,9 +780,27 @@ function DensityInterface.logdensityof(
     return proposal.lognormalizer - oftype(proposal.lognormalizer, 0.5) * squared_radius
 end
 
+function DensityInterface.logdensityof(
+    proposal::_StudentTProposal,
+    sample,
+)
+    squared_radius = _gaussian_squared_radius(
+        proposal.location,
+        proposal.scale,
+        sample,
+    )
+    dof = proposal.family.dof
+    dimension = _gaussian_dimension(proposal.location)
+    return proposal.lognormalizer -
+           (dof + typeof(dof)(dimension)) / typeof(dof)(2) *
+           log1p(squared_radius / dof)
+end
+
 @inline DensityInterface.DensityKind(::_GaussianProposal) = DensityInterface.HasDensity()
+@inline DensityInterface.DensityKind(::_StudentTProposal) = DensityInterface.HasDensity()
 
 _proposal_dimension(proposal::_GaussianProposal) = _gaussian_dimension(proposal.location)
+_proposal_dimension(proposal::_StudentTProposal) = _gaussian_dimension(proposal.location)
 
 _draw_product_values(rng::Random.AbstractRNG, ::Tuple{}) = ()
 

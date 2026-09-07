@@ -6,9 +6,10 @@ const _VALIDATED_AMIS_TOKEN = _ValidatedAMISToken()
 
 Configure adaptive multiple importance sampling with a fixed round schedule.
 `proposal` must be a native `Float32` or `Float64` scalar spherical Gaussian,
-or a vector spherical, diagonal, or factor Gaussian. `round_size` is either one
-positive `Int` repeated for every round or a positive `Vector{Int}` with one
-entry per round.
+or a vector spherical, diagonal, or factor Gaussian. Loading Distributions.jl
+also accepts `Normal` and conventional `MvNormal` values through automatic
+native conversion. `round_size` is either one positive `Int` repeated for every
+round or a positive `Vector{Int}` with one entry per round.
 
 Each successful result reports `diagnostics.method == :amis`.
 `diagnostics.round_ess[t]` and `diagnostics.round_lognormalizers[t]` summarize
@@ -36,8 +37,9 @@ end
 
 function AMIS(proposal; rounds, round_size)
     schedule = _validate_adaptive_schedule(rounds, round_size)
-    _validate_amis_proposal(proposal)
-    return AMIS(proposal, rounds, schedule, _VALIDATED_AMIS_TOKEN)
+    prepared_proposal = _prepare_proposal_input(proposal)
+    _validate_amis_proposal(prepared_proposal)
+    return AMIS(prepared_proposal, rounds, schedule, _VALIDATED_AMIS_TOKEN)
 end
 
 function _validate_amis_proposal(proposal::_GaussianProposal)

@@ -234,7 +234,7 @@ _execution_name(execution::_KernelExecution) = _execution_name(execution.cpu_exe
 
 _supports_native_fused_cpu(proposal) = false
 
-function _supports_native_fused_cpu(proposal::_GaussianProposal)
+function _supports_native_radial_storage(proposal)
     location = proposal.location
     scale = proposal.scale
     if location isa _NativeGaussianFloat
@@ -247,6 +247,10 @@ function _supports_native_fused_cpu(proposal::_GaussianProposal)
     end
     return false
 end
+_supports_native_fused_cpu(proposal::_GaussianProposal) =
+    _supports_native_radial_storage(proposal)
+_supports_native_fused_cpu(proposal::_StudentTProposal) =
+    _supports_native_radial_storage(proposal)
 
 _supports_native_transform(::IdentityTransform, dimension) = true
 _supports_native_transform(::SimplexTransform, dimension) = true
@@ -265,7 +269,7 @@ _supports_native_transform(transform, dimension) = false
 function _supports_native_fused_cpu(proposal::TransformedProposal)
     base = proposal.base
     transform = proposal.transform
-    base isa _GaussianProposal || return false
+    base isa Union{_GaussianProposal,_StudentTProposal} || return false
     _supports_native_fused_cpu(base) || return false
     dimension = _gaussian_dimension(base.location)
     _supports_native_transform(transform, dimension) || return false
@@ -286,8 +290,8 @@ function _allocate_random_buffers(device, proposal, nsamples)
     _supports_native_fused_cpu(proposal) || return _NoRandomBuffers()
     T = _native_fused_float_type(proposal)
     prototype = device(Vector{T}(undef, 0))
-    uniform = similar(prototype, T, 0)
-    normal = similar(prototype, T, _native_fused_dimension(proposal) * nsamples)
+    uniform = similar(prototype, T, _native_uniform_count(proposal, nsamples))
+    normal = similar(prototype, T, _native_normal_count(proposal, nsamples))
     failure_scratch = _allocate_native_failure_scratch(normal, nsamples)
     return _RandomBuffers(uniform, normal, failure_scratch)
 end
@@ -378,6 +382,7 @@ function _importance_sample!(sampler, execution::_KernelExecution)
             samples,
             logweights,
             failure_record,
+            buffers.uniform,
             normal_buffer,
             target_evaluator,
             base,
@@ -432,7 +437,7 @@ function _preflight_native_kernel_target(
     target_argument =
         _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
     backend = KernelAbstractions.get_backend(buffers.normal)
-    kernel = _native_gaussian_fused_kernel!(backend)
+    kernel = _native_fused_kernel!(backend)
     _preflight_kernel_argument(device, kernel, target_argument)
     if _use_native_factor_batch_path(
         device,
@@ -460,6 +465,8 @@ end
 
 _native_fused_components(proposal::_GaussianProposal) =
     (proposal, _NoSampleTransform())
+_native_fused_components(proposal::_StudentTProposal) =
+    (proposal, _NoSampleTransform())
 _native_fused_components(proposal::TransformedProposal) =
     (proposal.base, proposal.transform)
 
@@ -472,6 +479,30 @@ end
 function _native_fused_dimension(proposal)
     base, _ = _native_fused_components(proposal)
     return _gaussian_dimension(base.location)
+end
+const _STUDENT_T_GAMMA_ATTEMPTS = 8
+
+_native_normal_stride(base::_GaussianProposal) = _gaussian_dimension(base.location)
+_native_uniform_stride(::_GaussianProposal) = 0
+
+function _native_normal_stride(base::_StudentTProposal)
+    dimension = _gaussian_dimension(base.location)
+    return dimension + (isone(base.family.dof) ? 1 : _STUDENT_T_GAMMA_ATTEMPTS)
+end
+
+function _native_uniform_stride(base::_StudentTProposal)
+    isone(base.family.dof) && return 0
+    return _STUDENT_T_GAMMA_ATTEMPTS + (base.family.dof < typeof(base.family.dof)(2))
+end
+
+function _native_normal_count(proposal, nsamples)
+    base, _ = _native_fused_components(proposal)
+    return _native_normal_stride(base) * nsamples
+end
+
+function _native_uniform_count(proposal, nsamples)
+    base, _ = _native_fused_components(proposal)
+    return _native_uniform_stride(base) * nsamples
 end
 
 function _resolve_native_logweight_type(target, base, sample_type::Type)
@@ -494,18 +525,13 @@ end
 
 function _allocate_native_samples(
     prototype,
-    base::_GaussianProposal{F,T},
+    base::_NativeRadialProposal,
     nsamples,
-) where {F,T<:_NativeGaussianFloat}
-    return similar(prototype, T, nsamples)
-end
-
-function _allocate_native_samples(
-    prototype,
-    base::_GaussianProposal{F,<:AbstractVector{T}},
-    nsamples,
-) where {F,T<:_NativeGaussianFloat}
-    return similar(prototype, T, _gaussian_dimension(base.location), nsamples)
+)
+    T = _native_fused_float_type(base)
+    return base.location isa _NativeGaussianFloat ?
+           similar(prototype, T, nsamples) :
+           similar(prototype, T, _gaussian_dimension(base.location), nsamples)
 end
 
 function _allocate_native_samples(prototype, proposal::TransformedProposal, nsamples)
@@ -624,9 +650,11 @@ const _NATIVE_TARGET_POSITIVE_INFINITY = UInt16(0x0200)
 const _NATIVE_PROPOSAL_INVALID = UInt16(0x0400)
 const _NATIVE_GENERATED_NONFINITE = UInt16(0x0800)
 const _NATIVE_LOGWEIGHT_INVALID = UInt16(0x1000)
+const _NATIVE_PROPOSAL_DRAW_EXHAUSTED = UInt16(0x0010)
 const _NATIVE_TRANSFORM_REASONS = UInt16(0x000f)
 const _NATIVE_PROPOSAL_DRAW_REASONS =
-    _NATIVE_TRANSFORM_REASONS | _NATIVE_GENERATED_NONFINITE
+    _NATIVE_TRANSFORM_REASONS | _NATIVE_GENERATED_NONFINITE |
+    _NATIVE_PROPOSAL_DRAW_EXHAUSTED
 
 @inline function _native_target_reason(value)
     isnan(value) && return _NATIVE_TARGET_NAN
