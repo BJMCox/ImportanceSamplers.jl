@@ -284,7 +284,7 @@ end
 function amis_result_copy_failure_sampler(sampler)
     old_state = sampler.method_state
     old_workspace = old_state.workspace
-    workspace = ImportanceSamplers._AMISWorkspace(
+    workspace = ImportanceSamplers._GaussianMomentWorkspace(
         AMISResultFailureArray(old_workspace.samples),
         old_workspace.logtargets,
         old_workspace.lognumerators,
@@ -296,7 +296,7 @@ function amis_result_copy_failure_sampler(sampler)
         old_workspace.candidate_scale,
         old_workspace.candidate_lognormalizer,
     )
-    state = ImportanceSamplers._PreparedAMIS(
+    state = ImportanceSamplers._PreparedAdaptiveGaussian(
         old_state.schedule,
         old_state.offsets,
         old_state.logcounts,
@@ -378,12 +378,12 @@ function amis_publication_failure_sampler(fail_at)
     old_state = base.method_state
     failure = AMISPublicationFailure(0, fail_at, 0x00)
     old_history = old_state.history
-    history = ImportanceSamplers._AMISFactorHistory(
+    history = ImportanceSamplers._GaussianFactorHistory(
         AMISPublicationFailureArray(old_history.means, failure, 1),
         AMISPublicationFailureArray(old_history.factors, failure, 2),
         AMISPublicationFailureArray(old_history.lognormalizers, failure, 3),
     )
-    state = ImportanceSamplers._PreparedAMIS(
+    state = ImportanceSamplers._PreparedAdaptiveGaussian(
         old_state.schedule,
         old_state.offsets,
         old_state.logcounts,
@@ -966,7 +966,8 @@ end
         covariance = case.phase === :factorization ? reshape([2.0], 1, 1) : nothing
         transfers = ImportanceSamplers._ResultTransferCounter(0, 0)
         failure = caught_exception() do
-            ImportanceSamplers._capture_amis_round(
+            ImportanceSamplers._capture_gaussian_round(
+                AMIS(SphericalGaussian(0.0, 1.0); rounds=1, round_size=1),
                 2,
                 case.phase,
                 5,
@@ -1116,7 +1117,7 @@ end
         threaded=false,
     )
     old_workspace = moment_base.method_state.workspace
-    moment_workspace = ImportanceSamplers._AMISWorkspace(
+    moment_workspace = ImportanceSamplers._GaussianMomentWorkspace(
         old_workspace.samples,
         old_workspace.logtargets,
         old_workspace.lognumerators,
@@ -1128,7 +1129,7 @@ end
         old_workspace.candidate_scale,
         old_workspace.candidate_lognormalizer,
     )
-    moment_state = ImportanceSamplers._PreparedAMIS(
+    moment_state = ImportanceSamplers._PreparedAdaptiveGaussian(
         moment_base.method_state.schedule,
         moment_base.method_state.offsets,
         moment_base.method_state.logcounts,

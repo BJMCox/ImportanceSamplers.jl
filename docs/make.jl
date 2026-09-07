@@ -438,6 +438,7 @@ makedocs(
             "Plain importance sampling" => "methods/importance_sampling.md",
             "Static multiple importance sampling" => "methods/static_mis.md",
             "Adaptive multiple importance sampling" => "methods/amis.md",
+            "Nonlinear population Monte Carlo" => "methods/npmc.md",
             "Deterministic-mixture population Monte Carlo" => "methods/dm_pmc.md",
             "First-order GRAMIS-CAIS" => "methods/first_order_gramis.md",
         ],

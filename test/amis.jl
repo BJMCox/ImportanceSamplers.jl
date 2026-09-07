@@ -110,8 +110,8 @@ function assert_factor_amis_storage(proposal, expected_factor, ::Type{L}) where 
     T = eltype(proposal.location)
     d = length(proposal.location)
 
-    @test state isa AMISIS._PreparedAMIS
-    @test history isa AMISIS._AMISFactorHistory
+    @test state isa AMISIS._PreparedAdaptiveGaussian
+    @test history isa AMISIS._GaussianFactorHistory
     @test state.schedule == [4, 5, 6]
     @test state.offsets == [1, 5, 10, 16]
     @test state.logcounts ≈ log.(T[4, 5, 6])
@@ -188,7 +188,7 @@ end
         history = state.history
         workspace = state.workspace
 
-        @test history isa AMISIS._AMISScalarHistory
+        @test history isa AMISIS._GaussianScalarHistory
         @test history.means isa Vector{T}
         @test history.scales isa Vector{T}
         @test history.lognormalizers isa Vector{T}
@@ -247,7 +247,7 @@ function literal_amis_moments(samples, logweights, previous_covariance)
 end
 
 function amis_factor_fit_allocated!(workspace, history, sample_count)
-    return @allocated AMISIS._fit_amis_proposal!(
+    return @allocated AMISIS._fit_gaussian_proposal!(
         workspace,
         history,
         1,
@@ -256,7 +256,7 @@ function amis_factor_fit_allocated!(workspace, history, sample_count)
 end
 
 function amis_factor_candidate_valid_allocated(mean, factor, lognormalizer)
-    return @allocated AMISIS._amis_factor_candidate_valid(
+    return @allocated AMISIS._gaussian_factor_candidate_valid(
         mean,
         factor,
         lognormalizer,
@@ -269,12 +269,12 @@ end
         factor = T[2 0; -1 3]
         lognormalizer = T(-1)
 
-        @test AMISIS._amis_factor_candidate_valid(mean, factor, lognormalizer)
+        @test AMISIS._gaussian_factor_candidate_valid(mean, factor, lognormalizer)
         @test amis_factor_candidate_valid_allocated(mean, factor, lognormalizer) == 0
 
         invalid_mean = copy(mean)
         invalid_mean[1] = T(Inf)
-        @test !AMISIS._amis_factor_candidate_valid(
+        @test !AMISIS._gaussian_factor_candidate_valid(
             invalid_mean,
             factor,
             lognormalizer,
@@ -282,7 +282,7 @@ end
 
         invalid_lower = copy(factor)
         invalid_lower[2, 1] = T(NaN)
-        @test !AMISIS._amis_factor_candidate_valid(
+        @test !AMISIS._gaussian_factor_candidate_valid(
             mean,
             invalid_lower,
             lognormalizer,
@@ -291,14 +291,14 @@ end
         for diagonal in (zero(T), -one(T), T(Inf))
             invalid_diagonal = copy(factor)
             invalid_diagonal[1, 1] = diagonal
-            @test !AMISIS._amis_factor_candidate_valid(
+            @test !AMISIS._gaussian_factor_candidate_valid(
                 mean,
                 invalid_diagonal,
                 lognormalizer,
             )
         end
 
-        @test !AMISIS._amis_factor_candidate_valid(mean, factor, T(Inf))
+        @test !AMISIS._gaussian_factor_candidate_valid(mean, factor, T(Inf))
     end
 end
 
@@ -318,7 +318,7 @@ end
             abs2(scalar_proposal.scale.scale),
         )
 
-        scalar_fitted = @inferred AMISIS._fit_amis_proposal!(
+        scalar_fitted = @inferred AMISIS._fit_gaussian_proposal!(
             scalar_state.workspace,
             scalar_state.history,
             1,
@@ -350,7 +350,7 @@ end
 
         candidate_mean = vector_state.workspace.candidate_mean
         candidate_factor = vector_state.workspace.candidate_scale
-        vector_fitted = @inferred AMISIS._fit_amis_proposal!(
+        vector_fitted = @inferred AMISIS._fit_gaussian_proposal!(
             vector_state.workspace,
             vector_state.history,
             1,

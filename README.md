@@ -40,6 +40,8 @@ target returns a `Float32` or `Float64` log density; the sampler never applies
   device contracts.
 - [Adaptive multiple importance sampling](docs/src/methods/amis.md) explains
   retrospective temporal-mixture weights and learned Gaussian state.
+- [Nonlinear population Monte Carlo](docs/src/methods/npmc.md) explains clipped
+  proposal adaptation with ordinary importance weights for estimation.
 - [Deterministic-mixture population Monte Carlo](docs/src/methods/dm_pmc.md)
   explains adaptive spatial mixtures, global and local resampling, and retained
   state.

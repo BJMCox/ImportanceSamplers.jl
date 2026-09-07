@@ -12,6 +12,7 @@ test_files = if isempty(ARGS)
         "log_mixture_accumulator",
         "amis",
         "amis_kernel",
+        "npmc",
         "dm_pmc",
         "dm_pmc_kernel",
         "first_order_gramis",

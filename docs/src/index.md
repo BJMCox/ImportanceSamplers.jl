@@ -49,6 +49,8 @@ target and algorithm arguments. The proposal alone determines sample shape.
   complete assignment/denominator schemes, provenance, and CPU/CUDA limits.
 - [Adaptive multiple importance sampling](@ref) covers retrospective temporal
   mixtures and learned Gaussian state.
+- [Nonlinear population Monte Carlo](@ref) covers clipped adaptation and raw
+  importance-weight estimation.
 - [DM-PMC, GR-PMC, and LR-PMC](@ref) covers adaptive spatial
   mixtures, global and local resampling, retained proposal state, and CPU/CUDA
   limits.

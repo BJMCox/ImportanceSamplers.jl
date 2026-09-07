@@ -389,7 +389,7 @@ end
     _owned_backend_rng(::Main.AMISExecutionTestAccelerator, seed::UInt64) =
         Main.AMISExecutionTestRNG(0)
 
-    function _amis_potrf!(
+    function _gaussian_potrf!(
         ::Main.AMISExecutionTestAccelerator,
         factor::StridedMatrix{T},
     ) where {T<:Union{Float32,Float64}}
@@ -402,12 +402,12 @@ end
         ::Main.AMISExecutionTestAccelerator,
         target,
         algorithm::AMIS,
-        method_state::_PreparedAMIS,
+        method_state::_PreparedAdaptiveGaussian,
         random_buffers::_RandomBuffers,
         factor_execution,
     ) = nothing
 
-    function _amis_potrf!(
+    function _gaussian_potrf!(
         ::Main.KernelArgumentTestAccelerator,
         factor::Main.KernelArgumentTestArray{T,2},
     ) where {T<:Union{Float32,Float64}}
@@ -1703,11 +1703,11 @@ end
     end
 
     for (seed, proposal, history_type) in (
-        (0x2226, SphericalGaussian(0.0, 1.0), IS._AMISScalarHistory),
+        (0x2226, SphericalGaussian(0.0, 1.0), IS._GaussianScalarHistory),
         (
             0x2227,
             FactorGaussian([0.0, 0.0], [1.0 0.0; 0.25 0.75]),
-            IS._AMISFactorHistory,
+            IS._GaussianFactorHistory,
         ),
     )
         empty!(KERNEL_ARGUMENT_TEST_ARGUMENTS)
@@ -1719,7 +1719,7 @@ end
         history = state.history
         workspace = state.workspace
         buffers = destination.random_buffers
-        scale_storage = history isa IS._AMISScalarHistory ?
+        scale_storage = history isa IS._GaussianScalarHistory ?
                         history.scales : history.factors
         @test history isa history_type
         @test all(
@@ -1773,7 +1773,7 @@ end
             state.logcounts,
             representative_round,
         )
-        round_kernel = IS._amis_round_launch_kernel!(backend)
+        round_kernel = IS._gaussian_round_launch_kernel!(backend)
         append_kernel = IS._append_logmixture_kernel!(backend)
         weight_kernel = IS._form_amis_logweights_kernel!(backend)
         expected_preflight = Tuple{DataType,DataType}[]
@@ -1829,9 +1829,9 @@ end
                 buffers.failure_scratch.record.storage,
             ),
         )
-        if history isa IS._AMISScalarHistory
-            ridge_kernel = IS._add_amis_scalar_ridge_kernel!(backend)
-            finish_kernel = IS._finish_amis_scalar_candidate_kernel!(backend)
+        if history isa IS._GaussianScalarHistory
+            ridge_kernel = IS._add_gaussian_scalar_ridge_kernel!(backend)
+            finish_kernel = IS._finish_gaussian_scalar_candidate_kernel!(backend)
             expect_preflight!(
                 ridge_kernel,
                 (workspace.covariance, history.scales, representative_round),
@@ -1847,8 +1847,8 @@ end
                 ),
             )
         else
-            ridge_kernel = IS._add_amis_factor_ridge_kernel!(backend)
-            finish_kernel = IS._finish_amis_factor_candidate_kernel!(backend)
+            ridge_kernel = IS._add_gaussian_factor_ridge_kernel!(backend)
+            finish_kernel = IS._finish_gaussian_factor_candidate_kernel!(backend)
             expect_preflight!(
                 ridge_kernel,
                 (
@@ -1882,10 +1882,10 @@ end
         snapshot = @inferred current_proposal(preserving, destination)
         @test KERNEL_ARGUMENT_TEST_CURRENT[] === :caller
         @test KERNEL_ARGUMENT_TEST_CPU_COPIES[] == 2
-        expected_elements = history isa IS._AMISScalarHistory ? 2 : 6
+        expected_elements = history isa IS._GaussianScalarHistory ? 2 : 6
         @test KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] == expected_elements
         @test snapshot.location == proposal.location
-        if history isa IS._AMISScalarHistory
+        if history isa IS._GaussianScalarHistory
             @test snapshot.scale.scale == proposal.scale.scale
         else
             @test snapshot.scale.factor == proposal.scale.factor
@@ -1926,7 +1926,7 @@ end
         normalized = zeros(T, 4)
         transfers = IS._ResultTransferCounter(0, 0)
 
-        summary = @inferred IS._normalize_amis_weights!(
+        summary = @inferred IS._normalize_gaussian_weights!(
             normalized,
             logweights,
             3,
@@ -1948,7 +1948,7 @@ end
     KERNEL_ARGUMENT_TEST_CPU_COPIES[] = 0
     KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] = 0
 
-    diagnostics = IS._amis_covariance_diagnostics(covariance, transfers)
+    diagnostics = IS._gaussian_covariance_diagnostics(covariance, transfers)
 
     @test diagnostics == (
         minimum_diagonal=2.0,
@@ -2021,7 +2021,7 @@ end
         failure_storage[2],
     )
     @test failure_snapshot.count == 1
-    @test failure_snapshot.reason_bits == IS._AMIS_COVARIANCE_INVALID
+    @test failure_snapshot.reason_bits == IS._GAUSSIAN_COVARIANCE_INVALID
     @test iszero(failure_storage[3])
     after = try
         current_proposal(MLDataDevices.cpu_device(), prepared)
@@ -2049,12 +2049,12 @@ end
     ))
     old_state = base.method_state
     old_history = old_state.history
-    history = IS._AMISScalarHistory(
+    history = IS._GaussianScalarHistory(
         AMISPublicationSyncArray(old_history.means),
         old_history.scales,
         old_history.lognormalizers,
     )
-    state = IS._PreparedAMIS(
+    state = IS._PreparedAdaptiveGaussian(
         old_state.schedule,
         old_state.offsets,
         old_state.logcounts,
@@ -2114,7 +2114,7 @@ end
 
     old_state = prepared.method_state
     old_workspace = old_state.workspace
-    workspace = IS._AMISWorkspace(
+    workspace = IS._GaussianMomentWorkspace(
         old_workspace.samples,
         old_workspace.logtargets,
         old_workspace.lognumerators,
@@ -2126,7 +2126,7 @@ end
         old_workspace.candidate_scale,
         old_workspace.candidate_lognormalizer,
     )
-    state = IS._PreparedAMIS(
+    state = IS._PreparedAdaptiveGaussian(
         old_state.schedule,
         old_state.offsets,
         old_state.logcounts,

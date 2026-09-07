@@ -101,7 +101,7 @@ ImportanceSamplers._owned_backend_rng(
     seed::UInt64,
 ) = CUDA.RNG(seed)
 
-function ImportanceSamplers._amis_potrf!(
+function ImportanceSamplers._gaussian_potrf!(
     ::MLDataDevices.CUDADevice,
     factor::CUDA.StridedCuMatrix{T},
 ) where {T<:Union{Float32,Float64}}
