@@ -128,6 +128,21 @@ Random.randn(rng::PrefilledNormalRNG{Float32}, ::Type{Float32}) =
 Random.randn(rng::PrefilledNormalRNG{Float64}, ::Type{Float64}) =
     _next_prefilled_normal!(rng)
 
+mutable struct PrefilledRadialRNG{T} <: Random.AbstractRNG
+    uniforms::Vector{T}
+    normals::Vector{T}
+end
+
+function Random.rand!(rng::PrefilledRadialRNG, values::AbstractArray)
+    copyto!(values, rng.uniforms)
+    return values
+end
+
+function Random.randn!(rng::PrefilledRadialRNG, values::AbstractArray)
+    copyto!(values, rng.normals)
+    return values
+end
+
 mutable struct BulkFillRecorder <: Random.AbstractRNG
     calls::Vector{Symbol}
 end
@@ -492,6 +507,39 @@ end
             @test backend_shaped.logweights == fused.logweights
         end
     end
+end
+
+@testset "portable Student-t generation and fused density" begin
+    proposal = SphericalStudentT(1.0, 0.0, 2.0)
+    algorithm = ImportanceSampling(proposal; nsamples=2)
+    sampler = prepare_sampler(
+        PrefilledRadialRNG(Float64[], [1.0, 2.0, -1.0, 4.0]),
+        proposal,
+        algorithm;
+        threaded=false,
+    )
+
+    @test ImportanceSamplers._sampling_execution(proposal, false) isa
+          ImportanceSamplers._KernelExecution
+    result = @inferred importance_sample!(sampler)
+    @test result.samples == [1.0, -0.5]
+    @test result.logweights ≈ zeros(2) atol=8eps(Float64)
+
+    exhausted_proposal = SphericalStudentT(2.0, 0.0, 1.0)
+    exhausted = prepare_sampler(
+        PrefilledRadialRNG(ones(8), vcat(0.0, fill(-10.0, 8))),
+        exhausted_proposal,
+        ImportanceSampling(exhausted_proposal; nsamples=1);
+        threaded=false,
+    )
+    error = try
+        importance_sample!(exhausted)
+        nothing
+    catch caught
+        caught
+    end
+    @test error isa SamplerExecutionError
+    @test error.phase == :proposal_draw
 end
 
 @testset "portable block transforms produce aligned logical samples" begin

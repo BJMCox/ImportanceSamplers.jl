@@ -45,7 +45,7 @@ target returns a `Float32` or `Float64` log density; the sampler never applies
 - [First-order GRAMIS-CAIS](docs/src/methods/first_order_gramis.md) explains
   the gradient move, robust local covariance fit, repulsion, and causal rounds.
 - [Native proposals](docs/src/guide/native_proposals.md) documents spherical,
-  diagonal, and dense-factor Gaussians.
+  diagonal, and dense-factor Gaussian and Student-t proposals.
 - [Transforms](docs/src/guide/transforms.md) documents positive, interval,
   simplex, and structured parameters.
 - [Accelerators](docs/src/guide/accelerators.md) contains the complete CUDA
