@@ -14,6 +14,9 @@ abstract type AbstractRadialProposalFamily <: AbstractProposalFamily end
 
 struct GaussianFamily <: AbstractRadialProposalFamily end
 
+_prepare_proposal_input(proposal) = proposal
+_prepare_proposal_inputs(proposals) = copy(proposals)
+
 """
     ProductProposal(blocks::NamedTuple)
 
@@ -57,7 +60,8 @@ struct TransformedProposal{B,T}
     end
 end
 
-TransformedProposal(base, transform) = _prepare_transformed_proposal(base, transform)
+TransformedProposal(base, transform) =
+    _prepare_transformed_proposal(_prepare_proposal_input(base), transform)
 
 struct _SphericalGaussianScale{T}
     scale::T

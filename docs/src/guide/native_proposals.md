@@ -49,3 +49,27 @@ The runnable
 checks formulas, moments, inference, and allocation probes without a distribution
 dependency. See [Transforms](@ref) to map these unconstrained proposals into
 logical parameter spaces.
+
+## Distributions.jl proposals
+
+Loading Distributions.jl activates an optional extension. Its normal proposals
+work directly in sampler constructors:
+
+```julia
+using Distributions
+using ImportanceSamplers
+
+proposal = MvNormal([0.0, 0.0], [1.0 0.4; 0.4 2.0])
+algorithm = AMIS(proposal; rounds=4, round_size=1_000)
+```
+
+The extension converts `Normal` to `SphericalGaussian`. It converts an
+`MvNormal` with spherical, diagonal, or full covariance to
+`SphericalGaussian`, `DiagonalGaussian`, or `FactorGaussian`, respectively.
+The conversion copies the parameters and factors a full covariance once. It
+never forms a covariance inverse.
+
+The native proposal rules still apply. Parameters must use `Float32` or
+`Float64`, and scales must be finite and positive. Canonical normal forms and
+other Distributions.jl families remain generic CPU proposals. Adaptive methods
+that require native Gaussian storage reject those other forms.
