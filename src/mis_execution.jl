@@ -149,7 +149,7 @@ end
 _MISRoundOutput(logweights, proposal_ids) =
     _MISRoundOutput(logweights, proposal_ids, nothing)
 
-struct _AMISRoundOutput{T,N,W,R,L}
+struct _GaussianRoundOutput{T,N,W,R,L}
     logtargets::T
     lognumerators::N
     logweights::W
@@ -243,10 +243,7 @@ function _launch_factor_batch_logmixture!(
     valid_samples=nothing,
     adaptation=nothing,
 )
-    factor = _factor_batch_factor(factor_source, proposal_slot)
-    location = _factor_batch_location(factor_source, proposal_slot)
-    solve_scratch .= samples .- reshape(location, :, 1)
-    LinearAlgebra.ldiv!(LinearAlgebra.LowerTriangular(factor), solve_scratch)
+    _factor_batch_solve!(solve_scratch, samples, factor_source, proposal_slot)
     backend = KernelAbstractions.get_backend(lognumerators)
     kernel = _append_factor_batch_logmixture_kernel!(backend)
     kernel(
@@ -582,7 +579,7 @@ end
     end
 end
 
-@kernel function _amis_round_launch_kernel!(
+@kernel function _gaussian_round_launch_kernel!(
     samples,
     logtargets,
     lognumerators,
@@ -696,7 +693,7 @@ end
 
 function _launch_mis_round!(
     samples,
-    output::_AMISRoundOutput,
+    output::_GaussianRoundOutput,
     failure_storage,
     normal_buffer,
     target,
@@ -707,7 +704,7 @@ function _launch_mis_round!(
     execution,
 )
     backend = KernelAbstractions.get_backend(normal_buffer)
-    kernel = _amis_round_launch_kernel!(backend)
+    kernel = _gaussian_round_launch_kernel!(backend)
     kernel(
         samples,
         output.logtargets,

@@ -318,7 +318,7 @@ function assert_amis_residence(prepared, result)
     history = state.history
     workspace = state.workspace
     buffers = prepared.random_buffers
-    scale_storage = history isa IS._AMISScalarHistory ?
+    scale_storage = history isa IS._GaussianScalarHistory ?
                     history.scales : history.factors
     arrays = (
         state.logcounts,
@@ -665,7 +665,7 @@ function degenerate_scalar_covariance_case(device)
         first_storage[2],
     )
     @test first_snapshot.count == 1
-    @test first_snapshot.reason_bits == IS._AMIS_COVARIANCE_INVALID
+    @test first_snapshot.reason_bits == IS._GAUSSIAN_COVARIANCE_INVALID
     @test iszero(first_storage[3])
 
     second_failure = try
@@ -775,7 +775,7 @@ function factor_overflow_transaction_case(device, ::Type{T}) where {T}
     @test iszero(failure_storage[3])
     @test failure_snapshot.count == 1
     @test failure_snapshot.first_logical_index == round_size + 1
-    @test failure_snapshot.reason_bits == IS._AMIS_COVARIANCE_INVALID
+    @test failure_snapshot.reason_bits == IS._GAUSSIAN_COVARIANCE_INVALID
     @test prepared.method_state.workspace.samples isa CUDA.AnyCuArray
     @test prepared.method_state.workspace.covariance isa CUDA.AnyCuArray
     samples_finite = IS._with_backend_device(device) do

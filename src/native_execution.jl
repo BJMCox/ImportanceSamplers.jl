@@ -201,21 +201,21 @@ end
 
 @inline _packed_gaussian_location(bank::_PackedFactorGaussianBank, row, slot) =
     @inbounds bank.locations[row, slot]
-@inline _packed_gaussian_location(history::_AMISFactorHistory, row, slot) =
+@inline _packed_gaussian_location(history::_GaussianFactorHistory, row, slot) =
     @inbounds history.means[row, slot]
 @inline _packed_gaussian_factor(bank::_PackedFactorGaussianBank, row, column, slot) =
     @inbounds bank.factors[row, column, slot]
-@inline _packed_gaussian_factor(history::_AMISFactorHistory, row, column, slot) =
+@inline _packed_gaussian_factor(history::_GaussianFactorHistory, row, column, slot) =
     @inbounds history.factors[row, column, slot]
 @inline _packed_gaussian_lognormalizer(bank::_PackedFactorGaussianBank, slot) =
     @inbounds bank.lognormalizers[slot]
-@inline _packed_gaussian_lognormalizer(history::_AMISFactorHistory, slot) =
+@inline _packed_gaussian_lognormalizer(history::_GaussianFactorHistory, slot) =
     @inbounds history.lognormalizers[slot]
 
 _factor_batch_locations(bank::_PackedFactorGaussianBank) = bank.locations
-_factor_batch_locations(history::_AMISFactorHistory) = history.means
+_factor_batch_locations(history::_GaussianFactorHistory) = history.means
 _factor_batch_factors(bank::_PackedFactorGaussianBank) = bank.factors
-_factor_batch_factors(history::_AMISFactorHistory) = history.factors
+_factor_batch_factors(history::_GaussianFactorHistory) = history.factors
 
 _factor_batch_location(proposal::_GaussianProposal, proposal_slot) =
     proposal.location
@@ -223,7 +223,7 @@ _factor_batch_factor(proposal::_GaussianProposal, proposal_slot) =
     proposal.scale.factor
 _factor_batch_lognormalizers(bank::_PackedFactorGaussianBank) =
     bank.lognormalizers
-_factor_batch_lognormalizers(history::_AMISFactorHistory) =
+_factor_batch_lognormalizers(history::_GaussianFactorHistory) =
     history.lognormalizers
 _factor_batch_lognormalizers(proposal::_GaussianProposal) =
     proposal.lognormalizer
@@ -239,6 +239,14 @@ function _factor_batch_draw!(samples, normals, bank, proposal_slot)
     LinearAlgebra.mul!(samples, factor, normals)
     samples .+= reshape(location, :, 1)
     return samples
+end
+
+function _factor_batch_solve!(scratch, samples, source, slot)
+    factor = _factor_batch_factor(source, slot)
+    location = _factor_batch_location(source, slot)
+    scratch .= samples .- reshape(location, :, 1)
+    LinearAlgebra.ldiv!(LinearAlgebra.LowerTriangular(factor), scratch)
+    return scratch
 end
 
 _factor_batch_supported(device) = false
@@ -266,7 +274,7 @@ _use_factor_batch_path(device, source, ::_DefaultFactorExecution) =
     )
 
 @inline function _packed_gaussian_logdensity!(
-    bank::Union{_PackedFactorGaussianBank,_AMISFactorHistory},
+    bank::Union{_PackedFactorGaussianBank,_GaussianFactorHistory},
     sample,
     proposal_slot,
     solve_scratch,
@@ -298,19 +306,19 @@ end
 
 @inline _packed_gaussian_location(bank::_PackedDiagonalGaussianBank, coordinate, slot) =
     @inbounds bank.locations[coordinate, slot]
-@inline _packed_gaussian_location(history::_AMISScalarHistory, coordinate, slot) =
+@inline _packed_gaussian_location(history::_GaussianScalarHistory, coordinate, slot) =
     @inbounds history.means[slot]
 @inline _packed_gaussian_scale(bank::_PackedDiagonalGaussianBank, coordinate, slot) =
     @inbounds bank.scales[coordinate, slot]
-@inline _packed_gaussian_scale(history::_AMISScalarHistory, coordinate, slot) =
+@inline _packed_gaussian_scale(history::_GaussianScalarHistory, coordinate, slot) =
     @inbounds history.scales[slot]
 @inline _packed_gaussian_lognormalizer(bank::_PackedDiagonalGaussianBank, slot) =
     @inbounds bank.lognormalizers[slot]
-@inline _packed_gaussian_lognormalizer(history::_AMISScalarHistory, slot) =
+@inline _packed_gaussian_lognormalizer(history::_GaussianScalarHistory, slot) =
     @inbounds history.lognormalizers[slot]
 
 @inline function _packed_gaussian_logdensity(
-    bank::Union{_PackedDiagonalGaussianBank,_AMISScalarHistory},
+    bank::Union{_PackedDiagonalGaussianBank,_GaussianScalarHistory},
     sample,
     proposal_slot,
 )

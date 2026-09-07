@@ -24,6 +24,8 @@ export AbstractImportanceSampler,
     AbstractSampleTransform,
     AMIS,
     AMISRoundError,
+    NPMC,
+    NPMCRoundError,
     AllZeroWeightsError,
     BatchedFactorExecution,
     DiagonalGaussian,
@@ -82,12 +84,16 @@ include("storage.jl")
 include("execution.jl")
 include("methods/static_mis.jl")
 include("methods/dm_pmc.jl")
+include("adaptive_gaussian.jl")
 include("methods/amis.jl")
+include("methods/npmc.jl")
 include("methods/first_order_gramis.jl")
 include("native_execution.jl")
 include("mis_execution.jl")
 include("first_order_gramis_execution.jl")
+include("adaptive_gaussian_execution.jl")
 include("amis_execution.jl")
+include("npmc_execution.jl")
 include("static_mis_execution.jl")
 include("dm_pmc_execution.jl")
 include("results.jl")

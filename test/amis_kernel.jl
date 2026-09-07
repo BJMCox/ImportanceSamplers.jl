@@ -140,7 +140,7 @@ if isdefined(AMISKernelIS, :_launch_prefilled_amis_round!)
 
         function _launch_mis_round!(
             samples,
-            output::_AMISRoundOutput,
+            output::_GaussianRoundOutput,
             failure_storage,
             normal_buffer,
             target,
@@ -294,7 +294,7 @@ end
         scalar_covariance = T[2.5]
         scales = T[3.25]
         backend = KernelAbstractions.get_backend(scalar_covariance)
-        scalar_kernel = AMISKernelIS._add_amis_scalar_ridge_kernel!(backend)
+        scalar_kernel = AMISKernelIS._add_gaussian_scalar_ridge_kernel!(backend)
         scalar_kernel(
             scalar_covariance,
             scales,
@@ -305,7 +305,7 @@ end
 
         dense_covariance = T[2 0.25; 0.25 5]
         factors = reshape(T[2 1 0 3], 2, 2, 1)
-        dense_kernel = AMISKernelIS._add_amis_factor_ridge_kernel!(backend)
+        dense_kernel = AMISKernelIS._add_gaussian_factor_ridge_kernel!(backend)
         dense_kernel(
             dense_covariance,
             factors,
@@ -495,7 +495,7 @@ end
             round_ids = fill(typemax(Int), 1)
             failures = zeros(UInt64, 3)
             backend = KernelAbstractions.get_backend(logweights)
-            kernel = AMISKernelIS._amis_batch_target_kernel!(backend)
+            kernel = AMISKernelIS._gaussian_batch_target_kernel!(backend)
             kernel(
                 logtargets,
                 lognumerators,
@@ -550,7 +550,7 @@ end
         end
 
         @test failure isa SamplerExecutionError
-        @test AMISKernelIS._amis_round_phase(failure, :sampling) === case.phase
+        @test AMISKernelIS._gaussian_round_phase(failure, :sampling) === case.phase
     end
 
     storage = zeros(UInt64, 3)
@@ -564,13 +564,14 @@ end
         storage,
         4,
         0,
-        AMISKernelIS._AMIS_COVARIANCE_INVALID,
+        AMISKernelIS._GAUSSIAN_COVARIANCE_INVALID,
     )
     packed = AMISKernelIS._device_failure_snapshot(
         AMISKernelIS._DeviceFailureRecord(storage),
     )
     combined_failure = try
-        AMISKernelIS._capture_amis_round(
+        AMISKernelIS._capture_gaussian_round(
+            AMIS(SphericalGaussian(0.0, 1.0); rounds=1, round_size=1),
             1,
             :sampling,
             3,
@@ -579,7 +580,7 @@ end
             nothing,
             AMISKernelIS._ResultTransferCounter(0, 0),
         ) do
-            packed.failure.reason_bits == AMISKernelIS._AMIS_COVARIANCE_INVALID ||
+            packed.failure.reason_bits == AMISKernelIS._GAUSSIAN_COVARIANCE_INVALID ||
                 AMISKernelIS._throw_native_failures(
                     packed.failure,
                     packed.draw_failure,
@@ -631,7 +632,8 @@ end
         end
         normals = round == 1 ? Float64[-0.5, 0.75] : Float64[-1, 0.25, 1]
         failure = try
-            AMISKernelIS._capture_amis_round(
+            AMISKernelIS._capture_gaussian_round(
+                AMIS(SphericalGaussian(0.0, 1.0); rounds=1, round_size=1),
                 round,
                 :sampling,
                 state.schedule[round],
@@ -676,7 +678,7 @@ end
         lognormalizer = zeros(T, 1)
         failures = zeros(UInt64, 3)
         backend = KernelAbstractions.get_backend(factor)
-        kernel = AMISKernelIS._finish_amis_factor_candidate_kernel!(backend)
+        kernel = AMISKernelIS._finish_gaussian_factor_candidate_kernel!(backend)
         kernel(
             mean,
             factor,
@@ -693,7 +695,7 @@ end
 
         @test decoded.count == 1
         @test decoded.first_logical_index == 4
-        @test decoded.reason_bits == AMISKernelIS._AMIS_COVARIANCE_INVALID
+        @test decoded.reason_bits == AMISKernelIS._GAUSSIAN_COVARIANCE_INVALID
         @test !isfinite(only(lognormalizer))
         @test iszero(failures[3])
     end
@@ -703,7 +705,7 @@ end
     for T in (Float32, Float64)
         location = T[0.5, -1, 2]
         factor = T[1.5 0 0; 0.25 0.75 0; -0.1 0.2 1.25]
-        history = AMISKernelIS._AMISFactorHistory(
+        history = AMISKernelIS._GaussianFactorHistory(
             reshape(copy(location), 3, 1),
             reshape(copy(factor), 3, 3, 1),
             T[-T(1.5) * log(T(2pi)) - sum(log, LinearAlgebra.diag(factor))],
@@ -761,7 +763,7 @@ end
     for T in (Float32, Float64)
         wide_factor = sqrt(floatmax(T))
         overflow_normal = T(2) * wide_factor
-        history = AMISKernelIS._AMISFactorHistory(
+        history = AMISKernelIS._GaussianFactorHistory(
             zeros(T, 1, 2),
             reshape(T[wide_factor, one(T)], 1, 1, 2),
             T[-T(0.5) * log(T(2pi)) - log(wide_factor), -T(0.5) * log(T(2pi))],
