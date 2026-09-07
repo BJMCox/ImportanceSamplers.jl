@@ -6,6 +6,7 @@
 AbstractImportanceSampler
 ImportanceSampling
 AMIS
+APIS
 NPMC
 DeterministicMixturePMC
 AbstractPMCResamplingPolicy
@@ -84,6 +85,7 @@ SamplerAlreadyExecutedError
 SamplerDeviceError
 SamplerExecutionError
 AMISRoundError
+APISRoundError
 NPMCRoundError
 DMPMCRoundError
 FirstOrderGRAMISRoundError

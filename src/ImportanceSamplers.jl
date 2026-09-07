@@ -24,6 +24,8 @@ export AbstractImportanceSampler,
     AbstractSampleTransform,
     AMIS,
     AMISRoundError,
+    APIS,
+    APISRoundError,
     NPMC,
     NPMCRoundError,
     AllZeroWeightsError,
@@ -84,6 +86,7 @@ include("storage.jl")
 include("execution.jl")
 include("methods/static_mis.jl")
 include("methods/dm_pmc.jl")
+include("methods/apis.jl")
 include("adaptive_gaussian.jl")
 include("methods/amis.jl")
 include("methods/npmc.jl")
@@ -95,7 +98,9 @@ include("adaptive_gaussian_execution.jl")
 include("amis_execution.jl")
 include("npmc_execution.jl")
 include("static_mis_execution.jl")
+include("population_execution.jl")
 include("dm_pmc_execution.jl")
+include("apis_execution.jl")
 include("results.jl")
 include("resampling.jl")
 include("statistics.jl")

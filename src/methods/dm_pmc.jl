@@ -26,6 +26,8 @@ struct LocalResampling <: AbstractPMCResamplingPolicy end
 _pmc_resampling_name(::GlobalResampling) = :global
 _pmc_resampling_name(::LocalResampling) = :local
 
+abstract type _FixedGaussianPopulationSampler <: AbstractImportanceSampler end
+
 function _validate_adaptive_schedule(rounds, round_size)
     rounds isa Int && rounds > 0 || throw(ArgumentError("rounds must be a positive Int"))
     if round_size isa Int
@@ -87,7 +89,7 @@ struct DeterministicMixturePMC{
     B<:ProposalBank,
     S,
     R<:AbstractPMCResamplingPolicy,
-} <: AbstractImportanceSampler
+} <: _FixedGaussianPopulationSampler
     bank::B
     rounds::Int
     round_size::S
@@ -139,6 +141,57 @@ function _retarget_algorithm(
     )
 end
 
+function _current_population_proposal(sampler)
+    sampler.device isa MLDataDevices.AbstractAcceleratorDevice && throw(
+        ArgumentError(
+            "current_proposal(sampler) does not copy accelerator state " *
+            "implicitly; call current_proposal(cpu_device(), " *
+            "sampler) to request an explicit CPU snapshot",
+        ),
+    )
+    packed = sampler.method_state.bank
+    return _population_proposal_snapshot(
+        copy(packed.locations),
+        copy(packed.proposal_ids),
+        sampler,
+    )
+end
+
+function _current_population_proposal(
+    destination::MLDataDevices.AbstractCPUDevice,
+    sampler,
+)
+    if applicable(eltype, destination)
+        policy = eltype(destination)
+        policy in (Missing, Nothing) || throw(
+            ArgumentError(
+                "current_proposal requires a preserving CPU destination; " *
+                "use MLDataDevices.cpu_device() without a scalar conversion",
+            ),
+        )
+    end
+    packed = sampler.method_state.bank
+    locations, proposal_ids = _with_backend_device(sampler.device) do
+        (
+            destination(Array(packed.locations)),
+            destination(Array(packed.proposal_ids)),
+        )
+    end
+    return _population_proposal_snapshot(locations, proposal_ids, sampler)
+end
+
+function _current_population_proposal(
+    destination::MLDataDevices.AbstractDevice,
+    sampler,
+)
+    throw(
+        ArgumentError(
+            "current_proposal requires a CPU destination; got " *
+            string(typeof(destination)),
+        ),
+    )
+end
+
 """
     current_proposal(sampler)
     current_proposal(destination, sampler)
@@ -156,8 +209,8 @@ sampler, pass an explicit preserving CPU destination:
 the current packed locations and stable proposal IDs under the sampler's
 physical-device scope; it does not migrate the prepared sampler, RNG,
 workspaces, target, or result storage. Scalar-converting and non-CPU
-destinations are rejected. Other prepared algorithms do not currently
-implement this accessor.
+destinations are rejected. [`APIS`](@ref) uses the same population snapshot
+and transfer contract.
 """
 function current_proposal(
     sampler::_PreparedImportanceSampler{R,B,T,A,M,D},
@@ -169,19 +222,7 @@ function current_proposal(
     M,
     D,
 }
-    sampler.device isa MLDataDevices.AbstractAcceleratorDevice && throw(
-        ArgumentError(
-            "current_proposal(sampler) does not copy accelerator state " *
-            "implicitly; call current_proposal(cpu_device(), " *
-            "sampler) to request an explicit CPU snapshot",
-        ),
-    )
-    packed = sampler.method_state.bank
-    return _dm_pmc_proposal_snapshot(
-        copy(packed.locations),
-        copy(packed.proposal_ids),
-        sampler,
-    )
+    return _current_population_proposal(sampler)
 end
 
 function current_proposal(
@@ -195,23 +236,7 @@ function current_proposal(
     M,
     D,
 }
-    if applicable(eltype, destination)
-        policy = eltype(destination)
-        policy in (Missing, Nothing) || throw(
-            ArgumentError(
-                "current_proposal requires a preserving CPU destination; " *
-                "use MLDataDevices.cpu_device() without a scalar conversion",
-            ),
-        )
-    end
-    packed = sampler.method_state.bank
-    locations, proposal_ids = _with_backend_device(sampler.device) do
-        (
-            destination(Array(packed.locations)),
-            destination(Array(packed.proposal_ids)),
-        )
-    end
-    return _dm_pmc_proposal_snapshot(locations, proposal_ids, sampler)
+    return _current_population_proposal(destination, sampler)
 end
 
 function current_proposal(
@@ -225,24 +250,19 @@ function current_proposal(
     M,
     D,
 }
-    throw(
-        ArgumentError(
-            "current_proposal requires a CPU destination; got " *
-            string(typeof(destination)),
-        ),
-    )
+    return _current_population_proposal(destination, sampler)
 end
 
-function _dm_pmc_proposal_snapshot(locations, proposal_ids, sampler)
+function _population_proposal_snapshot(locations, proposal_ids, sampler)
     proposals = deepcopy(sampler.algorithm.bank.proposals)
     for (slot, proposal_id) in pairs(proposal_ids)
         proposal = proposals[proposal_id]
-        location = _dm_pmc_snapshot_location(
+        location = _population_snapshot_location(
             locations,
             slot,
             sampler.method_state.bank,
         )
-        proposals[proposal_id] = _dm_pmc_with_location(proposal, location)
+        proposals[proposal_id] = _population_with_location(proposal, location)
     end
     configured_masses = sampler.algorithm.bank.masses
     snapshot = ProposalBank(proposals, configured_masses)
@@ -252,19 +272,19 @@ function _dm_pmc_proposal_snapshot(locations, proposal_ids, sampler)
     return snapshot
 end
 
-_dm_pmc_snapshot_location(locations, slot, bank::_PackedDiagonalGaussianBank) =
-    _dm_pmc_snapshot_location(locations, slot, bank.layout)
+_population_snapshot_location(locations, slot, bank::_PackedDiagonalGaussianBank) =
+    _population_snapshot_location(locations, slot, bank.layout)
 
-_dm_pmc_snapshot_location(locations, slot, ::_ScalarGaussianLayout) =
+_population_snapshot_location(locations, slot, ::_ScalarGaussianLayout) =
     locations[1, slot]
 
-_dm_pmc_snapshot_location(locations, slot, ::_VectorGaussianLayout) =
+_population_snapshot_location(locations, slot, ::_VectorGaussianLayout) =
     copy(view(locations, :, slot))
 
-_dm_pmc_snapshot_location(locations, slot, ::_PackedFactorGaussianBank) =
+_population_snapshot_location(locations, slot, ::_PackedFactorGaussianBank) =
     copy(view(locations, :, slot))
 
-function _dm_pmc_with_location(proposal::_GaussianProposal, location)
+function _population_with_location(proposal::_GaussianProposal, location)
     return _GaussianProposal(
         proposal.family,
         location,
@@ -307,7 +327,7 @@ mutable struct _PreparedDMPMC{B,P,W}
     workspace::W
 end
 
-function _dm_pmc_with_locations(bank::_PackedDiagonalGaussianBank, locations)
+function _population_with_locations(bank::_PackedDiagonalGaussianBank, locations)
     return _PackedDiagonalGaussianBank(
         locations,
         bank.scales,
@@ -319,7 +339,7 @@ function _dm_pmc_with_locations(bank::_PackedDiagonalGaussianBank, locations)
     )
 end
 
-function _dm_pmc_with_locations(bank::_PackedFactorGaussianBank, locations)
+function _population_with_locations(bank::_PackedFactorGaussianBank, locations)
     return _PackedFactorGaussianBank(
         locations,
         bank.factors,
@@ -330,9 +350,9 @@ function _dm_pmc_with_locations(bank::_PackedFactorGaussianBank, locations)
     )
 end
 
-function _dm_pmc_run_bank(bank)
+function _population_run_bank(bank)
     locations = similar(bank.locations)
-    return _dm_pmc_with_locations(bank, locations)
+    return _population_with_locations(bank, locations)
 end
 
 _accelerator_method_state_limit(
@@ -342,15 +362,15 @@ _accelerator_method_state_limit(
     }},
 ) = nothing
 
-function _prepare_dm_pmc_bank(bank::ProposalBank)
+function _prepare_population_bank(bank::ProposalBank)
     destination_type = _dm_pmc_prepared_proposal_type(
         eltype(bank.masses),
         eltype(bank.proposals),
     )
-    return _prepare_dm_pmc_bank(bank, destination_type)
+    return _prepare_population_bank(bank, destination_type)
 end
 
-function _prepare_dm_pmc_bank(bank::ProposalBank, ::Nothing)
+function _prepare_population_bank(bank::ProposalBank, ::Nothing)
     proposal_ids, logmasses, cdf = _prepare_active_proposal_metadata(bank)
     packed = _pack_native_gaussian_bank(
         bank,
@@ -360,13 +380,14 @@ function _prepare_dm_pmc_bank(bank::ProposalBank, ::Nothing)
     )
     packed isa Union{_PackedDiagonalGaussianBank,_PackedFactorGaussianBank} || throw(
         ArgumentError(
-            "DM-PMC requires native Float32 or Float64 spherical, diagonal, or factor Gaussian proposals",
+            "fixed Gaussian population adaptation requires native Float32 or " *
+            "Float64 spherical, diagonal, or factor Gaussian proposals",
         ),
     )
     return packed
 end
 
-function _prepare_dm_pmc_bank(
+function _prepare_population_bank(
     bank::ProposalBank{P,M},
     ::Type{D},
 ) where {
@@ -378,7 +399,9 @@ function _prepare_dm_pmc_bank(
     proposal_ids, logmasses, cdf = _prepare_active_proposal_metadata(bank)
     proposals = view(bank.proposals, proposal_ids)
     all(proposal -> proposal isa D, proposals) || throw(
-        ArgumentError("active DM-PMC proposals do not match their destination type"),
+        ArgumentError(
+            "active population proposals do not match their destination type",
+        ),
     )
 
     first_proposal = first(proposals)::D
@@ -515,27 +538,29 @@ function _deterministic_allocation_plan(bank, active_masses, schedule)
     )
 end
 
-function _prepare_dm_pmc_state(algorithm::DeterministicMixturePMC)
+function _prepare_fixed_population_state(
+    algorithm::_FixedGaussianPopulationSampler,
+)
     schedule = _resolve_adaptive_schedule(algorithm.rounds, algorithm.round_size)
-    bank = _prepare_dm_pmc_bank(algorithm.bank)
+    bank = _prepare_population_bank(algorithm.bank)
     active_masses = algorithm.bank.masses[bank.proposal_ids]
     plan = _deterministic_allocation_plan(bank, active_masses, schedule)
     return bank, plan
 end
 
 function _prepare_method_state(algorithm::DeterministicMixturePMC)
-    bank, plan = _prepare_dm_pmc_state(algorithm)
+    bank, plan = _prepare_fixed_population_state(algorithm)
     workspace = _allocate_dm_pmc_workspace(
         bank,
         plan,
         eltype(bank.lognormalizers),
     )
-    return _PreparedDMPMC(bank, _dm_pmc_run_bank(bank), plan, workspace)
+    return _PreparedDMPMC(bank, _population_run_bank(bank), plan, workspace)
 end
 
 function _prepare_method_state(algorithm::DeterministicMixturePMC, prepared_target)
-    bank, plan = _prepare_dm_pmc_state(algorithm)
-    binding_sample = _dm_pmc_binding_sample(bank)
+    bank, plan = _prepare_fixed_population_state(algorithm)
+    binding_sample = _population_binding_sample(bank)
     target = _bind_resolved_target(prepared_target, binding_sample)
     log_type = _resolve_packed_static_mis_logweight_type(
         target,
@@ -543,7 +568,7 @@ function _prepare_method_state(algorithm::DeterministicMixturePMC, prepared_targ
         typeof(binding_sample),
     )
     workspace = _allocate_dm_pmc_workspace(bank, plan, log_type)
-    return _PreparedDMPMC(bank, _dm_pmc_run_bank(bank), plan, workspace)
+    return _PreparedDMPMC(bank, _population_run_bank(bank), plan, workspace)
 end
 
 function _allocate_random_buffers(
@@ -597,6 +622,16 @@ function _copy_accelerator_algorithm(
     return deepcopy(algorithm)
 end
 
+function _transfer_population_plan(device, plan::_DeterministicAllocationPlan)
+    return _DeterministicAllocationPlan(
+        _HostIntSequence(plan.schedule),
+        _copy_to_device(device, plan.counts),
+        _copy_to_device(device, plan.assignments),
+        _copy_to_device(device, plan.logcoefficients),
+        _HostIntSequence(plan.offsets),
+    )
+end
+
 function _prepare_transferred_method_state(
     device,
     algorithm::DeterministicMixturePMC,
@@ -604,13 +639,7 @@ function _prepare_transferred_method_state(
     _transferred_target,
 )
     plan = method_state.plan
-    transferred_plan = _DeterministicAllocationPlan(
-        _HostIntSequence(plan.schedule),
-        _copy_to_device(device, plan.counts),
-        _copy_to_device(device, plan.assignments),
-        _copy_to_device(device, plan.logcoefficients),
-        _HostIntSequence(plan.offsets),
-    )
+    transferred_plan = _transfer_population_plan(device, plan)
     workspace = method_state.workspace
     transferred_workspace = _DMPMCWorkspace(
         _copy_to_device(device, workspace.round_samples),
@@ -625,7 +654,7 @@ function _prepare_transferred_method_state(
     transferred_bank = _copy_packed_gaussian_bank(device, method_state.bank)
     return _PreparedDMPMC(
         transferred_bank,
-        _dm_pmc_run_bank(transferred_bank),
+        _population_run_bank(transferred_bank),
         transferred_plan,
         transferred_workspace,
     )
@@ -656,7 +685,7 @@ function _preflight_accelerator_method(
     bank = method_state.bank
     plan = method_state.plan
     workspace = method_state.workspace
-    binding_sample = _dm_pmc_binding_sample(bank)
+    binding_sample = _population_binding_sample(bank)
     bound_target = _bind_resolved_target(target, binding_sample)
     log_type = _resolve_packed_static_mis_logweight_type(
         bound_target,
@@ -844,7 +873,7 @@ function _copy_dm_pmc_generic_bank(device, bank::ProposalBank)
     return ProposalBank(proposals, masses)
 end
 
-_copy_dm_pmc_bank(device, bank::ProposalBank{P,M}) where {P,M} =
+_copy_population_bank(device, bank::ProposalBank{P,M}) where {P,M} =
     _copy_dm_pmc_generic_bank(device, bank)
 
 function _copy_dm_pmc_homogeneous_bank(
@@ -953,7 +982,7 @@ _dm_pmc_gaussian_layout(
     ::Type{<:_GaussianProposal{F,L}},
 ) where {F,L<:AbstractVector} = _VectorGaussianLayout()
 
-function _copy_dm_pmc_bank(
+function _copy_population_bank(
     device::MLDataDevices.CPUDevice{T},
     bank::ProposalBank{P,M},
 ) where {
@@ -968,7 +997,7 @@ end
 
 function _copy_algorithm(device, algorithm::DeterministicMixturePMC)
     return DeterministicMixturePMC(
-        _copy_dm_pmc_bank(device, algorithm.bank);
+        _copy_population_bank(device, algorithm.bank);
         rounds=algorithm.rounds,
         round_size=algorithm.round_size,
         resampling=algorithm.resampling,

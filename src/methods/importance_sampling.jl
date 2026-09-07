@@ -539,6 +539,7 @@ function _transfer_prepared_sampler(
             _RandomBuffers,
             _PackedStaticMISRandomBuffers,
             _DMPMCRandomBuffers,
+            _PopulationNormalBuffers,
         } || throw(
             SamplerDeviceError(device, :accelerator_rng_unavailable),
         )
@@ -630,7 +631,7 @@ end
 function _retarget_algorithm(sampler::_PreparedImportanceSampler)
     throw(
         ArgumentError(
-            "retarget supports DeterministicMixturePMC, AMIS, and " *
+            "retarget supports DeterministicMixturePMC, APIS, AMIS, and " *
             "FirstOrderGRAMIS prepared samplers",
         ),
     )
@@ -669,14 +670,14 @@ one `UInt64` after preflight to seed an owned backend RNG. A later backend RNG
 construction failure can therefore consume that value. The supplied RNG must
 differ from the source sampler's owned RNG.
 
-Retargeting supports prepared [`DeterministicMixturePMC`](@ref), [`AMIS`](@ref),
-and `FirstOrderGRAMIS` samplers. Plain and static importance sampling
-have no learned proposal state; call [`prepare_sampler`](@ref) with their
-algorithm instead. Accelerator retargeting stages the committed proposal in CPU
-memory, allocates fresh CPU workspaces, and transfers the complete new sampler
-to the source device. Target support coverage is a caller precondition because
-it cannot be proven for an arbitrary callable. Normal preparation still checks
-known target dimensions, callable contracts, and method constraints.
+Retargeting supports prepared [`DeterministicMixturePMC`](@ref), [`APIS`](@ref),
+[`AMIS`](@ref), and `FirstOrderGRAMIS` samplers. Plain and static importance
+sampling have no learned proposal state; call [`prepare_sampler`](@ref) with
+their algorithm instead. Accelerator retargeting stages the committed proposal
+in CPU memory, allocates fresh CPU workspaces, and transfers the complete new
+sampler to the source device. Target support coverage is a caller precondition
+because it cannot be proven for an arbitrary callable. Normal preparation still
+checks known target dimensions, callable contracts, and method constraints.
 """
 function retarget(
     rng::Random.AbstractRNG,

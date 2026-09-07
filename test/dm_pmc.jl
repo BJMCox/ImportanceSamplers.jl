@@ -159,7 +159,7 @@ end
         [SphericalGaussian(-1.0, 1.0), SphericalGaussian(1.0, 1.0)],
         Float32[1, 3],
     )
-    packed = DMPMCIS._prepare_dm_pmc_bank(bank)
+    packed = DMPMCIS._prepare_population_bank(bank)
     masses = DMPMCCountingMasses(bank.masses[packed.proposal_ids])
     schedule = [13, 14, 13, 14]
     plan = DMPMCIS._deterministic_allocation_plan(packed, masses, schedule)
