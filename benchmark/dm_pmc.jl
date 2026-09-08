@@ -28,6 +28,7 @@ const DM_PMC_TRANSFER_REASONS = (
     :logweight_maximum,
     :logweight_scaled_sum,
     :logweight_scaled_square_sum,
+    :logweight_moments,
     :covariance_diagnostic,
 )
 

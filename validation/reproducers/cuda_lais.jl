@@ -9,6 +9,37 @@ Random.randn!(rng::LAISScriptedRNG, out::CUDA.AnyCuArray{T}) where {T<:AbstractF
 Random.rand!(rng::LAISScriptedRNG, out::CUDA.AnyCuArray{T}) where {T<:AbstractFloat} =
     invoke(Random.rand!, Tuple{LAISScriptedRNG,AbstractArray}, rng, out)
 
+# Present the same prescribed move buffers to the batched GPU implementation.
+function Random.randn!(rng::LAISScriptedRNG, out::CUDA.AnyCuArray{T,3}) where {T<:AbstractFloat}
+    for step in axes(out, 3)
+        invoke(Random.randn!, Tuple{LAISScriptedRNG,AbstractArray}, rng, view(out, :, :, step))
+    end
+    return out
+end
+function Random.rand!(rng::LAISScriptedRNG, out::CUDA.AnyCuArray{T,2}) where {T<:AbstractFloat}
+    for step in axes(out, 2)
+        invoke(Random.rand!, Tuple{LAISScriptedRNG,AbstractArray}, rng, view(out, :, step))
+    end
+    return out
+end
+
+function check_warmup_batch_boundary(device)
+    normals = [[isodd(step) ? -0.1 : 0.1, 0.2] for step in 1:258]
+    centres = zeros(2)
+    factor = 1.0
+    for step in 1:258
+        centres .+= factor .* normals[step]
+        step <= 257 && (factor *= sqrt(1 + 0.766step^(-0.6)))
+    end
+    algorithm = LAIS(ProposalBank([SphericalGaussian(0.0, 1.0), SphericalGaussian(0.0, 1.0)]);
+        transition=RAM(1.0; tuning=WarmupTuning(257)), rounds=1, round_size=2)
+    base = device(prepare_sampler(Xoshiro(21), x -> 0.0, algorithm))
+    sampler = scripted_sampler(base, [normals; [zeros(2)]], [[0.1, 0.1] for _ in 1:258])
+    result = cpu_device()(importance_sample!(sampler))
+    @test result.samples ≈ centres
+    @test result.diagnostics.transition.warmup_target_evaluations == 514
+end
+
 struct QuadraticTarget{T} end
 (::QuadraticTarget{T})(x) where {T} = -sum(abs2, x) / T(20)
 
@@ -17,10 +48,10 @@ shifted_target(x, p) = -(abs2(x[1] - p.location[1]) + abs2(x[2] - p.location[2])
 failure_target(x) = x > 3 ? Inf : 0.0
 
 function check_transfer_budget(result, rounds, warmup=0)
-    # Batch snapshots, three weight-summary scalars per round, and two counts.
+    # Batch snapshots, one packed weight summary per round, and two counts.
     # Bounds allow fewer transfers without encoding a kernel-launch count.
     snapshots = 1 + 2rounds
-    max_count = snapshots + 3rounds + 2
+    max_count = snapshots + rounds + 2
     max_bytes = 3sizeof(UInt64) * snapshots + 3rounds * sizeof(eltype(result.logweights)) + 2sizeof(Int)
     transfers = result.diagnostics.transfers
     @test transfers.count <= max_count && transfers.bytes <= max_bytes
@@ -118,6 +149,7 @@ function main()
         check_fixed_rwm(device)
         check_failure_rollback(device)
         check_warmup_rollback(device)
+        check_warmup_batch_boundary(device)
         for (T, warmup, policy) in ((Float32, false, FusedFactorExecution()),
             (Float64, false, BatchedFactorExecution()),
             (Float64, true, FusedFactorExecution()))
