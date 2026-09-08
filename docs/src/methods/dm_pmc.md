@@ -152,10 +152,11 @@ same row exercised by the A100 reproducer.
 Main.DM_PMC_CAPABILITY_TABLE
 ```
 
-AMDGPU and Metal are unclaimed. Global CUDA resampling reports six explicit
-small scalar transfer reasons per round: failure snapshot, CDF maximum and sum,
-and summary maximum, scaled sum, and scaled-square sum. Local CUDA resampling
-replaces the two CDF transfers with one group-validity transfer. This is
+AMDGPU and Metal are unclaimed. Global CUDA resampling reports four small
+explicit transfers per round: a failure snapshot, the CDF maximum and sum,
+and one packed weight summary containing its maximum, scaled sum, and
+scaled-square sum. Local CUDA resampling replaces the two CDF transfers with
+one group-validity transfer, giving three transfers per round. This is
 ``O(\text{rounds})`` source-level accounting; it does not instrument hidden
 runtime or library transfers.
 
