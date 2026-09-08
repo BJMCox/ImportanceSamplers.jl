@@ -73,7 +73,7 @@ prepared = prepare_sampler(
 prepared = prepared |> device
 ```
 
-The same policy applies to Base IS, static MIS, DM-PMC, AMIS, and GRAMIS. It
+The same policy applies to Base IS, static MIS, DM-PMC, AMIS, APIS, CAIS, NPMC, and GRAMIS. It
 remains part of the prepared sampler during device transfer. Use
 `FusedFactorExecution()` to force fusion or `BatchedFactorExecution()` to force
 batching where supported.
@@ -173,10 +173,10 @@ consumes when constructing and recording its matrix.
 Main.NATIVE_PLAIN_IS_CAPABILITY_TABLE
 ```
 
-CUDA execution requires `threaded=true`, a supported native Gaussian and
-transform layout, and a target that compiles for the device. Only the table row
-labeled A100 execution has real-hardware evidence; the other
-native row was not A100-validated. Generic proposals and `ProductProposal` are
+CUDA execution requires `threaded=true`, a supported native proposal and
+transform layout, and a target that compiles for the device. Gaussian A100
+metadata does not describe Student-t coverage. The separate Student-t reproducer
+and its limits appear in [Validation and support](@ref). Generic proposals and `ProductProposal` are
 rejected. AMDGPU and Metal remain unclaimed; a KernelAbstractions backend
 alone is not a package support guarantee.
 

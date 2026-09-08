@@ -3,6 +3,7 @@ const _POPULATION_ALL_ZERO_LOCAL = UInt8(1)
 const _POPULATION_TEMPERING_FAILED = UInt8(2)
 const _POPULATION_REDUCTION_WORKGROUP_SIZE = 256
 const _POPULATION_REDUCTION_OFFSETS = (128, 64, 32, 16, 8, 4, 2, 1)
+const _POPULATION_COVARIANCE_MAX_ROW_LANES = 32
 const _POPULATION_CHOLESKY_WORKGROUP_SIZE = 64
 const _POPULATION_COVARIANCE_NONFINITE_INFO = Int32(-1)
 
@@ -25,6 +26,21 @@ end
 @inline function _population_local_group(starts, counts, proposal_slot, round)
     return @inbounds(starts[proposal_slot, round]),
     @inbounds(counts[proposal_slot, round])
+end
+
+@inline function _population_covariance_row_lane_count(dimension)
+    row_lane_count = 1
+    while row_lane_count < dimension &&
+          row_lane_count < _POPULATION_COVARIANCE_MAX_ROW_LANES
+        row_lane_count *= 2
+    end
+    return row_lane_count
+end
+
+@inline function _population_covariance_tile_count(dimension, row_lane_count)
+    quotient, remainder = divrem(dimension, row_lane_count)
+    return row_lane_count * quotient * (quotient + 1) ÷ 2 +
+           remainder * (quotient + 1)
 end
 
 @inline _population_covariance_sample(samples::AbstractVector, row, sample) =
@@ -629,44 +645,89 @@ end
     counts,
     round,
 )
-    entry = @index(Global, Linear)
-    dimension = size(covariances, 1)
-    entries_per_proposal = dimension * dimension
-    proposal_slot = (entry - 1) ÷ entries_per_proposal + 1
-    matrix_entry = (entry - 1) % entries_per_proposal
-    row = matrix_entry % dimension + 1
-    column = matrix_entry ÷ dimension + 1
-    if column <= row
-        if @inbounds(status[proposal_slot]) != _POPULATION_COVARIANCE_READY
-            covariance = _population_current_covariance(
-                current_bank,
-                row,
-                column,
-                proposal_slot,
-            )
-            @inbounds covariances[row, column, proposal_slot] = covariance
-            @inbounds covariances[column, row, proposal_slot] = covariance
-        else
-        first_sample, sample_count = _population_local_group(
-            starts,
-            counts,
-            proposal_slot,
-            round,
-        )
-        last_sample = first_sample + sample_count - 1
-        covariance = zero(eltype(covariances))
-        center_row = @inbounds covariance_centres[row, proposal_slot]
-        center_column = @inbounds covariance_centres[column, proposal_slot]
-        for sample in first_sample:last_sample
+    group_index = @index(Group, Linear)
+    lane = @index(Local, Linear)
+    @uniform lane_count = @groupsize()[1]
+    @uniform dimension = size(covariances, 1)
+    @uniform row_lane_count = _population_covariance_row_lane_count(dimension)
+    @uniform sample_lane_count = lane_count ÷ row_lane_count
+    @uniform T = eltype(covariances)
+    partial_covariances = @localmem eltype(covariances) (
+        _POPULATION_REDUCTION_WORKGROUP_SIZE,
+    )
+    # first row, column, proposal, first sample, last sample, covariance-ready flag
+    group_state = @localmem eltype(starts) (6,)
+    if lane == 1
+        tiles_per_proposal =
+            _population_covariance_tile_count(dimension, row_lane_count)
+        proposal_slot = (group_index - 1) ÷ tiles_per_proposal + 1
+        tile = (group_index - 1) % tiles_per_proposal + 1
+        column = 1
+        tiles_in_column = cld(dimension, row_lane_count)
+        while tile > tiles_in_column
+            tile -= tiles_in_column
+            column += 1
+            tiles_in_column = cld(dimension - column + 1, row_lane_count)
+        end
+        @inbounds group_state[1] = column + (tile - 1) * row_lane_count
+        @inbounds group_state[2] = column
+        @inbounds group_state[3] = proposal_slot
+        @inbounds group_state[4] = starts[proposal_slot, round]
+        @inbounds group_state[5] =
+            group_state[4] + counts[proposal_slot, round] - 1
+        @inbounds group_state[6] =
+            status[proposal_slot] == _POPULATION_COVARIANCE_READY
+    end
+    @synchronize()
+
+    row_lane = (lane - 1) % row_lane_count + 1
+    sample_lane = (lane - 1) ÷ row_lane_count + 1
+    row = @inbounds(group_state[1]) + row_lane - 1
+    active_row = row <= dimension
+    covariance = zero(T)
+    if @inbounds(group_state[6]) == 1 && active_row
+        center_row = @inbounds covariance_centres[row, group_state[3]]
+        center_column =
+            @inbounds covariance_centres[group_state[2], group_state[3]]
+        for sample in (@inbounds(group_state[4]) + sample_lane - 1):sample_lane_count:(@inbounds(group_state[5]))
             weight = @inbounds normalized_weights[sample]
-            centered_row =
-                _population_covariance_sample(samples, row, sample) - center_row
-            centered_column =
-                _population_covariance_sample(samples, column, sample) - center_column
+            centered_row = _population_covariance_sample(
+                samples,
+                row,
+                sample,
+            ) - center_row
+            centered_column = _population_covariance_sample(
+                samples,
+                @inbounds(group_state[2]),
+                sample,
+            ) - center_column
             covariance += weight * centered_row * centered_column
         end
-        @inbounds covariances[row, column, proposal_slot] = covariance
-        @inbounds covariances[column, row, proposal_slot] = covariance
+    end
+    @inbounds partial_covariances[lane] = covariance
+    @synchronize()
+    for offset in _POPULATION_REDUCTION_OFFSETS
+        if offset >= row_lane_count && lane <= offset
+            @inbounds partial_covariances[lane] +=
+                partial_covariances[lane + offset]
+        end
+        @synchronize()
+    end
+    if lane <= row_lane_count
+        row = @inbounds(group_state[1]) + lane - 1
+        if row <= dimension
+            if @inbounds(group_state[6]) == 1
+                covariance = @inbounds partial_covariances[lane]
+            else
+                covariance = _population_current_covariance(
+                    current_bank,
+                    row,
+                    @inbounds(group_state[2]),
+                    @inbounds(group_state[3]),
+                )
+            end
+            @inbounds covariances[row, group_state[2], group_state[3]] = covariance
+            @inbounds covariances[group_state[2], row, group_state[3]] = covariance
         end
     end
 end
@@ -742,7 +803,13 @@ function _fit_population_covariances!(
         ndrange=_POPULATION_REDUCTION_WORKGROUP_SIZE * dimension * proposal_count,
         workgroupsize=_POPULATION_REDUCTION_WORKGROUP_SIZE,
     )
-    covariance_kernel = _population_covariances_kernel!(backend)
+    covariance_kernel = _population_covariances_kernel!(
+        backend,
+        _POPULATION_REDUCTION_WORKGROUP_SIZE,
+    )
+    row_lane_count = _population_covariance_row_lane_count(dimension)
+    covariance_tile_count =
+        _population_covariance_tile_count(dimension, row_lane_count) * proposal_count
     covariance_kernel(
         covariances,
         covariance_centres,
@@ -753,12 +820,8 @@ function _fit_population_covariances!(
         starts,
         counts,
         round;
-        ndrange=length(covariances),
-        workgroupsize=_population_workgroupsize(
-            execution,
-            backend,
-            length(covariances),
-        ),
+        ndrange=_POPULATION_REDUCTION_WORKGROUP_SIZE * covariance_tile_count,
+        workgroupsize=_POPULATION_REDUCTION_WORKGROUP_SIZE,
     )
     KernelAbstractions.synchronize(backend)
     return nothing

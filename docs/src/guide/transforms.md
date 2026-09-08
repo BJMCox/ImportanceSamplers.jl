@@ -7,10 +7,10 @@ coordinates to the logical value seen by the target. Its normalized density is
 \log q_x(x) = \log q_z(z) - \log |J(z)|.
 ```
 
-This ownership is important for future BAT and Turing adapters: an adapter must
-translate parameter declarations into one ImportanceSamplers transform at its
-boundary. The target must then return a density against the logical reference
-measure and must not apply the same Jacobian again.
+BAT or Wren integration may keep coordinates and Jacobian ownership in the host
+package, or construct one [`TransformedProposal`](@ref) at the integration
+boundary. Whichever side owns the transform applies its Jacobian; the other side
+must not transform the same parameters or apply that Jacobian again.
 
 ## Scalar constraints
 

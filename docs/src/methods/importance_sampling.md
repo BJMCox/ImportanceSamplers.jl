@@ -369,10 +369,10 @@ warm = retarget(rng2, adapted, new_logtarget, p2)
 result = importance_sample!(warm)
 ```
 
-This operation supports `DeterministicMixturePMC`, `APIS`, `CAIS`, `AMIS`, and
-`FirstOrderGRAMIS`. It preserves the committed proposal, algorithm controls,
-execution policy, and device. It resets every target-specific history and
-workspace. The old sampler remains usable and keeps its RNG stream.
+This operation supports `DeterministicMixturePMC`, `APIS`, `CAIS`, `NPMC`,
+`AMIS`, and `FirstOrderGRAMIS`. It preserves the committed proposal, algorithm
+controls, execution policy, and device. It resets every target-specific history
+and workspace. The old sampler remains usable and keeps its RNG stream.
 
 On CPU, the new sampler owns `rng2`. Accelerator setup consumes one `UInt64`
 from `rng2` after preflight to seed an owned backend RNG. A later backend RNG

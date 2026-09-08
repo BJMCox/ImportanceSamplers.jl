@@ -199,6 +199,39 @@ end
     )
 end
 
+@testset "retarget accepts a committed GRAMIS bank with coincident means" begin
+    target = LogTarget(retarget_logdensity; grad=retarget_gradient!)
+    bank = ProposalBank([
+        FactorGaussian(fill(-1.0, 2), [1.0 0.0; 0.0 1.0]),
+        FactorGaussian(fill(1.0, 2), [1.0 0.0; 0.0 1.0]),
+    ])
+    source = prepare_sampler(
+        Random.Xoshiro(13),
+        target,
+        (offset=0.0, location=zeros(2)),
+        FirstOrderGRAMIS(
+            bank;
+            rounds=1,
+            round_size=8,
+            repulsion_strength=0.0,
+        );
+        threaded=false,
+    )
+    importance_sample!(source)
+    committed = current_proposal(source)
+    @test all(proposal -> iszero(proposal.location), committed.proposals)
+
+    retargeted = retarget(
+        Random.Xoshiro(14),
+        source,
+        target,
+        (offset=0.0, location=zeros(2)),
+    )
+
+    assert_same_proposal(current_proposal(retargeted), committed, (zeros(2),))
+    @test length(importance_sample!(retargeted)) == 8
+end
+
 
 @testset "retarget preserves source ownership" begin
     bank = ProposalBank([

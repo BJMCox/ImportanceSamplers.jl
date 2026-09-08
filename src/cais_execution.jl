@@ -133,7 +133,25 @@ function _install_cais_factors!(
     return nothing
 end
 
-function _update_cais_lognormalizers!(candidate, fitted_factors, execution)
+function _update_cais_lognormalizers!(
+    candidate,
+    fitted_factors,
+    ::Union{_SerialCPUExecution,_ThreadedCPUExecution},
+)
+    T = eltype(candidate.lognormalizers)
+    dimension = size(fitted_factors, 1)
+    @inbounds for proposal_slot in eachindex(candidate.lognormalizers)
+        logabsdet = zero(T)
+        for coordinate in axes(fitted_factors, 1)
+            logabsdet += log(fitted_factors[coordinate, coordinate, proposal_slot])
+        end
+        candidate.lognormalizers[proposal_slot] =
+            _gaussian_lognormalizer(T, dimension, logabsdet)
+    end
+    return nothing
+end
+
+function _update_cais_lognormalizers!(candidate, fitted_factors, execution::_KernelExecution)
     backend = KernelAbstractions.get_backend(candidate.lognormalizers)
     kernel = _update_cais_lognormalizers_kernel!(backend)
     proposal_count = length(candidate.lognormalizers)

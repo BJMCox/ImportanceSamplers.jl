@@ -85,6 +85,48 @@ end
                                         zero(eltype(scaled_weights))
 end
 
+function _scale_local_weights!(
+    scaled_weights,
+    logtargets,
+    generating_logdensities,
+    assignments,
+    proposal_maxima,
+    ::KernelAbstractions.CPU,
+    execution,
+)
+    @inbounds @simd for sample in eachindex(scaled_weights)
+        proposal = assignments[sample]
+        maximum_logweight = proposal_maxima[proposal]
+        local_logweight = logtargets[sample] - generating_logdensities[sample]
+        scaled_weights[sample] = isfinite(maximum_logweight) ?
+                                 exp(local_logweight - maximum_logweight) :
+                                 zero(eltype(scaled_weights))
+    end
+    return nothing
+end
+
+function _scale_local_weights!(
+    scaled_weights,
+    logtargets,
+    generating_logdensities,
+    assignments,
+    proposal_maxima,
+    backend,
+    execution,
+)
+    kernel = _scaled_local_weights_kernel!(backend)
+    kernel(
+        scaled_weights,
+        logtargets,
+        generating_logdensities,
+        assignments,
+        proposal_maxima;
+        ndrange=length(scaled_weights),
+        workgroupsize=_native_workgroupsize(execution, length(scaled_weights)),
+    )
+    return nothing
+end
+
 @kernel function _local_weighted_means_kernel!(
     candidate_locations,
     proposal_maxima,
@@ -207,15 +249,14 @@ function _local_weighted_means!(
             workgroupsize=_LOCAL_REDUCTION_WORKGROUP_SIZE,
         )
     end
-    scale_kernel = _scaled_local_weights_kernel!(backend)
-    scale_kernel(
+    _scale_local_weights!(
         scaled_weights,
         logtargets,
         generating_logdensities,
         assignments,
-        proposal_maxima;
-        ndrange=length(logtargets),
-        workgroupsize=_native_workgroupsize(execution, length(logtargets)),
+        proposal_maxima,
+        KernelAbstractions.get_backend(scaled_weights),
+        execution,
     )
     means_kernel = _local_weighted_means_kernel!(backend)
     dimension = samples isa AbstractVector ? 1 : size(samples, 1)

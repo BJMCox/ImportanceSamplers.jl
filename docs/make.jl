@@ -48,6 +48,10 @@ function native_capability_proposals()
         spherical_vector=SphericalGaussian(zeros(2), 1.0),
         vector=DiagonalGaussian(zeros(2), [0.5, 1.5]),
         factor_vector=FactorGaussian(zeros(2), [1.0 0.0; 0.25 1.2]),
+        student_scalar=SphericalStudentT(5.0, 0.0, 1.0),
+        student_spherical=SphericalStudentT(5.0, zeros(2), 1.0),
+        student_diagonal=DiagonalStudentT(5.0, zeros(2), [0.5, 1.5]),
+        student_factor=FactorStudentT(5.0, zeros(2), [1.0 0.0; 0.25 1.2]),
         identity=TransformedProposal(
             SphericalGaussian(0.0, 1.0),
             IdentityTransform(),
@@ -112,6 +116,10 @@ const NATIVE_CAPABILITY_NAMES = (
     spherical_vector="spherical vector Gaussian",
     vector="diagonal vector Gaussian",
     factor_vector="factor Gaussian",
+    student_scalar="scalar Student-t",
+    student_spherical="spherical-vector Student-t",
+    student_diagonal="diagonal Student-t",
+    student_factor="factor Student-t",
     identity="identity transform",
     positive="positive transform",
     softplus="softplus transform",
@@ -225,7 +233,7 @@ function checked_plain_is_capability_table()
         "| Generic normalized proposal | serial and threaded (`$threaded_detail`) " *
         "| rejected: generic proposal is CPU-only |\n" *
         "| $a100_names | serial execution | A100 execution with $a100_types |\n" *
-        "| $other_names | serial execution | not A100-validated |\n" *
+        "| $other_names | serial execution | outside Gaussian A100 metadata; see validation guide |\n" *
         "| `ProductProposal` and named product layout | serial execution " *
         "| rejected: CPU-only proposal |",
     )
@@ -421,6 +429,39 @@ end
 const FIRST_ORDER_GRAMIS_CAPABILITY_TABLE =
     checked_first_order_gramis_capability_table()
 
+function checked_population_capability_table()
+    rows = String[]
+    for T in (Float32, Float64)
+        proposals = (
+            scalar=SphericalGaussian(zero(T), one(T)),
+            spherical=SphericalGaussian(zeros(T, 2), one(T)),
+            diagonal=DiagonalGaussian(zeros(T, 2), T[1, 2]),
+            factor=FactorGaussian(zeros(T, 2), T[1 0; 0.25 1]),
+        )
+        for (layout, proposal) in pairs(proposals)
+            bank = ProposalBank([proposal], T[1])
+            algorithms = (
+                APIS=APIS(bank; rounds=2, round_size=64),
+                CAIS=CAIS(bank; rounds=2, round_size=64),
+                NPMC=NPMC(proposal; rounds=2, round_size=64),
+            )
+            target = x -> DensityInterface.logdensityof(proposal, x)
+            for (name, algorithm) in pairs(algorithms)
+                sampler = prepare_sampler(Xoshiro(42), target, algorithm; threaded=false)
+                result = importance_sample!(sampler)
+                length(result) == 128 || error("$name $layout docs check returned wrong count")
+                push!(rows, "| $name | `$T` | $layout | public serial execution |")
+            end
+        end
+    end
+    return Markdown.parse(
+        "| Method | Scalar type | Initial Gaussian layout | Docs-build CPU check |\n" *
+        "|:--|:--|:--|:--|\n" * join(rows, '\n'),
+    )
+end
+
+const POPULATION_CAPABILITY_TABLE = checked_population_capability_table()
+
 makedocs(
     modules=[ImportanceSamplers],
     sitename="ImportanceSamplers.jl",
@@ -430,7 +471,7 @@ makedocs(
         edit_link=nothing,
         repolink=nothing,
     ),
-    build=mktempdir(),
+    build=joinpath(@__DIR__, "build"),
     remotes=nothing,
     pages=[
         "Home" => "index.md",
@@ -448,6 +489,7 @@ makedocs(
             "Native proposals" => "guide/native_proposals.md",
             "Transforms" => "guide/transforms.md",
             "Accelerators" => "guide/accelerators.md",
+            "Validation and support" => "guide/validation.md",
         ],
         "Reference" => "reference.md",
     ],
