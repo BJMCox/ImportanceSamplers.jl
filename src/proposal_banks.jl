@@ -596,3 +596,43 @@ generating group size.
 struct PartialDeterministicMixture{G} <: AbstractMISScheme
     groups::G
 end
+
+function _preserving_cpu_destination(destination)
+    if applicable(eltype, destination)
+        policy = eltype(destination)
+        policy in (Missing, Nothing) || throw(
+            ArgumentError(
+                "current_proposal requires a preserving CPU destination; " *
+                "use MLDataDevices.cpu_device() without a scalar conversion",
+            ),
+        )
+    end
+    return destination
+end
+
+function _factor_population_snapshot(
+    locations::AbstractMatrix{T},
+    factors::AbstractArray{T,3},
+    lognormalizers::AbstractVector{T},
+    proposal_ids,
+    configured_masses,
+) where {T<:_NativeGaussianFloat}
+    D = _GaussianProposal{
+        GaussianFamily,
+        Vector{T},
+        _FactorGaussianScale{Matrix{T}},
+        T,
+    }
+    proposals = Vector{D}(undef, length(configured_masses))
+    for (slot, proposal_id) in pairs(proposal_ids)
+        proposals[proposal_id] = _GaussianProposal(
+            GaussianFamily(),
+            copy(view(locations, :, slot)),
+            _FactorGaussianScale(copy(view(factors, :, :, slot))),
+            lognormalizers[slot],
+        )
+    end
+    snapshot = ProposalBank(proposals, configured_masses)
+    copyto!(snapshot.masses, configured_masses)
+    return snapshot
+end

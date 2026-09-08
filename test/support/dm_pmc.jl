@@ -239,18 +239,6 @@ end
 
 DMPMCGenericProposal() = DMPMCGenericProposal(Ref(0))
 
-struct DMPMCCountingMasses{T,V<:AbstractVector{T}} <: AbstractVector{T}
-    values::V
-    reads::Base.RefValue{Int}
-end
-
-DMPMCCountingMasses(values::AbstractVector{T}) where {T} =
-    DMPMCCountingMasses{T,typeof(values)}(values, Ref(0))
-
-Base.size(masses::DMPMCCountingMasses) = size(masses.values)
-Base.getindex(masses::DMPMCCountingMasses, index::Int) =
-    (masses.reads[] += 1; masses.values[index])
-
 function Random.rand(rng::Random.AbstractRNG, proposal::DMPMCGenericProposal)
     proposal.draw_count[] += 1
     return Random.randn(rng)

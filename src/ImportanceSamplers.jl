@@ -26,6 +26,8 @@ export AbstractImportanceSampler,
     AMISRoundError,
     APIS,
     APISRoundError,
+    CAIS,
+    CAISRoundError,
     NPMC,
     NPMCRoundError,
     AllZeroWeightsError,
@@ -87,18 +89,21 @@ include("execution.jl")
 include("methods/static_mis.jl")
 include("methods/dm_pmc.jl")
 include("methods/apis.jl")
+include("methods/cais.jl")
 include("adaptive_gaussian.jl")
 include("methods/amis.jl")
 include("methods/npmc.jl")
 include("methods/first_order_gramis.jl")
 include("native_execution.jl")
 include("mis_execution.jl")
+include("population_covariance.jl")
 include("first_order_gramis_execution.jl")
 include("adaptive_gaussian_execution.jl")
 include("amis_execution.jl")
 include("npmc_execution.jl")
 include("static_mis_execution.jl")
 include("population_execution.jl")
+include("cais_execution.jl")
 include("dm_pmc_execution.jl")
 include("apis_execution.jl")
 include("results.jl")

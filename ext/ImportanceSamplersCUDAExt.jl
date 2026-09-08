@@ -79,9 +79,9 @@ function ImportanceSamplers._first_order_gramis_diagnostic_summary(
     transfers,
     ::ImportanceSamplers._KernelExecution,
 )
-    all_zero = count(==(ImportanceSamplers._GRAMIS_ALL_ZERO_LOCAL), status)
+    all_zero = count(==(ImportanceSamplers._POPULATION_ALL_ZERO_LOCAL), status)
     tempering = count(
-        ==(ImportanceSamplers._GRAMIS_TEMPERING_FALLBACK),
+        ==(ImportanceSamplers._POPULATION_TEMPERING_FAILED),
         status,
     )
     backtracking = count(iszero, steps)
@@ -108,31 +108,6 @@ function ImportanceSamplers._gaussian_potrf!(
     factor, info = CUDA.cuSOLVER.potrf!('L', factor)
     info == 0 || throw(LinearAlgebra.PosDefException(info))
     return factor
-end
-
-function ImportanceSamplers._factor_population!(
-    ::MLDataDevices.CUDADevice,
-    factors::CUDA.StridedCuArray{T,3},
-    covariances::CUDA.StridedCuArray{T,3},
-    info::CUDA.StridedCuVector{Int32},
-    status::CUDA.StridedCuVector{UInt8},
-) where {T<:Union{Float32,Float64}}
-    proposal_count = size(factors, 3)
-    workgroupsize = ImportanceSamplers._GRAMIS_CHOLESKY_WORKGROUP_SIZE
-    backend = KernelAbstractions.get_backend(factors)
-    kernel = ImportanceSamplers._factor_population_kernel!(
-        backend,
-        workgroupsize,
-    )
-    kernel(
-        factors,
-        covariances,
-        info,
-        status;
-        ndrange=workgroupsize * proposal_count,
-    )
-    KernelAbstractions.synchronize(backend)
-    return nothing
 end
 
 function ImportanceSamplers._factor_pooled_covariance!(
@@ -182,19 +157,22 @@ function ImportanceSamplers._preflight_first_order_gramis_factorization!(
     factors = similar(covariances)
     info = similar(method_state.workspace.factor_info, Int32, proposal_count)
     status = similar(method_state.workspace.factor_status, UInt8, proposal_count)
-    fill!(status, ImportanceSamplers._GRAMIS_COVARIANCE_READY)
+    fill!(status, ImportanceSamplers._POPULATION_COVARIANCE_READY)
     backend = KernelAbstractions.get_backend(covariances)
     covariance_kernel = _factorization_preflight_covariances!(backend)
     covariance_kernel(
         covariances;
         ndrange=length(covariances),
     )
-    ImportanceSamplers._factor_population!(
-        device,
+    execution = ImportanceSamplers._KernelExecution(
+        ImportanceSamplers._ThreadedCPUExecution(),
+    )
+    ImportanceSamplers._factor_population_covariances!(
         factors,
         covariances,
         info,
         status,
+        execution,
     )
     any(!iszero, info) && throw(
         ImportanceSamplers.SamplerDeviceError(
@@ -204,9 +182,6 @@ function ImportanceSamplers._preflight_first_order_gramis_factorization!(
     )
 
     pooled = similar(method_state.workspace.pooled_covariance, T, dimension, dimension)
-    execution = ImportanceSamplers._KernelExecution(
-        ImportanceSamplers._ThreadedCPUExecution(),
-    )
     ImportanceSamplers._pooled_covariance!(pooled, factors, execution)
     ImportanceSamplers._factor_pooled_covariance!(pooled)
     means = similar(method_state.workspace.whitened_means, T, dimension, proposal_count)

@@ -231,11 +231,6 @@ _first_order_gramis_same_location(left::AbstractVector, right::_NativeGaussianFl
 _first_order_gramis_same_location(left::AbstractVector, right::AbstractVector) =
     left == right
 
-function _first_order_gramis_default_threshold(sample_count)
-    quotient, remainder = divrem(sample_count, 10)
-    return 3 * quotient + cld(3 * remainder, 10)
-end
-
 struct _FirstOrderGRAMISWorkspace{S,L,I,N,Q,O,C,G,A,P,R,F,J,E,W,B}
     samples::S
     round_logweights::L
@@ -418,7 +413,7 @@ function _resolve_first_order_gramis_threshold(
     end
 
     threshold = if raw === nothing
-        max(dimension + 1, _first_order_gramis_default_threshold(sample_count))
+        max(dimension + 1, _default_population_covariance_ess_threshold(sample_count))
     elseif raw isa Integer && !(raw isa Bool)
         try
             converted = Int(raw)
@@ -876,9 +871,9 @@ function _preflight_first_order_gramis_cooperative_kernel!(method_state)
     fill!(counts, 1)
     fill!(thresholds, one(eltype(thresholds)))
 
-    kernel = _cooperative_local_weights_kernel!(
+    kernel = _cooperative_population_local_weights_kernel!(
         backend,
-        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
+        _POPULATION_REDUCTION_WORKGROUP_SIZE,
     )
     kernel(
         normalized_weights,
@@ -891,9 +886,11 @@ function _preflight_first_order_gramis_cooperative_kernel!(method_state)
         thresholds,
         1,
         method_state.tempering_tolerance,
-        method_state.tempering_max_iterations;
-        ndrange=_GRAMIS_REDUCTION_WORKGROUP_SIZE,
-        workgroupsize=_GRAMIS_REDUCTION_WORKGROUP_SIZE,
+        method_state.tempering_max_iterations,
+        nothing,
+        nothing;
+        ndrange=_POPULATION_REDUCTION_WORKGROUP_SIZE,
+        workgroupsize=_POPULATION_REDUCTION_WORKGROUP_SIZE,
     )
     KernelAbstractions.synchronize(backend)
     return nothing
@@ -956,9 +953,9 @@ function _preflight_accelerator_method(
         ),
     )
 
-    cooperative_kernel = _cooperative_local_weights_kernel!(
+    cooperative_kernel = _cooperative_population_local_weights_kernel!(
         backend,
-        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
+        _POPULATION_REDUCTION_WORKGROUP_SIZE,
     )
     covariance_arguments = _first_order_gramis_covariance_kernel_arguments(
         method_state,
@@ -967,13 +964,13 @@ function _preflight_accelerator_method(
     _preflight_first_order_gramis_kernel_arguments(
         device,
         cooperative_kernel,
-        covariance_arguments[1],
+        (covariance_arguments[1]..., nothing, nothing),
     )
     _preflight_first_order_gramis_cooperative_kernel!(method_state)
 
-    centre_kernel = _fit_accelerator_covariance_centres_kernel!(
+    centre_kernel = _population_covariance_centres_kernel!(
         backend,
-        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
+        _POPULATION_REDUCTION_WORKGROUP_SIZE,
     )
     _preflight_first_order_gramis_kernel_arguments(
         device,
@@ -981,7 +978,7 @@ function _preflight_accelerator_method(
         _first_order_gramis_covariance_centre_arguments(method_state, 1),
     )
     covariance_kernels = (
-        _fit_accelerator_covariances_kernel!(backend),
+        _population_covariances_kernel!(backend),
         _blend_local_covariances_kernel!(backend),
     )
     covariance_kernel_arguments = (
@@ -999,9 +996,9 @@ function _preflight_accelerator_method(
         )
     end
 
-    factor_kernel = _factor_population_kernel!(
+    factor_kernel = _factor_population_covariances_kernel!(
         backend,
-        _GRAMIS_CHOLESKY_WORKGROUP_SIZE,
+        _POPULATION_CHOLESKY_WORKGROUP_SIZE,
     )
     _preflight_first_order_gramis_kernel_arguments(
         device,
@@ -1032,19 +1029,6 @@ function _preflight_accelerator_method(
         random_buffers,
     )
     return nothing
-end
-
-function _first_order_gramis_preserving_cpu_destination(destination)
-    if applicable(eltype, destination)
-        policy = eltype(destination)
-        policy in (Missing, Nothing) || throw(
-            ArgumentError(
-                "current_proposal requires a preserving CPU destination; " *
-                "use MLDataDevices.cpu_device() without a scalar conversion",
-            ),
-        )
-    end
-    return destination
 end
 
 """
@@ -1080,10 +1064,10 @@ function current_proposal(
     destination::MLDataDevices.AbstractCPUDevice,
     sampler::_PreparedImportanceSampler{R,B,T,A,M,D},
 ) where {R,B,T,A<:FirstOrderGRAMIS,M<:_PreparedFirstOrderGRAMIS,D}
-    _first_order_gramis_preserving_cpu_destination(destination)
+    _preserving_cpu_destination(destination)
     committed = sampler.method_state.committed
     if sampler.device isa MLDataDevices.AbstractCPUDevice
-        return _first_order_gramis_snapshot(
+        return _factor_population_snapshot(
             committed.locations,
             committed.factors,
             committed.lognormalizers,
@@ -1099,7 +1083,7 @@ function current_proposal(
             destination(Array(committed.proposal_ids)),
         )
     end
-    return _first_order_gramis_snapshot(
+    return _factor_population_snapshot(
         parameters...,
         sampler.algorithm.bank.masses,
     )
@@ -1115,31 +1099,4 @@ function current_proposal(
             string(typeof(destination)),
         ),
     )
-end
-
-function _first_order_gramis_snapshot(
-    locations::AbstractMatrix{T},
-    factors::AbstractArray{T,3},
-    lognormalizers::AbstractVector{T},
-    proposal_ids,
-    configured_masses,
-) where {T<:_NativeGaussianFloat}
-    D = _GaussianProposal{
-        GaussianFamily,
-        Vector{T},
-        _FactorGaussianScale{Matrix{T}},
-        T,
-    }
-    proposals = Vector{D}(undef, length(configured_masses))
-    for (slot, proposal_id) in pairs(proposal_ids)
-        proposals[proposal_id] = _GaussianProposal(
-            GaussianFamily(),
-            copy(view(locations, :, slot)),
-            _FactorGaussianScale(copy(view(factors, :, :, slot))),
-            lognormalizers[slot],
-        )
-    end
-    snapshot = ProposalBank(proposals, configured_masses)
-    copyto!(snapshot.masses, configured_masses)
-    return snapshot
 end

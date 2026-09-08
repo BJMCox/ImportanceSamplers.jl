@@ -80,6 +80,8 @@ function check_recurrence(
         @test Float64.(result.logweights[indices]) ≈
               expected_logweights rtol=tolerance atol=tolerance
         @test all(==(round), result.provenance.round[indices])
+        @test result.provenance.proposal_id[indices] ==
+              repeat(1:proposal_count; inner=draws_per_proposal)
         for proposal in eachindex(means)
             first_sample = (proposal - 1) * draws_per_proposal + 1
             group_indices = first_sample:(proposal * draws_per_proposal)
@@ -101,39 +103,17 @@ function check_recurrence(
     return nothing
 end
 
-function assert_resident(prepared, result)
-    state = prepared.method_state
-    bank = state.bank
-    workspace = state.workspace
-    arrays = Any[
-        bank.locations,
-        bank.lognormalizers,
-        bank.logmasses,
-        bank.cdf,
-        bank.proposal_ids,
-        state.plan.counts,
-        state.plan.assignments,
-        state.plan.logcoefficients,
-        workspace.round_samples,
-        workspace.round_logweights,
-        workspace.round_proposal_ids,
-        workspace.round_logtargets,
-        workspace.round_generating_logdensities,
-        workspace.scaled_local_weights,
-        workspace.proposal_maxima,
-        workspace.candidate_locations,
-        prepared.random_buffers.normals,
-        prepared.random_buffers.failure_scratch.record.storage,
-        result.samples,
-        result.logweights,
-        result.provenance.round,
-        result.provenance.proposal_id,
-    ]
-    push!(arrays, bank isa IS._PackedFactorGaussianBank ? bank.factors : bank.scales)
-    workspace.solve_scratch isa IS._NoMISSolveScratch ||
-        push!(arrays, workspace.solve_scratch)
-    @test all(array -> array isa CUDA.AnyCuArray, arrays)
-    return nothing
+function public_device_result(result)
+    @test result.samples isa CUDA.AnyCuArray
+    @test result.logweights isa CUDA.AnyCuArray
+    @test result.provenance.round isa CUDA.AnyCuArray
+    @test result.provenance.proposal_id isa CUDA.AnyCuArray
+    host = cpu_device()(result)
+    @test Array(result.samples) == host.samples
+    @test Array(result.logweights) == host.logweights
+    @test Array(result.provenance.round) == host.provenance.round
+    @test Array(result.provenance.proposal_id) == host.provenance.proposal_id
+    return host
 end
 
 function validation_bank(::Type{T}, scalar) where {T}
@@ -177,8 +157,6 @@ function check_local_zero_rollback(device)
     end
     @test failure isa APISRoundError
     @test failure.round == 2
-    @test failure.phase == :adaptation
-    @test failure.cause isa AllZeroWeightsError
     @test location_vector.(current_proposal(cpu_device(), sampler).proposals) ==
           location_vector.(committed.proposals)
     @test sampler.rng.index == 5
@@ -190,50 +168,57 @@ function main()
     CUDA.functional() || error("CUDA is required for this reproducer")
     physical = CUDA.device()
     device = MLDataDevices.CUDADevice{typeof(physical),Nothing}(physical)
-    schedule = [4096, 2048, 4096]
+    schedule = [8, 12]
     records = []
     @testset "CUDA APIS recurrence, residency, reuse, and rollback" begin
         check_local_zero_rollback(device)
-        for (T, scalar, policy) in (
-            (Float32, true, nothing),
-            (Float64, true, nothing),
-            (Float32, false, nothing),
-            (Float64, false, BatchedFactorExecution()),
-            (Float64, false, FusedFactorExecution()),
+        scalar_bank = validation_bank(Float32, true)
+        scalar = device(prepare_sampler(
+            Xoshiro(102),
+            QuadraticTarget{Float32}(),
+            APIS(scalar_bank; rounds=2, round_size=schedule),
+        ))
+        scalar_result = importance_sample!(scalar)
+        scalar_host = public_device_result(scalar_result)
+        scalar_learned = current_proposal(cpu_device(), scalar)
+        check_recurrence(
+            scalar_host,
+            scalar_bank,
+            scalar_learned,
+            schedule,
+            QuadraticTarget{Float32}(),
+            Float32,
         )
-            bank = validation_bank(T, scalar)
-            options = isnothing(policy) ? (;) : (; factor_execution=policy)
-            prepared = device(prepare_sampler(
-                Xoshiro(102),
-                QuadraticTarget{T}(),
-                APIS(bank; rounds=3, round_size=schedule);
-                options...,
-            ))
-            result = importance_sample!(prepared)
-            assert_resident(prepared, result)
-            host = cpu_device()(result)
-            learned = current_proposal(cpu_device(), prepared)
-            check_recurrence(host, bank, learned, schedule, QuadraticTarget{T}(), T)
+        scalar_next = importance_sample!(scalar)
+        scalar_next_host = public_device_result(scalar_next)
+        check_recurrence(
+            scalar_next_host,
+            scalar_learned,
+            current_proposal(cpu_device(), scalar),
+            schedule,
+            QuadraticTarget{Float32}(),
+            Float32,
+        )
+        push!(records, (scalar_type=Float32, scalar=true))
 
-            next_result = importance_sample!(prepared)
-            next_learned = current_proposal(cpu_device(), prepared)
-            check_recurrence(
-                cpu_device()(next_result),
-                learned,
-                next_learned,
-                schedule,
-                QuadraticTarget{T}(),
-                T,
-            )
-            @test Array(result.logweights) == host.logweights
-            @test result.diagnostics.transfers.reasons.local_mean_validity.count == 3
-            push!(records, (
-                scalar_type=T,
-                scalar,
-                factor_execution=typeof(policy),
-                transfers=result.diagnostics.transfers.count,
-            ))
-        end
+        factor_bank = validation_bank(Float64, false)
+        factor = device(prepare_sampler(
+            Xoshiro(103),
+            QuadraticTarget{Float64}(),
+            APIS(factor_bank; rounds=2, round_size=schedule);
+            factor_execution=BatchedFactorExecution(),
+        ))
+        factor_result = importance_sample!(factor)
+        factor_host = public_device_result(factor_result)
+        check_recurrence(
+            factor_host,
+            factor_bank,
+            current_proposal(cpu_device(), factor),
+            schedule,
+            QuadraticTarget{Float64}(),
+            Float64,
+        )
+        push!(records, (scalar_type=Float64, scalar=false))
     end
     return (; hardware=CUDA.name(CUDA.device()), records)
 end

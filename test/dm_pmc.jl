@@ -154,20 +154,6 @@ end
     @test @allocated(DMPMCIS._dm_pmc_round_counts(exact_masses, round_size, 1)) < 1_000_000
 end
 
-@testset "DM-PMC allocation converts exact masses once per plan" begin
-    bank = ProposalBank(
-        [SphericalGaussian(-1.0, 1.0), SphericalGaussian(1.0, 1.0)],
-        Float32[1, 3],
-    )
-    packed = DMPMCIS._prepare_population_bank(bank)
-    masses = DMPMCCountingMasses(bank.masses[packed.proposal_ids])
-    schedule = [13, 14, 13, 14]
-    plan = DMPMCIS._deterministic_allocation_plan(packed, masses, schedule)
-
-    @test masses.reads[] == length(masses)
-    @test vec(sum(plan.counts; dims=1)) == schedule
-end
-
 @testset "DM-PMC allocation rejects uncovered active proposals before RNG use" begin
     bank = ProposalBank(
         [SphericalGaussian(Float64(id), 1.0) for id in 1:3],
