@@ -26,22 +26,26 @@ function measure(
         SphericalGaussian(fill(T(location), dimension), T(2)) for
         location in range(T(-4), T(4); length=proposal_count)
     ]
+    masses = ones(T, proposal_count)
     source = prepare_sampler(
         Xoshiro(42),
         GaussianTarget{T}(),
-        APIS(ProposalBank(proposals); rounds, round_size);
+        APIS(ProposalBank(proposals, masses); rounds, round_size);
         threaded,
     )
     trial = @benchmark importance_sample!(prepared) setup=(
         prepared=$device($source)
     ) evals=1 samples=20 seconds=10
     estimate = median(trial)
+    precision_result = importance_sample!(device(source))
     return (
         dimension,
         proposal_count,
         round_size,
         rounds,
         scalar_type=T,
+        sample_type=eltype(precision_result.samples),
+        logweight_type=eltype(precision_result.logweights),
         threaded,
         julia_threads=Threads.nthreads(:default),
         milliseconds=estimate.time / 1e6,
