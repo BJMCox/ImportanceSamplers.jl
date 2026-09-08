@@ -41,6 +41,64 @@ function cais_tempered_weights(logweights, threshold)
     return Float64.(cais_softmax(low .* logs))
 end
 
+@testset "CAIS covariance kernel preserves lane state across CPU barriers" begin
+    T = Float64
+    dimension = 4
+    sample_count = 7
+    bank = ProposalBank(
+        [
+            FactorGaussian(
+                zeros(T, dimension),
+                Matrix{T}(LinearAlgebra.I, dimension, dimension),
+            ),
+        ],
+        T[1],
+    )
+    algorithm = CAIS(
+        bank;
+        rounds=1,
+        round_size=sample_count,
+        covariance_ess_threshold=5,
+    )
+    sampler = prepare_sampler(
+        Random.Xoshiro(1),
+        x -> -sum(abs2, x) / T(2),
+        algorithm;
+        threaded=false,
+    )
+    method_state = sampler.method_state
+    workspace = method_state.workspace
+    samples = reshape(T.(1:(dimension * sample_count)), dimension, sample_count) ./
+              T(10)
+    copyto!(workspace.round_samples, samples)
+    fill!(workspace.normalized_weights, inv(T(sample_count)))
+    fill!(workspace.tempering_powers, one(T))
+    fill!(
+        workspace.factor_status,
+        ImportanceSamplers._POPULATION_COVARIANCE_READY,
+    )
+
+    ImportanceSamplers._fit_population_covariances!(
+        workspace.covariances,
+        workspace.covariance_centres,
+        workspace.normalized_weights,
+        workspace.tempering_powers,
+        workspace.factor_status,
+        workspace.round_samples,
+        method_state.run_bank.locations,
+        method_state.run_bank,
+        workspace.local_starts,
+        method_state.plan.counts,
+        1,
+        ImportanceSamplers._KernelExecution(
+            ImportanceSamplers._SerialCPUExecution(),
+        ),
+    )
+
+    @test view(workspace.covariances, :, :, 1) ≈
+          samples * samples' / T(sample_count)
+end
+
 @testset "CAIS public vector low-ESS recurrence" begin
     T = Float32
     samples = T[-1 0 1 0; 0 1 0 -2]
