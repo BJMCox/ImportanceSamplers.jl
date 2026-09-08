@@ -63,6 +63,8 @@ target returns a `Float32` or `Float64` log density; the sampler never applies
   retrospective temporal-mixture weights and learned Gaussian state.
 - [Adaptive population importance sampling](docs/src/methods/apis.md) explains
   epoch-local deterministic-mixture weights and proposal-local mean updates.
+- [Layered importance sampling](docs/src/methods/lais.md) explains upper RWM/RAM
+  chains and lower importance samples with fixed covariance factors.
 - [Canonical covariance-adaptive importance sampling](docs/src/methods/cais.md)
   explains raw generating-proposal weights, ESS-tempered covariance fitting,
   and retained full-covariance state.

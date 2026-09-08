@@ -49,6 +49,7 @@ target and algorithm arguments. The proposal alone determines sample shape.
 | Static MIS | fixed proposal bank | nothing | selected spatial or generating-proposal scheme | `nsamples` | CPU; documented native subset on CUDA |
 | AMIS | one native Gaussian | mean and covariance | all-history temporal mixture | `round_size` | CPU and native Gaussian CUDA |
 | APIS | native Gaussian bank | means | current population mixture | `round_size` | CPU and native Gaussian CUDA |
+| LAIS | equal-mass native Gaussian bank | centres by upper MCMC; optional upper covariance tuning | equal current population mixture | divisible `round_size` | CPU and native Gaussian CUDA |
 | CAIS | native Gaussian bank | means and covariances | generating proposal | `round_size` | CPU and native Gaussian CUDA |
 | N-PMC | one native Gaussian | mean and covariance from clipped adaptation weights | generating proposal | `round_size` | CPU and native Gaussian CUDA |
 | DM-PMC | proposal bank | locations by resampling | realized current population mixture | `round_size` | CPU; documented native subset on CUDA |
@@ -69,6 +70,8 @@ contract; the table is only a starting point.
   mixtures and learned Gaussian state.
 - [Adaptive population importance sampling](@ref) covers epoch-local spatial
   mixtures, proposal-local mean fits, and retained fixed-covariance state.
+- [Layered importance sampling](@ref) covers upper RWM/RAM chains, fixed lower
+  covariances, and all-round deterministic-mixture weights.
 - [Canonical covariance-adaptive importance sampling](@ref) covers standard
   generating-proposal weights, raw mean fits, and robust covariance replacement.
 - [Nonlinear population Monte Carlo](@ref) covers clipped adaptation and raw

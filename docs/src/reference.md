@@ -7,6 +7,12 @@ AbstractImportanceSampler
 ImportanceSampling
 AMIS
 APIS
+LAIS
+AbstractMCMCTransition
+RandomWalkMetropolis
+RAM
+WarmupTuning
+ContinuousTuning
 CAIS
 NPMC
 DeterministicMixturePMC
@@ -87,6 +93,7 @@ SamplerDeviceError
 SamplerExecutionError
 AMISRoundError
 APISRoundError
+LAISRoundError
 CAISRoundError
 NPMCRoundError
 DMPMCRoundError

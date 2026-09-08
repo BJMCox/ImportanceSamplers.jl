@@ -73,7 +73,7 @@ prepared = prepare_sampler(
 prepared = prepared |> device
 ```
 
-The same policy applies to Base IS, static MIS, DM-PMC, AMIS, APIS, CAIS, NPMC, and GRAMIS. It
+The same policy applies to Base IS, static MIS, DM-PMC, AMIS, APIS, LAIS, CAIS, NPMC, and GRAMIS. It
 remains part of the prepared sampler during device transfer. Use
 `FusedFactorExecution()` to force fusion or `BatchedFactorExecution()` to force
 batching where supported.

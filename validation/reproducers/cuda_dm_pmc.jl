@@ -269,7 +269,7 @@ function assert_dm_pmc_reported_transfers(
 ) where {T}
     record = reported_transfer_record(transfers)
     is_local = resampling isa LocalResampling
-    @test record.count == (is_local ? 5rounds : 6rounds)
+    @test record.count == (is_local ? 3rounds : 4rounds)
     expected_bytes = is_local ?
                      3sizeof(UInt64) + sizeof(Int) + 3sizeof(T) :
                      3sizeof(UInt64) + 5sizeof(T)
@@ -278,16 +278,9 @@ function assert_dm_pmc_reported_transfers(
         count=rounds,
         bytes=rounds * 3sizeof(UInt64),
     )
-    for reason in (
-        :logweight_maximum,
-        :logweight_scaled_sum,
-        :logweight_scaled_square_sum,
+    @test record.reasons.logweight_moments == (
+        count=rounds, bytes=rounds * 3sizeof(T),
     )
-        @test getfield(record.reasons, reason) == (
-            count=rounds,
-            bytes=rounds * sizeof(T),
-        )
-    end
     if is_local
         @test record.reasons.local_resampling_validity == (
             count=rounds,
@@ -473,8 +466,8 @@ function transfer_scaling_case(device, ::Type{T}) where {T}
     two_rounds_other_shape = run(smaller_bank, [5, 17])
     three_rounds = run(configured, [9, 11, 13])
     @test two_rounds == two_rounds_other_shape
-    @test two_rounds.count == 12
-    @test three_rounds.count == 18
+    @test two_rounds.count == 8
+    @test three_rounds.count == 12
     @test two_rounds.bytes == 2 * (3sizeof(UInt64) + 5sizeof(T))
     @test three_rounds.bytes == 3 * (3sizeof(UInt64) + 5sizeof(T))
     return (; two_rounds, two_rounds_other_shape, three_rounds)
@@ -537,15 +530,17 @@ function strict_resampling_and_ess_case(::Type{T}) where {T}
     )
     @test summary.ess == T(2)
     @test isfinite(summary.lognormalizer)
-    @test transfers.count == 3
+    @test transfers.count == 1
     @test transfers.bytes == 3sizeof(T)
     reason_record = reported_transfer_record(transfers)
-    @test reason_record.reasons.logweight_maximum ==
-          (count=1, bytes=sizeof(T))
-    @test reason_record.reasons.logweight_scaled_sum ==
-          (count=1, bytes=sizeof(T))
-    @test reason_record.reasons.logweight_scaled_square_sum ==
-          (count=1, bytes=sizeof(T))
+    @test reason_record.reasons.logweight_moments ==
+          (count=1, bytes=3sizeof(T))
+    if T === Float32
+        empty_mass = IS._logweight_summary(CuArray(T[-Inf, -Inf]))
+        single_mass = IS._logweight_summary(CuArray(T[-Inf, 0]))
+        @test empty_mass == (ess=0f0, lognormalizer=-Inf32)
+        @test single_mass == (ess=1f0, lognormalizer=-log(2f0))
+    end
     return (; selected, ess=summary.ess, transfers=reason_record)
 end
 

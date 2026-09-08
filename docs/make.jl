@@ -444,6 +444,8 @@ function checked_population_capability_table()
                 APIS=APIS(bank; rounds=2, round_size=64),
                 CAIS=CAIS(bank; rounds=2, round_size=64),
                 NPMC=NPMC(proposal; rounds=2, round_size=64),
+                LAIS=LAIS(bank; transition=RAM(one(T); tuning=ContinuousTuning()),
+                    rounds=2, round_size=64),
             )
             target = x -> DensityInterface.logdensityof(proposal, x)
             for (name, algorithm) in pairs(algorithms)
@@ -480,6 +482,7 @@ makedocs(
             "Static multiple importance sampling" => "methods/static_mis.md",
             "Adaptive multiple importance sampling" => "methods/amis.md",
             "Adaptive population importance sampling" => "methods/apis.md",
+            "Layered importance sampling" => "methods/lais.md",
             "Canonical covariance-adaptive importance sampling" => "methods/cais.md",
             "Nonlinear population Monte Carlo" => "methods/npmc.md",
             "Deterministic-mixture population Monte Carlo" => "methods/dm_pmc.md",
@@ -497,6 +500,7 @@ makedocs(
     checkdocs=:exports,
     linkcheck=true,
     linkcheck_ignore=[
+        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(examples/lais|test/lais|validation/reproducers/cuda_lais)\.jl$",
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/validation/reproducers/((cuda_)?static_mis|cuda_student_t)\.jl$",
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/dm_pmc|examples/(dm_pmc|numerical_integration)|validation/reproducers/(cuda_dm_pmc|dm_pmc_global))\.jl$",
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/amis|examples/amis|validation/reproducers/(cuda_)?amis)\.jl$",

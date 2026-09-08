@@ -29,11 +29,13 @@ mutable struct _ReportedTransferReasons
     logweight_maximum::_ReportedTransfer
     logweight_scaled_sum::_ReportedTransfer
     logweight_scaled_square_sum::_ReportedTransfer
+    logweight_moments::_ReportedTransfer
     covariance_diagnostic::_ReportedTransfer
 end
 
 function _ReportedTransferReasons()
     return _ReportedTransferReasons(
+        _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),
         _ReportedTransfer(0, 0),
@@ -97,6 +99,14 @@ function _logweight_summary(
     logweights,
     transfers::_ResultTransferCounter=_ResultTransferCounter(0, 0),
 )
+    if !_is_host_storage(logweights)
+        T = eltype(logweights)
+        moments = mapreduce(_logweight_moments, _merge_logweight_moments, logweights;
+            init=(T(-Inf), zero(T), zero(T)))
+        _record_reported_transfer!(transfers, 1, sizeof(moments), Val(:logweight_moments))
+        iszero(moments[2]) && return (ess=zero(T), lognormalizer=T(-Inf))
+        return _logweight_summary(moments..., length(logweights))
+    end
     maximum_logweight = maximum(logweights)
     _record_device_scalar_transfer!(
         transfers,
@@ -138,6 +148,19 @@ function _logweight_summary(
         scaled_square_sum,
         length(logweights),
     )
+end
+
+# A stable reduction state: maximum log weight, scaled mass, scaled squared mass.
+# Merge in the larger maximum's scale, keeping all intermediate values on-device.
+@inline _logweight_moments(x) = x == -Inf ? (x, zero(x), zero(x)) : (x, one(x), one(x))
+@inline function _merge_logweight_moments(a, b)
+    iszero(a[2]) && return b
+    iszero(b[2]) && return a
+    maximum_logweight = max(a[1], b[1])
+    left = exp(a[1] - maximum_logweight)
+    right = exp(b[1] - maximum_logweight)
+    return (maximum_logweight, left * a[2] + right * b[2],
+        abs2(left) * a[3] + abs2(right) * b[3])
 end
 
 @inline function _logweight_summary(
@@ -678,19 +701,24 @@ end
     return value, reason, !iszero(reason)
 end
 
-@inline function _record_cpu_target_failure!(
-    evaluator::_NativeCPUTarget{L},
+@inline function _record_cpu_failure!(
+    failures::_NativeCPUTargetFailures,
     slot,
+    phase,
     cause,
     trace,
-) where {L}
-    failures = evaluator.failures
+)
     @inbounds failures.slots[slot] = SamplerExecutionError(
-        :target,
+        phase,
         slot,
         CapturedException(cause, trace),
     )
     Threads.atomic_min!(failures.first_index, slot)
+    return nothing
+end
+
+@inline function _record_cpu_target_failure!(evaluator::_NativeCPUTarget{L}, slot, cause, trace) where {L}
+    _record_cpu_failure!(evaluator.failures, slot, :target, cause, trace)
     return zero(L), UInt16(0), true
 end
 
