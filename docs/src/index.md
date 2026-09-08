@@ -1,7 +1,7 @@
 # ImportanceSamplers.jl
 
-ImportanceSamplers provides explicit plain importance sampling on CPU and a
-validated native CUDA path. Supply a normalized proposal, an RNG, and a target
+ImportanceSamplers provides plain, multiple, and adaptive importance sampling
+on CPU and documented native CUDA paths. Supply a normalized proposal, an RNG, and a target
 that returns an unnormalized **log density**. Results retain samples and the
 canonical raw log weights.
 
@@ -52,6 +52,8 @@ target and algorithm arguments. The proposal alone determines sample shape.
 | CAIS | native Gaussian bank | means and covariances | generating proposal | `round_size` | CPU and native Gaussian CUDA |
 | N-PMC | one native Gaussian | mean and covariance from clipped adaptation weights | generating proposal | `round_size` | CPU and native Gaussian CUDA |
 | DM-PMC | proposal bank | locations by resampling | realized current population mixture | `round_size` | CPU; documented native subset on CUDA |
+| GR-PMC | equal-mass proposal bank | locations by global resampling | equal current population mixture | divisible `round_size` | CPU; documented native subset on CUDA |
+| LR-PMC | equal-mass proposal bank | locations by local resampling | equal current population mixture | divisible `round_size` | CPU; documented native subset on CUDA |
 | First-order GRAMIS-CAIS | native Gaussian bank | means by gradient/repulsion; local covariances | realized current population mixture | `round_size` | CPU and native Gaussian CUDA |
 
 Use the linked method guide for its support, allocation, adaptation, and failure
@@ -82,6 +84,7 @@ contract; the table is only a starting point.
 - [Accelerators](@ref) gives the complete CUDA example, transfer boundary,
   exact support matrix, and runnable validation.
 - [Public API](@ref) lists every exported binding.
+- [Validation and support](@ref) lists reproducible checks and their evidence limits.
 
 Runnable workflows include the public
 [DM-PMC example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/dm_pmc.jl),

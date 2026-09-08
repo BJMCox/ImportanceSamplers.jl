@@ -98,7 +98,7 @@ prepared sampler explicitly:
 using CUDA, MLDataDevices
 physical = CUDA.device()
 device = MLDataDevices.CUDADevice{typeof(physical),Nothing}(physical)
-prepared = device(prepared)
+prepared = device(prepare_sampler(Xoshiro(43), x -> -abs2(x) / 2, algorithm))
 samples = importance_sample!(prepared)
 host_learned = current_proposal(cpu_device(), prepared)
 ```

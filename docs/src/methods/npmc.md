@@ -82,7 +82,7 @@ Transfer the prepared sampler explicitly, as with the other native methods:
 using CUDA, MLDataDevices
 physical = CUDA.device()
 device = MLDataDevices.CUDADevice{typeof(physical),Nothing}(physical)
-prepared = device(prepared)
+prepared = device(prepare_sampler(Xoshiro(43), logtarget, algorithm))
 samples = importance_sample!(prepared)
 host_samples = cpu_device()(samples)
 host_proposal = current_proposal(cpu_device(), prepared)
