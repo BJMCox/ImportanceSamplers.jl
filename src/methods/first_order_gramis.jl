@@ -106,6 +106,7 @@ function FirstOrderGRAMIS(
         round_size,
     )
     _validate_first_order_gramis_bank(bank)
+    _validate_first_order_gramis_distinct_means(bank)
     return FirstOrderGRAMIS(
         bank,
         validated_rounds,
@@ -193,6 +194,11 @@ function _validate_first_order_gramis_bank(bank::ProposalBank)
         )
     end
 
+    return nothing
+end
+
+function _validate_first_order_gramis_distinct_means(bank::ProposalBank)
+    proposal_count = length(bank.proposals)
     for right in 2:proposal_count
         right_location = bank.proposals[right].location
         for left in 1:(right - 1)
@@ -673,20 +679,25 @@ function _retarget_algorithm(
                 Array(method_state.covariance_ess_threshold),
             )
         end
+    bank = current_proposal(MLDataDevices.cpu_device(), sampler)
+    _validate_first_order_gramis_bank(bank)
+    rounds = _first_order_gramis_positive_int(algorithm.rounds, "rounds")
+    round_size = _first_order_gramis_round_size(rounds, algorithm.round_size)
     return FirstOrderGRAMIS(
-        current_proposal(MLDataDevices.cpu_device(), sampler);
-        rounds=algorithm.rounds,
-        round_size=algorithm.round_size,
+        bank,
+        rounds,
+        round_size,
         repulsion_strength,
-        covariance_ess_threshold=_ResolvedFirstOrderGRAMISThresholds(
+        _ResolvedFirstOrderGRAMISThresholds(
             covariance_ess_threshold,
         ),
         covariance_rate,
-        covariance_regularization=method_state.covariance_regularization,
-        tempering_tolerance=method_state.tempering_tolerance,
-        tempering_max_iterations=method_state.tempering_max_iterations,
-        repulsion_softening=method_state.repulsion_softening,
-        max_backtracking_trials=method_state.max_backtracking_trials,
+        method_state.covariance_regularization,
+        method_state.tempering_tolerance,
+        method_state.tempering_max_iterations,
+        method_state.repulsion_softening,
+        method_state.max_backtracking_trials,
+        _VALIDATED_FIRST_ORDER_GRAMIS_TOKEN,
     )
 end
 
