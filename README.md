@@ -5,6 +5,27 @@ It supports ordinary normalized proposals on CPU, and the documented native
 Gaussian and transform subset on CPU and CUDA. The package keeps estimator
 inputs, device placement, and raw log weights visible.
 
+## Installation
+
+ImportanceSamplers requires Julia 1.12. Access to the private repository and
+working GitHub authentication are required. Install directly from the repository
+in the active Julia environment:
+
+```julia
+using Pkg
+Pkg.add(url="https://github.com/BJMCox/ImportanceSamplers.jl.git")
+```
+
+For development from an existing clone, use its local path instead:
+
+```julia
+using Pkg
+Pkg.develop(path="/path/to/ImportanceSamplers.jl")
+```
+
+CUDA is optional. Add and load CUDA.jl separately when using the documented
+accelerator path.
+
 ## Minimal CPU example
 
 ```julia
@@ -59,6 +80,17 @@ target returns a `Float32` or `Float64` log density; the sampler never applies
 - [Accelerators](docs/src/guide/accelerators.md) contains the complete CUDA
   example, exact support limits, device transfer, and real-hardware reproducer.
 - [Public API](docs/src/reference.md) lists all exports.
+
+To build a persistent local copy of the rendered manual from the repository
+root, prepare the documentation environment and run Documenter:
+
+```sh
+julia --project=docs -e 'using Pkg; Pkg.instantiate()'
+julia --project=docs docs/make.jl
+```
+
+Then open `docs/build/index.html`. The build is strict: doctest, link, and
+export-documentation failures stop it.
 
 Runnable checks include
 [`native_gaussian.jl`](validation/reproducers/native_gaussian.jl),

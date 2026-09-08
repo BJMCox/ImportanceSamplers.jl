@@ -430,7 +430,7 @@ makedocs(
         edit_link=nothing,
         repolink=nothing,
     ),
-    build=mktempdir(),
+    build=joinpath(@__DIR__, "build"),
     remotes=nothing,
     pages=[
         "Home" => "index.md",

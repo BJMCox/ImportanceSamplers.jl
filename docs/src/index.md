@@ -41,6 +41,22 @@ weights that sum to one.
 For data or constants, use `logtarget(sample, p)` and pass `p` between the
 target and algorithm arguments. The proposal alone determines sample shape.
 
+## Choose a method
+
+| Method | Proposal input | What adapts | Retained-weight denominator | Count | Execution |
+|:--|:--|:--|:--|:--|:--|
+| Plain IS | one normalized proposal | nothing | generating proposal | `nsamples` | CPU; documented native subset on CUDA |
+| Static MIS | fixed proposal bank | nothing | selected spatial or generating-proposal scheme | `nsamples` | CPU; documented native subset on CUDA |
+| AMIS | one native Gaussian | mean and covariance | all-history temporal mixture | `round_size` | CPU and native Gaussian CUDA |
+| APIS | native Gaussian bank | means | current population mixture | `round_size` | CPU and native Gaussian CUDA |
+| CAIS | native Gaussian bank | means and covariances | generating proposal | `round_size` | CPU and native Gaussian CUDA |
+| N-PMC | one native Gaussian | mean and covariance from clipped adaptation weights | generating proposal | `round_size` | CPU and native Gaussian CUDA |
+| DM-PMC | proposal bank | locations by resampling | realized current population mixture | `round_size` | CPU; documented native subset on CUDA |
+| First-order GRAMIS-CAIS | native Gaussian bank | means by gradient/repulsion; local covariances | realized current population mixture | `round_size` | CPU and native Gaussian CUDA |
+
+Use the linked method guide for its support, allocation, adaptation, and failure
+contract; the table is only a starting point.
+
 ## Where next
 
 - [Plain importance sampling](@ref) covers estimator semantics, generic CPU

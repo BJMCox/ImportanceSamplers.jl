@@ -13,6 +13,7 @@ weights.
 using ImportanceSamplers
 using Random
 
+logtarget(x) = -0.5 * sum(abs2, x)
 bank = ProposalBank([
     FactorGaussian([-2.0, 0.0], [1.0 0.0; 0.4 0.8]),
     FactorGaussian([ 2.0, 0.0], [1.0 0.0; -0.4 0.8]),

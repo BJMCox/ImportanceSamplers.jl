@@ -110,8 +110,8 @@ end
 
 Exception thrown when a requested device cannot execute a prepared sampler.
 The `reason` field identifies the rejected capability, such as an unavailable
-backend, unspecified scalar policy, opaque target closure, unsupported proposal,
-or missing device RNG.
+backend, unspecified scalar policy, opaque target closure, CPU-only gradient
+source or form, unsupported proposal, or missing device RNG.
 """
 struct SamplerDeviceError{D} <: Exception
     device::D
@@ -142,6 +142,12 @@ function Base.showerror(io::IO, error::SamplerDeviceError)
         "factor Gaussian proposal banks are CPU-only"
     elseif error.reason === :transformed_proposal_cpu_only
         "transformed proposal banks are CPU-only"
+    elseif error.reason === :gradient_source_cpu_only
+        "the selected gradient source is CPU-only; accelerator gradients " *
+        "require an explicit device-compatible in-place gradient"
+    elseif error.reason === :out_of_place_gradient_cpu_only
+        "out-of-place explicit gradients are CPU-only; accelerator gradients " *
+        "require a device-compatible in-place gradient"
     elseif error.reason === :kernel_argument_unsupported
         "the target or context does not have a supported accelerator kernel " *
         "argument representation"
@@ -197,7 +203,8 @@ struct _DefaultFactorExecution <: _AbstractFactorExecution end
     FusedFactorExecution()
 
 Evaluate each factor-Gaussian draw and density in fused sample kernels. This is
-the default and gives stable performance across sample counts and devices.
+the default on CPU and an explicit override on other supported devices. See the
+accelerator guide for backend-resolved defaults.
 """
 struct FusedFactorExecution <: _AbstractFactorExecution end
 
@@ -631,8 +638,8 @@ end
 function _retarget_algorithm(sampler::_PreparedImportanceSampler)
     throw(
         ArgumentError(
-            "retarget supports DeterministicMixturePMC, APIS, AMIS, and " *
-            "FirstOrderGRAMIS prepared samplers",
+            "retarget supports DeterministicMixturePMC, APIS, CAIS, NPMC, " *
+            "AMIS, and FirstOrderGRAMIS prepared samplers",
         ),
     )
 end
@@ -671,13 +678,14 @@ construction failure can therefore consume that value. The supplied RNG must
 differ from the source sampler's owned RNG.
 
 Retargeting supports prepared [`DeterministicMixturePMC`](@ref), [`APIS`](@ref),
-[`AMIS`](@ref), and `FirstOrderGRAMIS` samplers. Plain and static importance
-sampling have no learned proposal state; call [`prepare_sampler`](@ref) with
-their algorithm instead. Accelerator retargeting stages the committed proposal
-in CPU memory, allocates fresh CPU workspaces, and transfers the complete new
-sampler to the source device. Target support coverage is a caller precondition
-because it cannot be proven for an arbitrary callable. Normal preparation still
-checks known target dimensions, callable contracts, and method constraints.
+[`CAIS`](@ref), [`NPMC`](@ref), [`AMIS`](@ref), and `FirstOrderGRAMIS` samplers.
+Plain and static importance sampling have no learned proposal state; call
+[`prepare_sampler`](@ref) with their algorithm instead. Accelerator retargeting
+stages the committed proposal in CPU memory, allocates fresh CPU workspaces, and
+transfers the complete new sampler to the source device. Target support coverage
+is a caller precondition because it cannot be proven for an arbitrary callable.
+Normal preparation still checks known target dimensions, callable contracts,
+and method constraints.
 """
 function retarget(
     rng::Random.AbstractRNG,
