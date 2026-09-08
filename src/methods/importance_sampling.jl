@@ -639,7 +639,7 @@ function _retarget_algorithm(sampler::_PreparedImportanceSampler)
     throw(
         ArgumentError(
             "retarget supports DeterministicMixturePMC, APIS, CAIS, NPMC, " *
-            "AMIS, and FirstOrderGRAMIS prepared samplers",
+            "LAIS, AMIS, and FirstOrderGRAMIS prepared samplers",
         ),
     )
 end
@@ -678,7 +678,9 @@ construction failure can therefore consume that value. The supplied RNG must
 differ from the source sampler's owned RNG.
 
 Retargeting supports prepared [`DeterministicMixturePMC`](@ref), [`APIS`](@ref),
-[`CAIS`](@ref), [`NPMC`](@ref), [`AMIS`](@ref), and `FirstOrderGRAMIS` samplers.
+[`CAIS`](@ref), [`NPMC`](@ref), [`LAIS`](@ref), [`AMIS`](@ref), and `FirstOrderGRAMIS` samplers.
+LAIS retains learned transition factors but resets current-target caches and
+tuning progress, including warmup, for the new target.
 Plain and static importance sampling have no learned proposal state; call
 [`prepare_sampler`](@ref) with their algorithm instead. Accelerator retargeting
 stages the committed proposal in CPU memory, allocates fresh CPU workspaces, and

@@ -678,19 +678,24 @@ end
     return value, reason, !iszero(reason)
 end
 
-@inline function _record_cpu_target_failure!(
-    evaluator::_NativeCPUTarget{L},
+@inline function _record_cpu_failure!(
+    failures::_NativeCPUTargetFailures,
     slot,
+    phase,
     cause,
     trace,
-) where {L}
-    failures = evaluator.failures
+)
     @inbounds failures.slots[slot] = SamplerExecutionError(
-        :target,
+        phase,
         slot,
         CapturedException(cause, trace),
     )
     Threads.atomic_min!(failures.first_index, slot)
+    return nothing
+end
+
+@inline function _record_cpu_target_failure!(evaluator::_NativeCPUTarget{L}, slot, cause, trace) where {L}
+    _record_cpu_failure!(evaluator.failures, slot, :target, cause, trace)
     return zero(L), UInt16(0), true
 end
 

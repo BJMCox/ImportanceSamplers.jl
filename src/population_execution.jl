@@ -341,6 +341,13 @@ function _commit_population_round!(method_state, run)
     return nothing
 end
 
+_before_population_round!(sampler, method_state, target, round, execution, transfers) = nothing
+
+function _commit_population_run!(method_state)
+    method_state.bank, method_state.run_bank = method_state.run_bank, method_state.bank
+    return nothing
+end
+
 function _importance_sample_fixed_population!(sampler, method_state, threaded)
     algorithm = sampler.algorithm
     execution = _population_execution(sampler, threaded, method_state)
@@ -393,6 +400,9 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
     for round in eachindex(plan.schedule)
         round_views = _population_round_views(method_state, round)
         round_size = round_views.round_size
+        _capture_population_round(algorithm, round, :transition, round_size, round - 1) do
+            _before_population_round!(sampler, method_state, target, round, execution, transfers)
+        end
         _capture_population_round(
             algorithm,
             round,
@@ -526,6 +536,6 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
             diagnostics=diagnostics,
         )
     end
-    method_state.bank, method_state.run_bank = bank, committed_bank
+    _commit_population_run!(method_state)
     return result
 end

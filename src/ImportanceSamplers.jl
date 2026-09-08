@@ -15,6 +15,7 @@ import Random
 import Statistics
 
 export AbstractImportanceSampler,
+    AbstractMCMCTransition,
     AbstractPMCResamplingPolicy,
     AbstractMISScheme,
     AbstractProposalFamily,
@@ -48,6 +49,12 @@ export AbstractImportanceSampler,
     IntervalTransform,
     InvalidTransformError,
     LogTarget,
+    LAIS,
+    LAISRoundError,
+    RandomWalkMetropolis,
+    RAM,
+    WarmupTuning,
+    ContinuousTuning,
     MultinomialResampling,
     PartialDeterministicMixture,
     ProposalBank,
@@ -88,6 +95,8 @@ include("storage.jl")
 include("execution.jl")
 include("methods/static_mis.jl")
 include("methods/dm_pmc.jl")
+include("mcmc_transitions.jl")
+include("methods/lais.jl")
 include("methods/apis.jl")
 include("methods/cais.jl")
 include("adaptive_gaussian.jl")
@@ -106,6 +115,8 @@ include("population_execution.jl")
 include("cais_execution.jl")
 include("dm_pmc_execution.jl")
 include("apis_execution.jl")
+include("lais_execution.jl")
+include("mcmc_transition_kernels.jl")
 include("results.jl")
 include("resampling.jl")
 include("statistics.jl")

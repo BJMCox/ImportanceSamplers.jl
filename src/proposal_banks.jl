@@ -130,9 +130,10 @@ end
 Adapt.@adapt_structure _PackedDiagonalGaussianBank
 Adapt.@adapt_structure _PackedFactorGaussianBank
 
-function _copy_packed_gaussian_bank(device, bank::_PackedDiagonalGaussianBank)
+function _copy_packed_gaussian_bank(device, bank::_PackedDiagonalGaussianBank;
+    locations=_copy_to_device(device, bank.locations))
     return _PackedDiagonalGaussianBank(
-        _copy_to_device(device, bank.locations),
+        locations,
         _copy_to_device(device, bank.scales),
         _copy_to_device(device, bank.lognormalizers),
         _copy_to_device(device, bank.logmasses),
@@ -142,9 +143,10 @@ function _copy_packed_gaussian_bank(device, bank::_PackedDiagonalGaussianBank)
     )
 end
 
-function _copy_packed_gaussian_bank(device, bank::_PackedFactorGaussianBank)
+function _copy_packed_gaussian_bank(device, bank::_PackedFactorGaussianBank;
+    locations=_copy_to_device(device, bank.locations))
     return _PackedFactorGaussianBank(
-        _copy_to_device(device, bank.locations),
+        locations,
         _copy_to_device(device, bank.factors),
         _copy_to_device(device, bank.lognormalizers),
         _copy_to_device(device, bank.logmasses),
