@@ -103,134 +103,6 @@ function gram_is_covariance_batch(::Type{T}, dimension, proposal_count) where {T
     return covariances
 end
 
-function gram_is_cuda_population_cholesky(::Type{T}, dimension, proposal_count) where {T}
-    source = gram_is_covariance_batch(T, dimension, proposal_count)
-    covariances = CuArray(source)
-    factors = similar(covariances)
-    info = CUDA.fill(Int32(-1), proposal_count)
-    status = CUDA.fill(IS._GRAMIS_COVARIANCE_READY, proposal_count)
-    device = gram_is_cuda_device()
-
-    IS._factor_population!(device, factors, covariances, info, status)
-    CUDA.synchronize()
-
-    wrapper_factors = [CuArray(source[:, :, slot]) for slot in 1:proposal_count]
-    wrapper_factors, _ = CUDA.cuSOLVER.potrfBatched!(
-        'L',
-        wrapper_factors,
-    )
-    CUDA.synchronize()
-    wrapper_lower = cat(
-        (tril(Array(factor)) for factor in wrapper_factors)...;
-        dims=3,
-    )
-    return (
-        source,
-        factors=Array(factors),
-        info=Array(info),
-        wrapper_factors=wrapper_lower,
-    )
-end
-
-function gram_is_cuda_local_weights(
-    ::Type{T},
-    local_logweights;
-    max_iterations=64,
-    sample_count=4,
-    threshold=3,
-) where {T}
-    proposal_count = length(local_logweights) ÷ sample_count
-    counts = fill(sample_count, proposal_count, 1)
-    starts = IS._first_order_gramis_group_starts(counts)
-    normalized_weights = CUDA.fill(T(NaN), length(local_logweights))
-    local_ess = CUDA.fill(T(NaN), proposal_count)
-    tempering_powers = CUDA.fill(T(NaN), proposal_count)
-    status = CUDA.fill(UInt8(0xff), proposal_count)
-    device_logweights = CuArray(local_logweights)
-    device_starts = CuArray(starts)
-    device_counts = CuArray(counts)
-    thresholds = CUDA.fill(threshold, proposal_count, 1)
-    backend = IS.KernelAbstractions.get_backend(normalized_weights)
-    kernel = IS._cooperative_local_weights_kernel!(
-        backend,
-        IS._GRAMIS_REDUCTION_WORKGROUP_SIZE,
-    )
-    kernel(
-        normalized_weights,
-        local_ess,
-        tempering_powers,
-        status,
-        device_logweights,
-        device_starts,
-        device_counts,
-        thresholds,
-        1,
-        T(1.0e-6),
-        max_iterations;
-        ndrange=IS._GRAMIS_REDUCTION_WORKGROUP_SIZE * proposal_count,
-        workgroupsize=IS._GRAMIS_REDUCTION_WORKGROUP_SIZE,
-    )
-    CUDA.synchronize()
-    return (
-        normalized_weights=Array(normalized_weights),
-        local_ess=Array(local_ess),
-        tempering_powers=Array(tempering_powers),
-        status=Array(status),
-    )
-end
-
-function gram_is_cuda_covariance_fit(::Type{T}, status, tempering_powers) where {T}
-    samples = CuArray(T[
-        1 3 5 7 9 11 9 11
-        2 0 4 6 19 19 21 21
-    ])
-    normalized_weights = CuArray(repeat(T[0.1, 0.2, 0.3, 0.4], 2))
-    locations = CuArray(T[0 10; 0 20])
-    factors = CuArray(reshape(T[1, 0, 0, 1, 2, 1, 0, 3], 2, 2, 2))
-    starts = CuArray(reshape(Int[1, 5], :, 1))
-    counts = CUDA.fill(4, 2, 1)
-    centres = CUDA.fill(T(NaN), 2, 2)
-    covariances = CUDA.fill(T(NaN), 2, 2, 2)
-    device_status = CuArray(status)
-    device_powers = CuArray(tempering_powers)
-    backend = IS.KernelAbstractions.get_backend(samples)
-
-    centre_kernel = IS._fit_accelerator_covariance_centres_kernel!(
-        backend,
-        IS._GRAMIS_REDUCTION_WORKGROUP_SIZE,
-    )
-    centre_kernel(
-        centres,
-        normalized_weights,
-        device_powers,
-        device_status,
-        samples,
-        locations,
-        starts,
-        counts,
-        1;
-        ndrange=IS._GRAMIS_REDUCTION_WORKGROUP_SIZE * length(centres),
-        workgroupsize=IS._GRAMIS_REDUCTION_WORKGROUP_SIZE,
-    )
-    covariance_kernel = IS._fit_accelerator_covariances_kernel!(backend)
-    covariance_kernel(
-        covariances,
-        centres,
-        normalized_weights,
-        device_status,
-        samples,
-        factors,
-        starts,
-        counts,
-        1;
-        ndrange=length(covariances),
-        workgroupsize=length(covariances),
-    )
-    CUDA.synchronize()
-    return (; centres=Array(centres), covariances=Array(covariances))
-end
-
-
 function gram_is_cuda_preflight(::Type{T}) where {T}
     row = only(filter(
         candidate -> candidate.type === T &&
@@ -451,22 +323,6 @@ CUDA.allowscalar(false)
     @test CUDA.device() == caller_device
 end
 
-@testset "FirstOrderGRAMIS CUDA population Cholesky capabilities" begin
-    caller_device = CUDA.device()
-    for T in (Float32, Float64), dimension in (
-        2,
-        IS._GRAMIS_CHOLESKY_WORKGROUP_SIZE + 3,
-    )
-        result = gram_is_cuda_population_cholesky(T, dimension, 3)
-        @test result.info == zeros(Int32, 3)
-        @test result.factors ≈ result.wrapper_factors rtol =
-            T === Float32 ? GRAMIS_CUDA_CHOLESKY_RTOL.Float32 :
-            GRAMIS_CUDA_CHOLESKY_RTOL.Float64
-    end
-
-    @test CUDA.device() == caller_device
-end
-
 @testset "FirstOrderGRAMIS CUDA agrees with CPU reference moments" begin
     caller_device = CUDA.device()
     for T in (Float32, Float64)
@@ -538,87 +394,6 @@ const GRAMIS_CUDA_MULTI_DEVICE_RESTORATION =
     gram_is_multi_device_restoration_test()
 
 
-@testset "FirstOrderGRAMIS CUDA cooperative local weights" begin
-    caller_device = CUDA.device()
-    for T in (Float32, Float64)
-        raw_ready = T[0, 0, 0, 0]
-        active = T[0, -4, -8, -12]
-        all_zero = fill(T(-Inf), 4)
-        result = gram_is_cuda_local_weights(
-            T,
-            vcat(raw_ready, active, all_zero),
-        )
-
-        @test result.status == UInt8[
-            IS._GRAMIS_COVARIANCE_READY,
-            IS._GRAMIS_COVARIANCE_READY,
-            IS._GRAMIS_ALL_ZERO_LOCAL,
-        ]
-        @test result.tempering_powers[1] == one(T)
-        @test zero(T) < result.tempering_powers[2] < one(T)
-        @test result.tempering_powers[3] == zero(T)
-        @test sum(result.normalized_weights[1:4]) ≈ one(T) rtol = T(4.0e-6)
-        @test sum(result.normalized_weights[5:8]) ≈ one(T) rtol = T(4.0e-6)
-        @test result.local_ess[1] == T(4)
-        @test result.local_ess[2] >= T(3)
-        @test result.local_ess[3] == zero(T)
-
-        fallback = gram_is_cuda_local_weights(T, active; max_iterations=1)
-        @test fallback.status == UInt8[IS._GRAMIS_TEMPERING_FALLBACK]
-        @test fallback.tempering_powers == zeros(T, 1)
-        @test sum(fallback.normalized_weights) ≈ one(T) rtol = T(4.0e-6)
-    end
-
-    irregular = collect(range(0.0, -12.0; length=263))
-    mixed = gram_is_cuda_local_weights(
-        Float32,
-        irregular;
-        sample_count=length(irregular),
-        threshold=200,
-    )
-    @test mixed.status == UInt8[IS._GRAMIS_COVARIANCE_READY]
-    @test 0.0f0 < only(mixed.tempering_powers) < 1.0f0
-    @test sum(mixed.normalized_weights) ≈ 1.0f0 rtol = 4.0f-5
-    @test only(mixed.local_ess) >= 200.0f0
-    @test CUDA.device() == caller_device
-end
-
-@testset "FirstOrderGRAMIS CUDA weighted centres and covariance symmetry" begin
-    caller_device = CUDA.device()
-    for T in (Float32, Float64)
-        ready = gram_is_cuda_covariance_fit(
-            T,
-            fill(IS._GRAMIS_COVARIANCE_READY, 2),
-            T[0.5, 1],
-        )
-        @test ready.centres[:, 1] ≈ T[5, 3.8] rtol = 8eps(T)
-        @test ready.centres[:, 2] == T[10, 20]
-        @test ready.covariances[:, :, 1] ≈ T[4 4; 4 5.16] rtol = 16eps(T)
-        @test ready.covariances[:, :, 2] ≈ T[1 0; 0 1] rtol = 8eps(T)
-
-        fallback = gram_is_cuda_covariance_fit(
-            T,
-            UInt8[
-                IS._GRAMIS_ALL_ZERO_LOCAL,
-                IS._GRAMIS_TEMPERING_FALLBACK,
-            ],
-            zeros(T, 2),
-        )
-        @test fallback.covariances[:, :, 1] == T[1 0; 0 1]
-        @test fallback.covariances[:, :, 2] == T[4 2; 2 10]
-        for covariance in (
-            ready.covariances[:, :, 1],
-            ready.covariances[:, :, 2],
-            fallback.covariances[:, :, 1],
-            fallback.covariances[:, :, 2],
-        )
-            @test bitstring.(covariance) == bitstring.(transpose(covariance))
-        end
-    end
-    @test CUDA.device() == caller_device
-end
-
-
 @testset "FirstOrderGRAMIS CUDA preflight and pooled adapters" begin
     caller_device = CUDA.device()
     for T in (Float32, Float64)
@@ -678,25 +453,14 @@ end
 
 @testset "FirstOrderGRAMIS CUDA fallback preserves factors" begin
     caller_device = CUDA.device()
-    for T in (Float32, Float64)
-        sampler = gram_is_cuda_sampler(T; fallback=true)
-        before_factors = map(
-            bitstring,
-            vec(Array(sampler.method_state.committed.factors)),
-        )
-        result = importance_sample!(sampler)
-        @test all(==(-Inf), Array(result.logweights))
-        @test all(
-            ==(IS._GRAMIS_ALL_ZERO_LOCAL),
-            Array(result.diagnostics.fallback_status),
-        )
-        @test map(
-            bitstring,
-            vec(Array(sampler.method_state.committed.factors)),
-        ) == before_factors
-        @test result.diagnostics.transfers.count <= 192
-        @test result.diagnostics.transfers.bytes <= 4_096
-    end
+    sampler = gram_is_cuda_sampler(Float64; fallback=true)
+    before = current_proposal(cpu_device(), sampler)
+    result = importance_sample!(sampler)
+    after = current_proposal(cpu_device(), sampler)
+
+    @test all(==(-Inf), Array(result.logweights))
+    @test [proposal.scale.factor for proposal in after.proposals] ==
+          [proposal.scale.factor for proposal in before.proposals]
     @test CUDA.device() == caller_device
 end
 

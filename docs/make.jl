@@ -439,6 +439,7 @@ makedocs(
             "Static multiple importance sampling" => "methods/static_mis.md",
             "Adaptive multiple importance sampling" => "methods/amis.md",
             "Adaptive population importance sampling" => "methods/apis.md",
+            "Canonical covariance-adaptive importance sampling" => "methods/cais.md",
             "Nonlinear population Monte Carlo" => "methods/npmc.md",
             "Deterministic-mixture population Monte Carlo" => "methods/dm_pmc.md",
             "First-order GRAMIS-CAIS" => "methods/first_order_gramis.md",
@@ -459,6 +460,7 @@ makedocs(
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/amis|examples/amis|validation/reproducers/(cuda_)?amis)\.jl$",
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(examples/first_order_gramis|validation/reproducers/(cuda_)?first_order_gramis)\.jl$",
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/apis|examples/apis|validation/reproducers/cuda_apis)\.jl$",
+        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/cais|examples/cais|validation/reproducers/cuda_cais)\.jl$",
     ],
     warnonly=false,
 )

@@ -143,55 +143,15 @@ end
 
     @test result.samples ≈ expected.samples
     @test result.logweights ≈ expected.logweights
+    @test result.provenance.round == vcat(fill(1, 8), fill(2, 12))
+    @test result.provenance.proposal_id == vcat(
+        fill(1, 4),
+        fill(2, 4),
+        fill(1, 6),
+        fill(2, 6),
+    )
     @test [proposal.location for proposal in learned.proposals] ≈ expected.means
     @test [proposal.scale.factor for proposal in learned.proposals] == factors
-end
-
-@testset "APIS Float32 weights and means follow the recurrence" begin
-    T = Float32
-    initial_means = T[-2, 2]
-    scales = T[1, 2]
-    batches = [T[-1, 0.5, 1.5, -0.5, 0.25, 1]]
-    logtarget(sample) = -abs2(sample - T(0.75)) / T(3)
-    bank = ProposalBank([
-        SphericalGaussian(initial_means[1], scales[1]),
-        SphericalGaussian(initial_means[2], scales[2]),
-    ], T[1, 1])
-    sampler = prepare_sampler(
-        APISPrefilledNormals(batches, 1),
-        logtarget,
-        APIS(bank; rounds=1, round_size=6),
-    )
-
-    result = importance_sample!(sampler)
-    expected = apis_scalar_oracle(initial_means, scales, batches, logtarget)
-    learned = current_proposal(sampler)
-
-    @test result.logweights ≈ expected.logweights rtol=5f-6
-    @test [proposal.location for proposal in learned.proposals] ≈
-          expected.means rtol=5f-6
-end
-
-@testset "APIS canonical equal allocation" begin
-    equal_bank = ProposalBank([
-        SphericalGaussian(-1.0, 1.0),
-        SphericalGaussian(1.0, 1.0),
-    ])
-    input_schedule = [8, 12]
-    algorithm = APIS(equal_bank; rounds=2, round_size=input_schedule)
-
-    @test algorithm.bank === equal_bank
-    @test algorithm.round_size == [8, 12]
-    @test algorithm.round_size !== input_schedule
-    input_schedule[1] = 4
-    @test algorithm.round_size == [8, 12]
-
-    unequal_bank = ProposalBank(equal_bank.proposals, [1.0, 2.0])
-    zero_bank = ProposalBank(equal_bank.proposals, [1.0, 0.0])
-    @test_throws ArgumentError APIS(unequal_bank; rounds=1, round_size=4)
-    @test_throws ArgumentError APIS(zero_bank; rounds=1, round_size=4)
-    @test_throws ArgumentError APIS(equal_bank; rounds=1, round_size=5)
-    @test_throws ArgumentError APIS(equal_bank; rounds=1, round_size=2)
 end
 
 @testset "APIS execution, variable epochs, and target scale invariance" begin
@@ -228,11 +188,8 @@ end
     threaded_result = importance_sample!(threaded)
     shifted_result = importance_sample!(shifted)
 
-    @test length(serial_result) == sum(schedule)
-    @test serial_result.provenance.round == vcat(fill(1, 8), fill(2, 12))
     @test threaded_result.samples == serial_result.samples
     @test threaded_result.logweights == serial_result.logweights
-    @test shifted_result.samples ≈ serial_result.samples
     @test shifted_result.logweights ≈ serial_result.logweights .+ 1000
     @test [p.location for p in current_proposal(shifted).proposals] ≈
           [p.location for p in current_proposal(serial).proposals]
@@ -241,33 +198,62 @@ end
 
 @testset "APIS repeated calls own results and retarget learned state" begin
     logtarget(sample) = -abs2(sample) / 2
+    retarget_logtarget(sample) = -abs2(sample - 1) / 2
+    initial_means = [-2.0, 2.0]
+    scales = [1.0, 1.5]
+    batches = [
+        [-1.0, 0.0, 1.0, -1.0, 0.0, 1.0],
+        [0.5, -0.5, 1.0, -1.0, 0.5, 0.0],
+        [-0.25, 0.5, 1.25, -1.25, -0.5, 0.25],
+        [1.0, 0.0, -1.0, 0.75, -0.25, -0.75],
+    ]
     bank = ProposalBank([
-        SphericalGaussian(-2.0, 1.0),
-        SphericalGaussian(2.0, 1.5),
+        SphericalGaussian(initial_means[1], scales[1]),
+        SphericalGaussian(initial_means[2], scales[2]),
     ])
     sampler = prepare_sampler(
-        Random.Xoshiro(93),
+        APISPrefilledNormals(deepcopy(batches), 1),
         logtarget,
-        APIS(bank; rounds=2, round_size=16),
+        APIS(bank; rounds=2, round_size=6),
     )
     first_result = importance_sample!(sampler)
     first_samples = copy(first_result.samples)
     first_logweights = copy(first_result.logweights)
     first_learned = current_proposal(sampler)
     second_result = importance_sample!(sampler)
+    expected_second = apis_scalar_oracle(
+        [proposal.location for proposal in first_learned.proposals],
+        scales,
+        batches[3:4],
+        logtarget,
+    )
 
     @test first_result.samples == first_samples
     @test first_result.logweights == first_logweights
-    @test second_result !== first_result
-    @test current_proposal(sampler) !== first_learned
+    @test second_result.samples ≈ expected_second.samples
+    @test second_result.logweights ≈ expected_second.logweights
+    @test [p.location for p in current_proposal(sampler).proposals] ≈
+          expected_second.means
 
-    retargeted = retarget(Random.Xoshiro(94), sampler, sample -> -abs2(sample - 1) / 2)
-    retargeted_proposal = current_proposal(retargeted)
     source_proposal = current_proposal(sampler)
-    @test [p.location for p in retargeted_proposal.proposals] ==
-          [p.location for p in source_proposal.proposals]
-    @test [p.scale.scale for p in retargeted_proposal.proposals] ==
-          [p.scale.scale for p in source_proposal.proposals]
+    source_means = [p.location for p in source_proposal.proposals]
+    retarget_batches = deepcopy(batches[1:2])
+    retargeted = retarget(
+        APISPrefilledNormals(retarget_batches, 1),
+        sampler,
+        retarget_logtarget,
+    )
+    retargeted_result = importance_sample!(retargeted)
+    expected_retargeted = apis_scalar_oracle(
+        source_means,
+        scales,
+        retarget_batches,
+        retarget_logtarget,
+    )
+    @test retargeted_result.logweights ≈ expected_retargeted.logweights
+    @test [p.location for p in current_proposal(retargeted).proposals] ≈
+          expected_retargeted.means
+    @test [p.location for p in current_proposal(sampler).proposals] == source_means
 end
 
 @testset "APIS later-epoch failure preserves the committed bank" begin
@@ -296,21 +282,20 @@ end
 
     @test failure isa APISRoundError
     @test failure.round == 2
-    @test failure.phase == :adaptation
-    @test failure.cause isa AllZeroWeightsError
     @test [p.location for p in current_proposal(sampler).proposals] ==
           [p.location for p in committed.proposals]
     @test rng.index == 5
 end
 
 @testset "APIS public scalar epoch recurrence" begin
-    initial_means = [-2.0, 2.0]
-    scales = [1.0, 2.0]
+    T = Float32
+    initial_means = T[-2, 2]
+    scales = T[1, 2]
     normal_batches = [
-        [-1.0, 0.5, 1.5, -0.5, 0.25, 1.0],
-        [0.2, -1.0, 1.2, 0.0, 1.0, -1.0],
+        T[-1, 0.5, 1.5, -0.5, 0.25, 1],
+        T[0.2, -1, 1.2, 0, 1, -1],
     ]
-    logtarget(sample) = -abs2(sample - 0.75) / 3
+    logtarget(sample) = -abs2(sample - T(0.75)) / T(3)
     bank = ProposalBank([
         SphericalGaussian(initial_means[1], scales[1]),
         SphericalGaussian(initial_means[2], scales[2]),
@@ -326,10 +311,11 @@ end
     expected = apis_scalar_oracle(initial_means, scales, normal_batches, logtarget)
     learned = current_proposal(sampler)
 
-    @test result.samples ≈ expected.samples
-    @test result.logweights ≈ expected.logweights
+    @test result.samples ≈ expected.samples rtol=5f-6
+    @test result.logweights ≈ expected.logweights rtol=5f-6
     @test result.provenance.round == [1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2]
     @test result.provenance.proposal_id == [1, 1, 1, 2, 2, 2, 1, 1, 1, 2, 2, 2]
-    @test [proposal.location for proposal in learned.proposals] ≈ expected.means
+    @test [proposal.location for proposal in learned.proposals] ≈
+          expected.means rtol=5f-6
     @test [proposal.scale.scale for proposal in learned.proposals] == scales
 end

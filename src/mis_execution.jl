@@ -287,6 +287,17 @@ function _use_factor_batch_mis_path(
            _use_factor_batch_path(device, bank, factor_execution)
 end
 
+function _use_factor_batch_mis_path(
+    device,
+    bank::_PackedFactorGaussianBank,
+    ::_EqualAllocationGeneratingDenominator,
+    ::Type{T},
+    factor_execution,
+) where {T}
+    return T === eltype(bank.locations) &&
+           _use_factor_batch_path(device, bank, factor_execution)
+end
+
 @kernel function _factor_batch_mis_draw_target_kernel!(
     samples,
     logtargets,
@@ -370,6 +381,107 @@ end
             reason,
         )
     end
+end
+
+@kernel function _finish_equal_allocation_generating_batch_kernel!(
+    logweights,
+    standardized,
+    lognormalizers,
+    proposal_slot,
+    proposal_ids,
+    failure_storage,
+    sample_offset,
+)
+    local_index = @index(Global, Linear)
+    if !iszero(@inbounds(proposal_ids[local_index]))
+        T = eltype(logweights)
+        squared_radius = zero(T)
+        @inbounds for coordinate in axes(standardized, 1)
+            squared_radius += abs2(standardized[coordinate, local_index])
+        end
+        logdensity = T(@inbounds(lognormalizers[proposal_slot])) -
+                     T(0.5) * squared_radius
+        reason = _native_proposal_reason(logdensity)
+        if iszero(reason)
+            value, reason = _subtract_logweight(
+                @inbounds(logweights[local_index]),
+                logdensity,
+            )
+            iszero(reason) && (@inbounds logweights[local_index] = value)
+        end
+        iszero(reason) || _record_native_failure!(
+            failure_storage,
+            sample_offset + local_index,
+            0,
+            reason,
+        )
+    end
+end
+
+function _launch_factor_batch_mis_round!(
+    samples,
+    output::_MISRoundOutput,
+    failure_storage,
+    normal_buffer,
+    target,
+    bank::_PackedFactorGaussianBank,
+    assignments,
+    ::_EqualAllocationGeneratingDenominator,
+    solve_scratch,
+    execution,
+)
+    backend = KernelAbstractions.get_backend(normal_buffer)
+    sample_count = length(output.logweights)
+    proposal_count = size(bank.locations, 2)
+    group_size, remainder = divrem(sample_count, proposal_count)
+    iszero(remainder) || error(
+        "equal-allocation factor batching requires equal contiguous groups",
+    )
+
+    draw_kernel = _factor_batch_mis_draw_target_kernel!(backend)
+    draw_kernel(
+        samples,
+        output.logweights,
+        output.proposal_ids,
+        failure_storage,
+        normal_buffer,
+        target,
+        bank,
+        assignments,
+        output.adaptation;
+        ndrange=sample_count,
+        workgroupsize=_native_workgroupsize(execution, sample_count),
+    )
+
+    finish_kernel = _finish_equal_allocation_generating_batch_kernel!(backend)
+    for proposal_slot in axes(bank.locations, 2)
+        first_sample = (proposal_slot - 1) * group_size + 1
+        last_sample = proposal_slot * group_size
+        group = first_sample:last_sample
+        group_samples = view(samples, :, group)
+        group_scratch = view(solve_scratch, :, group)
+        _factor_batch_solve!(
+            group_scratch,
+            group_samples,
+            bank,
+            proposal_slot,
+        )
+        group_logweights = view(output.logweights, group)
+        group_proposal_ids = view(output.proposal_ids, group)
+        finish_kernel(
+            group_logweights,
+            group_scratch,
+            bank.lognormalizers,
+            proposal_slot,
+            group_proposal_ids,
+            failure_storage,
+            first_sample - 1;
+            ndrange=group_size,
+            workgroupsize=_native_workgroupsize(execution, group_size),
+        )
+    end
+    KernelAbstractions.synchronize(backend)
+    return nothing
 end
 
 function _launch_factor_batch_mis_round!(

@@ -284,12 +284,28 @@ function _capture_population_round(
     end
 end
 
+_population_execution(sampler, threaded, method_state) =
+    threaded ? _ThreadedCPUExecution() : _SerialCPUExecution()
+
+_population_denominator(method_state, round) =
+    _RealizedMixtureDenominator(method_state.plan.logcoefficients, round)
+
+function _reset_population_run!(method_state, run, committed)
+    copyto!(run.locations, committed.locations)
+    return nothing
+end
+
+function _commit_population_round!(method_state, run)
+    copyto!(run.locations, method_state.workspace.candidate_locations)
+    return nothing
+end
+
 function _importance_sample_fixed_population!(sampler, method_state, threaded)
     algorithm = sampler.algorithm
-    execution = threaded ? _ThreadedCPUExecution() : _SerialCPUExecution()
+    execution = _population_execution(sampler, threaded, method_state)
     committed_bank = method_state.bank
     bank = method_state.run_bank
-    copyto!(bank.locations, committed_bank.locations)
+    _reset_population_run!(method_state, bank, committed_bank)
     plan = method_state.plan
     workspace = method_state.workspace
     buffers = sampler.random_buffers
@@ -352,7 +368,7 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
             round_size,
             round - 1,
         ) do
-            denominator = _RealizedMixtureDenominator(plan.logcoefficients, round)
+            denominator = _population_denominator(method_state, round)
             launch = _use_factor_batch_mis_path(
                 sampler.device,
                 bank,
@@ -428,7 +444,7 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
             round_size,
             round - 1,
         ) do
-            copyto!(bank.locations, workspace.candidate_locations)
+            _commit_population_round!(method_state, bank)
             KernelAbstractions.synchronize(
                 KernelAbstractions.get_backend(bank.locations),
             )

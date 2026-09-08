@@ -2,6 +2,7 @@ struct _StratifiedAssignment end
 struct _RandomAssignment end
 struct _FullMixtureDenominator end
 struct _GeneratingDenominator end
+struct _EqualAllocationGeneratingDenominator end
 
 struct _PartialMixtureDenominator{G,O,I,C}
     group_of_slot::G
@@ -400,6 +401,11 @@ end
 
 @inline _mis_term_bounds(bank, ::_GeneratingDenominator, generating_slot) =
     (generating_slot, generating_slot)
+@inline _mis_term_bounds(
+    bank,
+    ::_EqualAllocationGeneratingDenominator,
+    generating_slot,
+) = (generating_slot, generating_slot)
 
 @inline function _mis_denominator_term(
     ::Type{T},
@@ -426,6 +432,13 @@ end
     ::Type{T},
     bank,
     ::_GeneratingDenominator,
+    term_index,
+) where {T} = (term_index, zero(T))
+
+@inline _mis_denominator_term(
+    ::Type{T},
+    bank,
+    ::_EqualAllocationGeneratingDenominator,
     term_index,
 ) where {T} = (term_index, zero(T))
 

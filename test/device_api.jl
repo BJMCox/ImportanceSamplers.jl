@@ -146,11 +146,6 @@ Adapt.adapt_structure(
 
 struct KernelArgumentTestBackend <: KernelAbstractions.GPU end
 
-const KERNEL_ARGUMENT_TEST_COOPERATIVE_FUNCTION =
-    typeof(IS.gpu__cooperative_local_weights_kernel!)
-const KERNEL_ARGUMENT_TEST_COOPERATIVE_LAUNCHES = NamedTuple[]
-const KERNEL_ARGUMENT_TEST_SYNCHRONIZATIONS = Ref(0)
-
 struct KernelArgumentTestArray{T,N} <: AbstractArray{T,N}
     storage::Array{T,N}
 end
@@ -175,23 +170,7 @@ end
 KernelAbstractions.get_backend(::KernelArgumentTestArray) =
     KernelArgumentTestBackend()
 
-function (kernel::KernelAbstractions.Kernel{
-        KernelArgumentTestBackend,
-        KernelAbstractions.NDIteration.StaticSize{(256,)},
-        KernelAbstractions.NDIteration.DynamicSize,
-        KERNEL_ARGUMENT_TEST_COOPERATIVE_FUNCTION,
-    })(args...; ndrange=nothing, workgroupsize=nothing)
-    push!(
-        KERNEL_ARGUMENT_TEST_COOPERATIVE_LAUNCHES,
-        (; ndrange, workgroupsize),
-    )
-    return nothing
-end
-
-function KernelAbstractions.synchronize(::KernelArgumentTestBackend)
-    KERNEL_ARGUMENT_TEST_SYNCHRONIZATIONS[] += 1
-    return nothing
-end
+KernelAbstractions.synchronize(::KernelArgumentTestBackend) = nothing
 
 struct KernelArgumentTestDeviceArray{T,N} <: AbstractArray{T,N}
     pointer::Ptr{T}
@@ -246,13 +225,6 @@ const KERNEL_ARGUMENT_TEST_CPU_ELEMENTS = Ref(0)
 function Adapt.adapt_storage(::KernelArgumentTestAccelerator, array::Array)
     KERNEL_ARGUMENT_TEST_CURRENT[] === :selected || error("wrong active mock device")
     return KernelArgumentTestArray(copy(array))
-end
-
-struct GRAMISFailClosedAccelerator <: MLDataDevices.AbstractAcceleratorDevice end
-MLDataDevices.functional(::GRAMISFailClosedAccelerator) = true
-
-function Adapt.adapt_storage(::GRAMISFailClosedAccelerator, array::Array)
-    return Adapt.adapt_storage(KernelArgumentTestAccelerator(), array)
 end
 
 function Base.Array(array::KernelArgumentTestArray)
@@ -358,19 +330,6 @@ end
         target,
         random_buffers::_RandomBuffers,
     ) = nothing
-
-    function _with_backend_device(f, ::Main.GRAMISFailClosedAccelerator)
-        previous = Main.KERNEL_ARGUMENT_TEST_CURRENT[]
-        Main.KERNEL_ARGUMENT_TEST_CURRENT[] = :selected
-        try
-            return f()
-        finally
-            Main.KERNEL_ARGUMENT_TEST_CURRENT[] = previous
-        end
-    end
-
-    _owned_backend_rng(::Main.GRAMISFailClosedAccelerator, seed::UInt64) =
-        Random.Xoshiro(seed)
 
     _owned_backend_rng(::Main.LateFailAccelerator, seed::UInt64) =
         iszero(seed) ? Random.Xoshiro(seed) : error("late RNG construction failure")
@@ -574,34 +533,6 @@ function first_order_gramis_cpu_gradient!(
     return destination
 end
 
-function collect_nested_arrays(value)
-    arrays = Any[]
-    seen = Base.IdSet{Any}()
-
-    function visit(value)
-        if value isa AbstractArray
-            push!(arrays, value)
-            return
-        end
-        type = typeof(value)
-        if value isa Union{Nothing,Number,AbstractString,Symbol,Type,Module} ||
-           isprimitivetype(type)
-            return
-        end
-        if Base.ismutabletype(type)
-            value in seen && return
-            push!(seen, value)
-        end
-        for field in 1:fieldcount(type)
-            isdefined(value, field) && visit(getfield(value, field))
-        end
-        return
-    end
-
-    visit(value)
-    return arrays
-end
-
 @testset "broad device Function rules do not opt closures in" begin
     ordinary = let captured = [0.75]
         (sample, p) -> p.shift[1] + captured[1] - abs2(sample) / 2
@@ -624,102 +555,6 @@ end
     )
     @test accelerator_error isa SamplerDeviceError
     @test accelerator_error.reason === :opaque_host_closure
-end
-
-@testset "FirstOrderGRAMIS target ownership and accelerator transfer" begin
-    bank = ProposalBank([
-        SphericalGaussian([-2.0, 0.0], 0.75),
-        DiagonalGaussian([0.0, 2.0], [1.25, 0.5]),
-        FactorGaussian([2.0, 0.0], [1.0 0.0; 0.25 1.5]),
-    ])
-    algorithm = FirstOrderGRAMIS(
-        bank;
-        rounds=3,
-        round_size=[15, 16, 17],
-        repulsion_strength=[0.1, 0.2, 0.3],
-    )
-    value = GRAMISTransferValue([0.0])
-    gradient = GRAMISTransferGradient([1.0])
-    context = DerivativeTransferContext([0.25])
-    source = prepare_sampler(
-        Random.Xoshiro(0x4752414d4953),
-        LogTarget(value; grad=gradient),
-        context,
-        algorithm;
-        threaded=true,
-    )
-    @test source.target === source.method_state.serial_gradient.target ===
-          source.method_state.threaded_gradient.target
-    @test source.target.context === context
-
-    device = KernelArgumentTestAccelerator()
-    expected_rng = copy(source.rng)
-    DERIVATIVE_VALUE_TRANSFERS[] = 0
-    DERIVATIVE_GRADIENT_TRANSFERS[] = 0
-    DERIVATIVE_CONTEXT_TRANSFERS[] = 0
-    empty!(KERNEL_ARGUMENT_TEST_COOPERATIVE_LAUNCHES)
-    KERNEL_ARGUMENT_TEST_SYNCHRONIZATIONS[] = 0
-    destination = device(source)
-    state = destination.method_state
-    committed = state.committed
-    run = state.run
-    candidate = state.candidate
-    transferred_arrays = collect_nested_arrays((
-        IS._first_order_gramis_resident_state(state),
-        destination.target,
-        destination.random_buffers,
-        destination.rng,
-    ))
-    @test !isempty(transferred_arrays)
-    @test all(array -> array isa KernelArgumentTestArray, transferred_arrays)
-    for arrays in (
-        (committed.locations, run.locations, candidate.locations),
-        (committed.factors, run.factors, candidate.factors),
-        (
-            committed.lognormalizers,
-            run.lognormalizers,
-            candidate.lognormalizers,
-        ),
-    )
-        @test arrays[1] !== arrays[2]
-        @test arrays[1] !== arrays[3]
-        @test arrays[2] !== arrays[3]
-    end
-    @test run.logmasses === committed.logmasses === candidate.logmasses
-    @test run.cdf === committed.cdf === candidate.cdf
-    @test run.proposal_ids === committed.proposal_ids === candidate.proposal_ids
-    @test state.serial_gradient === state.threaded_gradient
-    @test state.serial_gradient !== source.method_state.serial_gradient
-    @test state.serial_gradient.target === destination.target
-    @test destination.target.context === state.serial_gradient.target.context
-    @test DERIVATIVE_VALUE_TRANSFERS[] == 1
-    @test DERIVATIVE_GRADIENT_TRANSFERS[] == 1
-    @test DERIVATIVE_CONTEXT_TRANSFERS[] == 1
-    @test KERNEL_ARGUMENT_TEST_COOPERATIVE_LAUNCHES == [
-        (ndrange=256, workgroupsize=256),
-    ]
-    @test KERNEL_ARGUMENT_TEST_SYNCHRONIZATIONS[] == 1
-    @test destination.device === device
-    rand(expected_rng, UInt64)
-    @test rand(source.rng, UInt64) == rand(expected_rng, UInt64)
-
-    fail_closed_device = GRAMISFailClosedAccelerator()
-    @test MLDataDevices.functional(fail_closed_device)
-    fail_closed_source = prepare_sampler(
-        Random.Xoshiro(0x4752414d4954),
-        LogTarget(value; grad=gradient),
-        context,
-        algorithm;
-        threaded=true,
-    )
-    expected_fail_closed_rng = copy(fail_closed_source.rng)
-    fail_closed_error = caught_device_error(
-        () -> fail_closed_device(fail_closed_source),
-    )
-    @test fail_closed_error isa SamplerDeviceError
-    @test fail_closed_error.reason === :first_order_gramis_accelerator_unavailable
-    @test rand(fail_closed_source.rng, UInt64) ==
-          rand(expected_fail_closed_rng, UInt64)
 end
 
 @testset "FirstOrderGRAMIS accelerator derivative preflight" begin

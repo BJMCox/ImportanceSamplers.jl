@@ -36,20 +36,6 @@ end
     )
 end
 
-@inline _first_order_gramis_workgroupsize(execution, backend, ndrange) =
-    _native_workgroupsize(execution, ndrange)
-
-@inline function _first_order_gramis_workgroupsize(
-    ::_ThreadedCPUExecution,
-    ::KernelAbstractions.CPU,
-    ndrange,
-)
-    return min(
-        1_024,
-        max(1, fld(ndrange, Threads.nthreads(:default))),
-    )
-end
-
 @inline function _first_order_gramis_sample_slot!(
     samples,
     returned_logweights,
@@ -214,7 +200,7 @@ function _first_order_gramis_sample_round!(
             failure_storage,
         )...;
         ndrange=length(local_logweights),
-        workgroupsize=_first_order_gramis_workgroupsize(
+        workgroupsize=_population_workgroupsize(
             execution,
             backend,
             length(local_logweights),
@@ -347,7 +333,7 @@ end
     T = eltype(pooled_covariance)
     covariance = zero(T)
     for proposal_slot in axes(factors, 3)
-        covariance += _gramis_current_covariance(
+        covariance += _population_factor_covariance(
             factors,
             row,
             column,
@@ -640,7 +626,7 @@ function _repulsion_force!(
             softening,
         )...;
         ndrange=proposal_count,
-        workgroupsize=_first_order_gramis_workgroupsize(
+        workgroupsize=_population_workgroupsize(
             execution,
             backend,
             proposal_count,
@@ -789,7 +775,7 @@ function _repulsion!(
             failure_record.storage,
             pooled_covariance;
             ndrange=length(pooled_covariance),
-            workgroupsize=_first_order_gramis_workgroupsize(
+            workgroupsize=_population_workgroupsize(
                 execution,
                 backend,
                 length(pooled_covariance),
@@ -824,7 +810,7 @@ function _repulsion!(
         failure_values,
         repulsion;
         ndrange=proposal_count,
-        workgroupsize=_first_order_gramis_workgroupsize(
+        workgroupsize=_population_workgroupsize(
             execution,
             backend,
             proposal_count,
@@ -1000,7 +986,7 @@ function _precondition_gradients!(
         gradients,
         factors;
         ndrange=proposal_count,
-        workgroupsize=_first_order_gramis_workgroupsize(
+        workgroupsize=_population_workgroupsize(
             execution,
             backend,
             proposal_count,
@@ -1110,7 +1096,7 @@ function _evaluate_frozen_gradients!(
         bound_gradient,
         locations;
         ndrange=proposal_count,
-        workgroupsize=_first_order_gramis_workgroupsize(
+        workgroupsize=_population_workgroupsize(
             execution,
             backend,
             proposal_count,
@@ -1166,7 +1152,7 @@ function _evaluate_frozen_gradients!(
         workspace.frozen_values,
         workspace.gradients;
         ndrange=proposal_count,
-        workgroupsize=_first_order_gramis_workgroupsize(
+        workgroupsize=_population_workgroupsize(
             execution,
             backend,
             proposal_count,
@@ -1208,7 +1194,7 @@ function _precondition_gradients!(
         workspace.candidate_values,
         workspace.moves;
         ndrange=proposal_count,
-        workgroupsize=_first_order_gramis_workgroupsize(
+        workgroupsize=_population_workgroupsize(
             execution,
             backend,
             proposal_count,
@@ -1539,7 +1525,7 @@ function _backtrack_means!(
 )
     backend = KernelAbstractions.get_backend(candidate_locations)
     proposal_count = size(locations, 2)
-    workgroupsize = _first_order_gramis_workgroupsize(
+    workgroupsize = _population_workgroupsize(
         execution,
         backend,
         proposal_count,
@@ -1728,12 +1714,6 @@ function _execute_first_order_gramis_live_preflight!(
     return nothing
 end
 
-const _GRAMIS_COVARIANCE_READY = UInt8(0)
-const _GRAMIS_ALL_ZERO_LOCAL = UInt8(1)
-const _GRAMIS_TEMPERING_FALLBACK = UInt8(2)
-const _GRAMIS_REDUCTION_WORKGROUP_SIZE = 256
-const _GRAMIS_REDUCTION_OFFSETS = (128, 64, 32, 16, 8, 4, 2, 1)
-
 function _first_order_gramis_local_weight_arguments(
     method_state::_PreparedFirstOrderGRAMIS,
     round,
@@ -1764,12 +1744,13 @@ function _first_order_gramis_covariance_kernel_arguments(
         _first_order_gramis_local_weight_arguments(method_state, round),
         (
             workspace.covariances,
+            workspace.covariance_centres,
             workspace.normalized_weights,
             workspace.tempering_powers,
             workspace.factor_status,
             workspace.samples,
             bank.locations,
-            bank.factors,
+            bank,
             workspace.local_starts,
             method_state.plan.counts,
             round,
@@ -1814,7 +1795,7 @@ function _first_order_gramis_accelerator_covariance_arguments(
         workspace.normalized_weights,
         workspace.factor_status,
         workspace.samples,
-        method_state.run.factors,
+        method_state.run,
         workspace.local_starts,
         method_state.plan.counts,
         round,
@@ -1831,707 +1812,38 @@ end
     method_state.workspace.factor_status,
 )
 
-@inline function _gramis_local_group(starts, counts, proposal_slot, round)
-    return @inbounds(starts[proposal_slot, round]),
-    @inbounds(counts[proposal_slot, round])
+function _prepare_local_covariance_weights!(
+    method_state::_PreparedFirstOrderGRAMIS,
+    round,
+    execution,
+)
+    return _population_local_weights!(
+        _first_order_gramis_local_weight_arguments(method_state, round)...,
+        execution,
+    )
 end
 
-@kernel function _local_weight_summary_kernel!(
-    normalized_weights,
-    local_ess,
-    tempering_powers,
-    status,
-    local_logweights,
-    starts,
-    counts,
+function _fit_local_covariances!(
+    method_state::_PreparedFirstOrderGRAMIS,
     round,
+    execution,
 )
-    proposal_slot = @index(Global, Linear)
-    first_sample, sample_count = _gramis_local_group(
-        starts,
-        counts,
-        proposal_slot,
+    _prepare_local_covariance_weights!(method_state, round, execution)
+    workspace = method_state.workspace
+    return _fit_population_covariances!(
+        workspace.covariances,
+        workspace.covariance_centres,
+        workspace.normalized_weights,
+        workspace.tempering_powers,
+        workspace.factor_status,
+        workspace.samples,
+        method_state.run.locations,
+        method_state.run,
+        workspace.local_starts,
+        method_state.plan.counts,
         round,
+        execution,
     )
-    last_sample = first_sample + sample_count - 1
-    maximum_logweight = eltype(local_logweights)(-Inf)
-    for sample_index in first_sample:last_sample
-        maximum_logweight = max(
-            maximum_logweight,
-            @inbounds(local_logweights[sample_index]),
-        )
-    end
-
-    T = eltype(normalized_weights)
-    if maximum_logweight == -Inf
-        @inbounds local_ess[proposal_slot] = zero(T)
-        @inbounds tempering_powers[proposal_slot] = zero(T)
-        @inbounds status[proposal_slot] = _GRAMIS_ALL_ZERO_LOCAL
-    else
-        total = zero(T)
-        square_total = zero(T)
-        for sample_index in first_sample:last_sample
-            weight = T(exp(
-                @inbounds(local_logweights[sample_index]) - maximum_logweight,
-            ))
-            @inbounds normalized_weights[sample_index] = weight
-            total += weight
-            square_total += abs2(weight)
-        end
-        inverse_total = inv(total)
-        for sample_index in first_sample:last_sample
-            @inbounds normalized_weights[sample_index] *= inverse_total
-        end
-        @inbounds local_ess[proposal_slot] = abs2(total) / square_total
-        @inbounds tempering_powers[proposal_slot] = one(T)
-        @inbounds status[proposal_slot] = _GRAMIS_COVARIANCE_READY
-    end
-end
-
-function _local_weight_summary!(
-    method_state::_PreparedFirstOrderGRAMIS,
-    round,
-    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
-)
-    workspace = method_state.workspace
-    backend = KernelAbstractions.get_backend(workspace.normalized_weights)
-    proposal_count = size(method_state.run.locations, 2)
-    kernel = _local_weight_summary_kernel!(backend)
-    arguments = _first_order_gramis_local_weight_arguments(method_state, round)
-    kernel(
-        arguments[1:7]...,
-        round;
-        ndrange=proposal_count,
-        workgroupsize=_first_order_gramis_workgroupsize(
-            execution,
-            backend,
-            proposal_count,
-        ),
-    )
-    KernelAbstractions.synchronize(backend)
-    return nothing
-end
-
-@inline function _gramis_power_ess(
-    local_logweights,
-    first_sample,
-    last_sample,
-    power,
-    ::Type{T},
-) where {T}
-    maximum_scaled = T(-Inf)
-    for sample_index in first_sample:last_sample
-        scaled = power * T(@inbounds(local_logweights[sample_index]))
-        maximum_scaled = max(maximum_scaled, scaled)
-    end
-    total = zero(T)
-    square_total = zero(T)
-    for sample_index in first_sample:last_sample
-        scaled = power * T(@inbounds(local_logweights[sample_index]))
-        shifted_weight = exp(scaled - maximum_scaled)
-        total += shifted_weight
-        square_total += abs2(shifted_weight)
-    end
-    return abs2(total) / square_total
-end
-
-@kernel function _tempering_power_kernel!(
-    normalized_weights,
-    local_ess,
-    tempering_powers,
-    status,
-    local_logweights,
-    starts,
-    counts,
-    thresholds,
-    round,
-    tolerance,
-    max_iterations,
-)
-    proposal_slot = @index(Global, Linear)
-    T = eltype(normalized_weights)
-    if @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY &&
-       @inbounds(local_ess[proposal_slot]) <
-       T(@inbounds(thresholds[proposal_slot, round]))
-        first_sample, sample_count = _gramis_local_group(
-            starts,
-            counts,
-            proposal_slot,
-            round,
-        )
-        last_sample = first_sample + sample_count - 1
-        threshold = T(@inbounds thresholds[proposal_slot, round])
-        feasible_lower = zero(T)
-        infeasible_upper = one(T)
-        feasible_ess = zero(T)
-        positive_feasible = false
-        for _ in 1:max_iterations
-            power = (feasible_lower + infeasible_upper) / T(2)
-            ess = _gramis_power_ess(
-                local_logweights,
-                first_sample,
-                last_sample,
-                power,
-                T,
-            )
-            if ess >= threshold
-                feasible_lower = power
-                feasible_ess = ess
-                positive_feasible = true
-            else
-                infeasible_upper = power
-            end
-            infeasible_upper - feasible_lower <= tolerance && break
-        end
-
-        if positive_feasible
-            maximum_scaled = T(-Inf)
-            for sample_index in first_sample:last_sample
-                scaled = feasible_lower * T(@inbounds(local_logweights[sample_index]))
-                maximum_scaled = max(maximum_scaled, scaled)
-            end
-            total = zero(T)
-            for sample_index in first_sample:last_sample
-                scaled = feasible_lower * T(@inbounds(local_logweights[sample_index]))
-                weight = exp(scaled - maximum_scaled)
-                @inbounds normalized_weights[sample_index] = weight
-                total += weight
-            end
-            inverse_total = inv(total)
-            for sample_index in first_sample:last_sample
-                @inbounds normalized_weights[sample_index] *= inverse_total
-            end
-            @inbounds local_ess[proposal_slot] = feasible_ess
-            @inbounds tempering_powers[proposal_slot] = feasible_lower
-        else
-            @inbounds tempering_powers[proposal_slot] = zero(T)
-            @inbounds status[proposal_slot] = _GRAMIS_TEMPERING_FALLBACK
-        end
-    end
-end
-
-function _tempering_power!(
-    method_state::_PreparedFirstOrderGRAMIS,
-    round,
-    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
-)
-    workspace = method_state.workspace
-    backend = KernelAbstractions.get_backend(workspace.normalized_weights)
-    proposal_count = size(method_state.run.locations, 2)
-    kernel = _tempering_power_kernel!(backend)
-    kernel(
-        _first_order_gramis_local_weight_arguments(method_state, round)...;
-        ndrange=proposal_count,
-        workgroupsize=_first_order_gramis_workgroupsize(
-            execution,
-            backend,
-            proposal_count,
-        ),
-    )
-    KernelAbstractions.synchronize(backend)
-    return nothing
-end
-
-@kernel function _cooperative_local_weights_kernel!(
-    normalized_weights,
-    local_ess,
-    tempering_powers,
-    status,
-    local_logweights,
-    starts,
-    counts,
-    thresholds,
-    round,
-    tolerance,
-    max_iterations,
-)
-    proposal_slot = @index(Group, Linear)
-    lane_index = @index(Local, Linear)
-    lane = @private Int (1,)
-    @inbounds lane[1] = lane_index
-    @uniform lane_count = @groupsize()[1]
-    @uniform T = eltype(normalized_weights)
-    maxima = @localmem eltype(normalized_weights) (
-        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
-    )
-    raw_maxima = @localmem eltype(local_logweights) (
-        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
-    )
-    totals = @localmem eltype(normalized_weights) (
-        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
-    )
-    squared_totals = @localmem eltype(normalized_weights) (
-        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
-    )
-    # Slots 1-3: accepted power, rejected power, and accepted ESS.
-    # Slots 4-6: trial power, log maximum, and shifted-weight total.
-    tempering_state = @localmem eltype(normalized_weights) (6,)
-    group_state = @localmem eltype(starts) (3,)
-    if @inbounds(lane[1]) == 1
-        @inbounds group_state[1] = proposal_slot
-        @inbounds group_state[2] = starts[proposal_slot, round]
-        @inbounds group_state[3] =
-            group_state[2] + counts[proposal_slot, round] - 1
-    end
-    @synchronize()
-
-    lane_maximum = eltype(local_logweights)(-Inf)
-    for sample_index in (@inbounds(group_state[2]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[3]))
-        lane_maximum = max(
-            lane_maximum,
-            @inbounds(local_logweights[sample_index]),
-        )
-    end
-    @inbounds raw_maxima[lane[1]] = lane_maximum
-    @synchronize()
-    for reduction_offset in _GRAMIS_REDUCTION_OFFSETS
-        if @inbounds(lane[1]) <= reduction_offset
-            @inbounds raw_maxima[lane[1]] = max(
-                raw_maxima[lane[1]],
-                raw_maxima[lane[1] + reduction_offset],
-            )
-        end
-        @synchronize()
-    end
-
-    if @inbounds(lane[1]) == 1 &&
-       @inbounds(raw_maxima[1]) == eltype(local_logweights)(-Inf)
-        @inbounds local_ess[group_state[1]] = zero(T)
-        @inbounds tempering_powers[group_state[1]] = zero(T)
-        @inbounds status[group_state[1]] = _GRAMIS_ALL_ZERO_LOCAL
-    end
-    @synchronize()
-    if @inbounds(raw_maxima[1]) != eltype(local_logweights)(-Inf)
-        lane_total = zero(T)
-        lane_squared_total = zero(T)
-        for sample_index in (@inbounds(group_state[2]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[3]))
-            weight = T(exp(
-                @inbounds(local_logweights[sample_index]) -
-                @inbounds(raw_maxima[1]),
-            ))
-            @inbounds normalized_weights[sample_index] = weight
-            lane_total += weight
-            lane_squared_total += abs2(weight)
-        end
-        @inbounds totals[lane[1]] = lane_total
-        @inbounds squared_totals[lane[1]] = lane_squared_total
-        @synchronize()
-        for reduction_offset in _GRAMIS_REDUCTION_OFFSETS
-            if @inbounds(lane[1]) <= reduction_offset
-                @inbounds totals[lane[1]] += totals[lane[1] + reduction_offset]
-                @inbounds squared_totals[lane[1]] +=
-                    squared_totals[lane[1] + reduction_offset]
-            end
-            @synchronize()
-        end
-
-        for sample_index in (@inbounds(group_state[2]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[3]))
-            @inbounds normalized_weights[sample_index] *= inv(totals[1])
-        end
-        if @inbounds(lane[1]) == 1
-            @inbounds local_ess[group_state[1]] =
-                abs2(totals[1]) / squared_totals[1]
-            @inbounds tempering_powers[group_state[1]] = one(T)
-            @inbounds status[group_state[1]] = _GRAMIS_COVARIANCE_READY
-        end
-        @synchronize()
-
-        if @inbounds(local_ess[group_state[1]]) <
-           T(@inbounds(thresholds[group_state[1], round]))
-            if @inbounds(lane[1]) == 1
-                @inbounds tempering_state[1] = zero(T)
-                @inbounds tempering_state[2] = one(T)
-                @inbounds tempering_state[3] = zero(T)
-            end
-            @synchronize()
-
-            for _ in 1:max_iterations
-                if @inbounds(lane[1]) == 1
-                    @inbounds tempering_state[4] =
-                        (tempering_state[1] + tempering_state[2]) / T(2)
-                end
-                @synchronize()
-                lane_maximum = T(-Inf)
-                for sample_index in (@inbounds(group_state[2]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[3]))
-                    scaled = @inbounds(tempering_state[4]) * T(
-                        @inbounds local_logweights[sample_index]
-                    )
-                    lane_maximum = max(lane_maximum, scaled)
-                end
-                @inbounds maxima[lane[1]] = lane_maximum
-                @synchronize()
-                for reduction_offset in _GRAMIS_REDUCTION_OFFSETS
-                    if @inbounds(lane[1]) <= reduction_offset
-                        @inbounds maxima[lane[1]] = max(
-                            maxima[lane[1]],
-                            maxima[lane[1] + reduction_offset],
-                        )
-                    end
-                    @synchronize()
-                end
-
-                lane_total = zero(T)
-                lane_squared_total = zero(T)
-                for sample_index in (@inbounds(group_state[2]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[3]))
-                    scaled = @inbounds(tempering_state[4]) * T(
-                        @inbounds local_logweights[sample_index]
-                    )
-                    shifted_weight = exp(scaled - @inbounds(maxima[1]))
-                    lane_total += shifted_weight
-                    lane_squared_total += abs2(shifted_weight)
-                end
-                @inbounds totals[lane[1]] = lane_total
-                @inbounds squared_totals[lane[1]] = lane_squared_total
-                @synchronize()
-                for reduction_offset in _GRAMIS_REDUCTION_OFFSETS
-                    if @inbounds(lane[1]) <= reduction_offset
-                        @inbounds totals[lane[1]] +=
-                            totals[lane[1] + reduction_offset]
-                        @inbounds squared_totals[lane[1]] +=
-                            squared_totals[lane[1] + reduction_offset]
-                    end
-                    @synchronize()
-                end
-
-                if @inbounds(lane[1]) == 1
-                    ess = abs2(@inbounds(totals[1])) /
-                          @inbounds(squared_totals[1])
-                    if ess >= T(@inbounds(thresholds[group_state[1], round]))
-                        @inbounds tempering_state[1] = tempering_state[4]
-                        @inbounds tempering_state[3] = ess
-                        @inbounds tempering_state[5] = maxima[1]
-                        @inbounds tempering_state[6] = totals[1]
-                    else
-                        @inbounds tempering_state[2] = tempering_state[4]
-                    end
-                end
-                @synchronize()
-                @inbounds(tempering_state[2]) -
-                @inbounds(tempering_state[1]) <= tolerance && break
-            end
-
-            if @inbounds(tempering_state[1]) > zero(T)
-                for sample_index in (@inbounds(group_state[2]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[3]))
-                    scaled = @inbounds(tempering_state[1]) * T(
-                        @inbounds local_logweights[sample_index]
-                    )
-                    @inbounds normalized_weights[sample_index] = exp(
-                        scaled - @inbounds(tempering_state[5]),
-                    ) * inv(@inbounds(tempering_state[6]))
-                end
-                if @inbounds(lane[1]) == 1
-                    @inbounds local_ess[group_state[1]] = tempering_state[3]
-                    @inbounds tempering_powers[group_state[1]] =
-                        tempering_state[1]
-                end
-            elseif @inbounds(lane[1]) == 1
-                @inbounds tempering_powers[group_state[1]] = zero(T)
-                @inbounds status[group_state[1]] = _GRAMIS_TEMPERING_FALLBACK
-            end
-            @synchronize()
-        end
-    end
-end
-
-function _cooperative_local_weights!(
-    method_state::_PreparedFirstOrderGRAMIS,
-    round,
-    ::_KernelExecution,
-)
-    workspace = method_state.workspace
-    backend = KernelAbstractions.get_backend(workspace.normalized_weights)
-    proposal_count = size(method_state.run.locations, 2)
-    kernel = _cooperative_local_weights_kernel!(
-        backend,
-        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
-    )
-    kernel(
-        _first_order_gramis_local_weight_arguments(method_state, round)...;
-        ndrange=_GRAMIS_REDUCTION_WORKGROUP_SIZE * proposal_count,
-        workgroupsize=_GRAMIS_REDUCTION_WORKGROUP_SIZE,
-    )
-    return nothing
-end
-
-@inline function _gramis_current_covariance(factors, row, column, proposal_slot)
-    T = eltype(factors)
-    covariance = zero(T)
-    for factor_column in 1:min(row, column)
-        covariance += @inbounds(
-            factors[row, factor_column, proposal_slot] *
-            factors[column, factor_column, proposal_slot]
-        )
-    end
-    return covariance
-end
-
-@kernel function _fit_local_covariances_kernel!(
-    covariances,
-    normalized_weights,
-    tempering_powers,
-    status,
-    samples,
-    locations,
-    factors,
-    starts,
-    counts,
-    round,
-)
-    entry = @index(Global, Linear)
-    dimension = size(samples, 1)
-    entries_per_proposal = dimension * dimension
-    proposal_slot = (entry - 1) ÷ entries_per_proposal + 1
-    matrix_entry = (entry - 1) % entries_per_proposal
-    row = matrix_entry % dimension + 1
-    column = matrix_entry ÷ dimension + 1
-    canonical_row = min(row, column)
-    canonical_column = max(row, column)
-
-    if @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY
-        first_sample, sample_count = _gramis_local_group(
-            starts,
-            counts,
-            proposal_slot,
-            round,
-        )
-        last_sample = first_sample + sample_count - 1
-        T = eltype(covariances)
-        center_row = @inbounds locations[canonical_row, proposal_slot]
-        center_column = @inbounds locations[canonical_column, proposal_slot]
-        if @inbounds(tempering_powers[proposal_slot]) < one(T)
-            center_row = zero(T)
-            center_column = zero(T)
-            for sample_index in first_sample:last_sample
-                weight = @inbounds normalized_weights[sample_index]
-                center_row += weight * @inbounds(samples[canonical_row, sample_index])
-                center_column +=
-                    weight * @inbounds(samples[canonical_column, sample_index])
-            end
-        end
-        covariance = zero(T)
-        for sample_index in first_sample:last_sample
-            weight = @inbounds normalized_weights[sample_index]
-            centered_row =
-                @inbounds(samples[canonical_row, sample_index]) - center_row
-            centered_column =
-                @inbounds(samples[canonical_column, sample_index]) - center_column
-            covariance += weight * centered_row * centered_column
-        end
-        @inbounds covariances[row, column, proposal_slot] = covariance
-    else
-        @inbounds covariances[row, column, proposal_slot] =
-            _gramis_current_covariance(factors, row, column, proposal_slot)
-    end
-end
-
-@kernel function _fit_accelerator_covariance_centres_kernel!(
-    covariance_centres,
-    normalized_weights,
-    tempering_powers,
-    status,
-    samples,
-    locations,
-    starts,
-    counts,
-    round,
-)
-    group_index = @index(Group, Linear)
-    lane_index = @index(Local, Linear)
-    lane = @private Int (1,)
-    @inbounds lane[1] = lane_index
-    @uniform lane_count = @groupsize()[1]
-    @uniform T = eltype(covariance_centres)
-    partial_centres = @localmem eltype(covariance_centres) (
-        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
-    )
-    # coordinate, proposal, first sample, last sample, weighted-centre flag
-    group_state = @localmem eltype(starts) (5,)
-    if @inbounds(lane[1]) == 1
-        dimension = size(samples, 1)
-        proposal_slot = (group_index - 1) ÷ dimension + 1
-        @inbounds group_state[1] = (group_index - 1) % dimension + 1
-        @inbounds group_state[2] = proposal_slot
-        @inbounds group_state[3] = starts[proposal_slot, round]
-        @inbounds group_state[4] =
-            group_state[3] + counts[proposal_slot, round] - 1
-        @inbounds group_state[5] =
-            status[proposal_slot] == _GRAMIS_COVARIANCE_READY &&
-            tempering_powers[proposal_slot] < one(T)
-    end
-    @synchronize()
-
-    partial = zero(T)
-    if @inbounds(group_state[5]) == 1
-        for sample_index in (@inbounds(group_state[3]) + @inbounds(lane[1]) - 1):lane_count:(@inbounds(group_state[4]))
-            partial += @inbounds(normalized_weights[sample_index]) *
-                       @inbounds(samples[group_state[1], sample_index])
-        end
-    end
-    @inbounds partial_centres[lane[1]] = partial
-    @synchronize()
-    for reduction_offset in _GRAMIS_REDUCTION_OFFSETS
-        if @inbounds(lane[1]) <= reduction_offset
-            @inbounds partial_centres[lane[1]] +=
-                partial_centres[lane[1] + reduction_offset]
-        end
-        @synchronize()
-    end
-    if @inbounds(lane[1]) == 1
-        if @inbounds(group_state[5]) == 1
-            @inbounds covariance_centres[group_state[1], group_state[2]] =
-                partial_centres[1]
-        else
-            @inbounds covariance_centres[group_state[1], group_state[2]] =
-                locations[group_state[1], group_state[2]]
-        end
-    end
-end
-
-@kernel function _fit_accelerator_covariances_kernel!(
-    covariances,
-    covariance_centres,
-    normalized_weights,
-    status,
-    samples,
-    factors,
-    starts,
-    counts,
-    round,
-)
-    entry = @index(Global, Linear)
-    dimension = size(samples, 1)
-    entries_per_proposal = dimension * dimension
-    proposal_slot = (entry - 1) ÷ entries_per_proposal + 1
-    matrix_entry = (entry - 1) % entries_per_proposal
-    row = matrix_entry % dimension + 1
-    column = matrix_entry ÷ dimension + 1
-    if column <= row
-        if @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY
-            first_sample, sample_count = _gramis_local_group(
-                starts,
-                counts,
-                proposal_slot,
-                round,
-            )
-            last_sample = first_sample + sample_count - 1
-            center_row = @inbounds covariance_centres[row, proposal_slot]
-            center_column = @inbounds covariance_centres[column, proposal_slot]
-            T = eltype(covariances)
-            covariance = zero(T)
-            for sample_index in first_sample:last_sample
-                weight = @inbounds normalized_weights[sample_index]
-                centered_row = @inbounds(samples[row, sample_index]) - center_row
-                centered_column =
-                    @inbounds(samples[column, sample_index]) - center_column
-                covariance += weight * centered_row * centered_column
-            end
-        else
-            covariance =
-                _gramis_current_covariance(factors, row, column, proposal_slot)
-        end
-        @inbounds covariances[row, column, proposal_slot] = covariance
-        @inbounds covariances[column, row, proposal_slot] = covariance
-    end
-end
-
-function _fit_accelerator_covariance_centres!(
-    method_state::_PreparedFirstOrderGRAMIS,
-    round,
-    ::_KernelExecution,
-)
-    workspace = method_state.workspace
-    backend = KernelAbstractions.get_backend(workspace.covariance_centres)
-    pair_count = length(workspace.covariance_centres)
-    kernel = _fit_accelerator_covariance_centres_kernel!(
-        backend,
-        _GRAMIS_REDUCTION_WORKGROUP_SIZE,
-    )
-    kernel(
-        _first_order_gramis_covariance_centre_arguments(method_state, round)...;
-        ndrange=_GRAMIS_REDUCTION_WORKGROUP_SIZE * pair_count,
-        workgroupsize=_GRAMIS_REDUCTION_WORKGROUP_SIZE,
-    )
-    return nothing
-end
-
-function _fit_accelerator_covariances!(
-    method_state::_PreparedFirstOrderGRAMIS,
-    round,
-    execution::_KernelExecution,
-)
-    workspace = method_state.workspace
-    backend = KernelAbstractions.get_backend(workspace.covariances)
-    covariance_entries = length(workspace.covariances)
-    kernel = _fit_accelerator_covariances_kernel!(backend)
-    kernel(
-        _first_order_gramis_accelerator_covariance_arguments(
-            method_state,
-            round,
-        )...;
-        ndrange=covariance_entries,
-        workgroupsize=_first_order_gramis_workgroupsize(
-            execution,
-            backend,
-            covariance_entries,
-        ),
-    )
-    KernelAbstractions.synchronize(backend)
-    return nothing
-end
-
-function _prepare_local_covariance_weights!(
-    method_state::_PreparedFirstOrderGRAMIS,
-    round,
-    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
-)
-    _local_weight_summary!(method_state, round, execution)
-    _tempering_power!(method_state, round, execution)
-    return nothing
-end
-
-function _prepare_local_covariance_weights!(
-    method_state::_PreparedFirstOrderGRAMIS,
-    round,
-    execution::_KernelExecution,
-)
-    return _cooperative_local_weights!(method_state, round, execution)
-end
-
-function _fit_local_covariances!(
-    method_state::_PreparedFirstOrderGRAMIS,
-    round,
-    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
-)
-    _prepare_local_covariance_weights!(method_state, round, execution)
-
-    workspace = method_state.workspace
-    backend = KernelAbstractions.get_backend(workspace.covariances)
-    covariance_entries = length(workspace.covariances)
-    kernel = _fit_local_covariances_kernel!(backend)
-    kernel(
-        _first_order_gramis_covariance_kernel_arguments(
-            method_state,
-            round,
-        )[2]...;
-        ndrange=covariance_entries,
-        workgroupsize=_first_order_gramis_workgroupsize(
-            execution,
-            backend,
-            covariance_entries,
-        ),
-    )
-    KernelAbstractions.synchronize(backend)
-    return nothing
-end
-
-function _fit_local_covariances!(
-    method_state::_PreparedFirstOrderGRAMIS,
-    round,
-    execution::_KernelExecution,
-)
-    _prepare_local_covariance_weights!(method_state, round, execution)
-    _fit_accelerator_covariance_centres!(method_state, round, execution)
-    return _fit_accelerator_covariances!(method_state, round, execution)
 end
 
 @kernel function _blend_local_covariances_kernel!(
@@ -2543,7 +1855,7 @@ end
     regularization,
 )
     proposal_slot = @index(Global, Linear)
-    if @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY
+    if @inbounds(status[proposal_slot]) == _POPULATION_COVARIANCE_READY
         T = eltype(covariances)
         dimension = size(covariances, 1)
         previous_trace = zero(T)
@@ -2561,7 +1873,7 @@ end
                 @inbounds(covariances[row, column, proposal_slot]) +
                 @inbounds(covariances[column, row, proposal_slot])
             ) / T(2)
-            old = _gramis_current_covariance(
+            old = _population_factor_covariance(
                 factors,
                 row,
                 column,
@@ -2590,207 +1902,13 @@ function _blend_local_covariances!(
             round,
         )[3]...;
         ndrange=proposal_count,
-        workgroupsize=_first_order_gramis_workgroupsize(
+        workgroupsize=_population_workgroupsize(
             execution,
             backend,
             proposal_count,
         ),
     )
     KernelAbstractions.synchronize(backend)
-    return nothing
-end
-
-const _GRAMIS_COVARIANCE_NONFINITE_INFO = Int32(-1)
-const _GRAMIS_CHOLESKY_WORKGROUP_SIZE = 64
-
-@kernel function _factor_population_kernel!(factors, covariances, info, status)
-    proposal_slot = @index(Group, Linear)
-    lane = @index(Local, Linear)
-    @uniform lane_count = @groupsize()[1]
-    @uniform dimension = size(factors, 1)
-    lane_bad = @localmem Int32 (_GRAMIS_CHOLESKY_WORKGROUP_SIZE,)
-
-    lane == 1 && (@inbounds info[proposal_slot] = Int32(0))
-    bad = Int32(0)
-    for entry in lane:lane_count:(dimension * dimension)
-        row = (entry - 1) % dimension + 1
-        column = (entry - 1) ÷ dimension + 1
-        if @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY
-            value = @inbounds covariances[row, column, proposal_slot]
-            bad |= isfinite(value) ? Int32(0) : Int32(1)
-            @inbounds factors[row, column, proposal_slot] =
-                row < column ? zero(eltype(factors)) : value
-        end
-    end
-    @inbounds lane_bad[lane] = bad
-    @synchronize()
-    if lane == 1
-        group_bad = @inbounds lane_bad[1]
-        for other_lane in 2:lane_count
-            group_bad |= @inbounds lane_bad[other_lane]
-        end
-        iszero(group_bad) || (@inbounds info[proposal_slot] =
-            _GRAMIS_COVARIANCE_NONFINITE_INFO)
-    end
-    @synchronize()
-
-    for column in 1:dimension
-        if lane == 1 &&
-           @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY &&
-           iszero(@inbounds(info[proposal_slot]))
-            pivot = @inbounds factors[column, column, proposal_slot]
-            for previous in 1:(column - 1)
-                pivot -= abs2(
-                    @inbounds factors[column, previous, proposal_slot]
-                )
-            end
-            if isfinite(pivot) && pivot > zero(pivot)
-                @inbounds factors[column, column, proposal_slot] = sqrt(pivot)
-            else
-                @inbounds info[proposal_slot] = Int32(column)
-            end
-        end
-        @synchronize()
-
-        bad = Int32(0)
-        if @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY &&
-           iszero(@inbounds(info[proposal_slot]))
-            diagonal = @inbounds factors[column, column, proposal_slot]
-            for row in (column + lane):lane_count:dimension
-                value = @inbounds factors[row, column, proposal_slot]
-                for previous in 1:(column - 1)
-                    value -= @inbounds(
-                        factors[row, previous, proposal_slot] *
-                        factors[column, previous, proposal_slot]
-                    )
-                end
-                value /= diagonal
-                @inbounds factors[row, column, proposal_slot] = value
-                bad |= isfinite(value) ? Int32(0) : Int32(1)
-            end
-        end
-        @inbounds lane_bad[lane] = bad
-        @synchronize()
-        if lane == 1 &&
-           @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY &&
-           iszero(@inbounds(info[proposal_slot]))
-            group_bad = @inbounds lane_bad[1]
-            for other_lane in 2:lane_count
-                group_bad |= @inbounds lane_bad[other_lane]
-            end
-            iszero(group_bad) ||
-                @inbounds(info[proposal_slot] = Int32(column))
-        end
-        @synchronize()
-    end
-end
-
-@inline function _factor_population_slot!(
-    factors,
-    covariances,
-    info,
-    proposal_slot,
-)
-    factor = view(factors, :, :, proposal_slot)
-    covariance = view(covariances, :, :, proposal_slot)
-    copyto!(factor, covariance)
-    finite = true
-    @inbounds for entry in eachindex(factor)
-        finite &= isfinite(factor[entry])
-    end
-    if !finite
-        @inbounds info[proposal_slot] = _GRAMIS_COVARIANCE_NONFINITE_INFO
-        return nothing
-    end
-
-    factor, factor_info = LinearAlgebra.LAPACK.potrf!('L', factor)
-    @inbounds info[proposal_slot] = factor_info
-    if iszero(factor_info)
-        dimension = size(factor, 1)
-        @inbounds for column in 1:dimension, row in 1:(column - 1)
-            factor[row, column] = zero(eltype(factor))
-        end
-    end
-    return nothing
-end
-
-function _factor_population!(
-    ::MLDataDevices.AbstractCPUDevice,
-    factors::StridedArray{T,3},
-    covariances::StridedArray{T,3},
-    info::StridedVector{I},
-    ::_SerialCPUExecution,
-) where {T<:Union{Float32,Float64},I<:Signed}
-    @inbounds for proposal_slot in axes(factors, 3)
-        _factor_population_slot!(
-            factors,
-            covariances,
-            info,
-            proposal_slot,
-        )
-    end
-    return nothing
-end
-
-function _factor_population!(
-    ::MLDataDevices.AbstractCPUDevice,
-    factors::StridedArray{T,3},
-    covariances::StridedArray{T,3},
-    info::StridedVector{I},
-    ::_ThreadedCPUExecution,
-) where {T<:Union{Float32,Float64},I<:Signed}
-    _threaded_foreach(axes(factors, 3)) do proposal_slot
-        _factor_population_slot!(
-            factors,
-            covariances,
-            info,
-            proposal_slot,
-        )
-    end
-    return nothing
-end
-
-function _factor_ready_population!(
-    factors,
-    covariances,
-    info,
-    status,
-    ::_SerialCPUExecution,
-)
-    @inbounds for proposal_slot in axes(factors, 3)
-        if status[proposal_slot] == _GRAMIS_COVARIANCE_READY
-            _factor_population_slot!(
-                factors,
-                covariances,
-                info,
-                proposal_slot,
-            )
-        else
-            info[proposal_slot] = 0
-        end
-    end
-    return nothing
-end
-
-function _factor_ready_population!(
-    factors,
-    covariances,
-    info,
-    status,
-    ::_ThreadedCPUExecution,
-)
-    _threaded_foreach(axes(factors, 3)) do proposal_slot
-        if @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY
-            _factor_population_slot!(
-                factors,
-                covariances,
-                info,
-                proposal_slot,
-            )
-        else
-            @inbounds info[proposal_slot] = 0
-        end
-    end
     return nothing
 end
 
@@ -2804,7 +1922,7 @@ function _update_local_covariances!(
     copyto!(method_state.candidate.factors, method_state.run.factors)
     _blend_local_covariances!(method_state, round, execution)
     workspace = method_state.workspace
-    _factor_ready_population!(
+    _factor_population_covariances!(
         method_state.candidate.factors,
         workspace.covariances,
         info,
@@ -2842,9 +1960,12 @@ function _update_local_covariances!(
     copyto!(method_state.candidate.factors, method_state.run.factors)
     _blend_local_covariances!(method_state, round, execution)
     workspace = method_state.workspace
-    _factor_population!(
-        device,
-        _first_order_gramis_factor_arguments(method_state, info)...,
+    _factor_population_covariances!(
+        method_state.candidate.factors,
+        workspace.covariances,
+        info,
+        workspace.factor_status,
+        execution,
     )
     fill!(failure_record.storage, zero(eltype(failure_record.storage)))
     backend = KernelAbstractions.get_backend(info)
@@ -2853,7 +1974,7 @@ function _update_local_covariances!(
         failure_record.storage,
         info;
         ndrange=length(info),
-        workgroupsize=_first_order_gramis_workgroupsize(
+        workgroupsize=_population_workgroupsize(
             execution,
             backend,
             length(info),
@@ -3125,7 +2246,7 @@ function _add_first_order_gramis_repulsion!(
         candidate,
         repulsion;
         ndrange=proposal_count,
-        workgroupsize=_first_order_gramis_workgroupsize(
+        workgroupsize=_population_workgroupsize(
             execution,
             backend,
             proposal_count,
@@ -3142,7 +2263,7 @@ end
 
 @inline function _candidate_factor_validation(factors, status, proposal_slot)
     T = eltype(factors)
-    @inbounds(status[proposal_slot]) == _GRAMIS_COVARIANCE_READY ||
+    @inbounds(status[proposal_slot]) == _POPULATION_COVARIANCE_READY ||
         return (false, UInt16(0), zero(T), zero(T))
     dimension = size(factors, 1)
     logabsdet = zero(T)
@@ -3236,7 +2357,7 @@ function _validate_first_order_gramis_candidate_factors!(
         candidate.lognormalizers,
         status;
         ndrange=proposal_count,
-        workgroupsize=_first_order_gramis_workgroupsize(
+        workgroupsize=_population_workgroupsize(
             execution,
             backend,
             proposal_count,
@@ -3349,8 +2470,8 @@ function _first_order_gramis_diagnostic_summary(
     target_trials = 0
     @inbounds for proposal_slot in eachindex(status, steps, trials)
         proposal_status = status[proposal_slot]
-        all_zero += proposal_status == _GRAMIS_ALL_ZERO_LOCAL
-        tempering += proposal_status == _GRAMIS_TEMPERING_FALLBACK
+        all_zero += proposal_status == _POPULATION_ALL_ZERO_LOCAL
+        tempering += proposal_status == _POPULATION_TEMPERING_FAILED
         backtracking += iszero(steps[proposal_slot])
         target_trials += trials[proposal_slot]
     end

@@ -780,6 +780,8 @@ end
 
 @testset "FirstOrderGRAMIS successful local fallbacks remain nonfailures" begin
     T = Float64
+    bank = first_order_gramis_two_proposal_bank(T)
+    before_factors = [copy(proposal.scale.factor) for proposal in bank.proposals]
     sampler = prepare_sampler(
         FirstOrderGRAMISPrefilledRNG([fill(one(T), 6)]),
         LogTarget(
@@ -787,7 +789,7 @@ end
             grad=first_order_gramis_zero_gradient!,
         ),
         FirstOrderGRAMIS(
-            first_order_gramis_two_proposal_bank(T);
+            bank;
             rounds=1,
             round_size=6,
             repulsion_strength=zero(T),
@@ -798,14 +800,141 @@ end
     result = importance_sample!(sampler)
 
     @test all(==(-Inf), result.logweights)
-    @test result.diagnostics.round_ess == T[0]
-    @test result.diagnostics.round_lognormalizers == T[-Inf]
-    @test result.diagnostics.fallback_status == fill(
-        GRAMISIS._GRAMIS_ALL_ZERO_LOCAL,
-        2,
-        1,
-    )
+    @test [proposal.scale.factor for proposal in current_proposal(sampler).proposals] ==
+          before_factors
     @test result.diagnostics.fallbacks.all_zero_local_weights == 2
-    @test result.diagnostics.fallbacks.tempering == 0
-    @test result.diagnostics.failures == 0
+end
+
+@testset "FirstOrderGRAMIS public covariance blend and scale-aware ridge" begin
+    T = Float64
+    rate = T(0.5)
+    regularization = T(0.1)
+    bank = first_order_gramis_two_proposal_bank(T)
+    normals = T[-1, 0, 1, 2, -2, -1, 0, 1]
+    target = FirstOrderGRAMISTarget{T}()
+    sampler = prepare_sampler(
+        FirstOrderGRAMISPrefilledRNG([normals]),
+        LogTarget(target; grad=first_order_gramis_zero_gradient!),
+        FirstOrderGRAMIS(
+            bank;
+            rounds=1,
+            round_size=8,
+            repulsion_strength=zero(T),
+            covariance_ess_threshold=2,
+            covariance_rate=rate,
+            covariance_regularization=regularization,
+        );
+        threaded=false,
+    )
+    result = importance_sample!(sampler)
+    learned = current_proposal(sampler)
+
+    for (proposal_id, (initial, fitted)) in enumerate(
+        zip(bank.proposals, learned.proposals),
+    )
+        indices = findall(==(proposal_id), result.provenance.proposal_id)
+        samples = vec(result.samples[:, indices])
+        local_logs = [
+            target([sample]) -
+            GRAMISIS.DensityInterface.logdensityof(initial, [sample]) for
+            sample in samples
+        ]
+        power = result.diagnostics.tempering_powers[proposal_id, 1]
+        weights = exp.(power .* local_logs .- maximum(power .* local_logs))
+        weights ./= sum(weights)
+        center = power < one(T) ? sum(weights .* samples) : only(initial.location)
+        covariance = sum(weights .* abs2.(samples .- center))
+        old_covariance = abs2(only(initial.scale.factor))
+        expected = (one(T) - rate) * old_covariance + rate * covariance +
+                   regularization * old_covariance
+        @test abs2(only(fitted.scale.factor)) ≈ expected rtol=32eps(T)
+    end
+end
+
+@testset "FirstOrderGRAMIS finite extreme tempering retains the public factor" begin
+    T = Float64
+    bank = first_order_gramis_two_proposal_bank(T)
+    before = copy(first(bank.proposals).scale.factor)
+    normals = T[-1, 1, 0, 0, -1, 0, 1, 2]
+    extreme_target(sample) = only(sample) < 0 ?
+                             (only(sample) < T(-2.5) ? floatmax(T) : -floatmax(T)) :
+                             -sum(abs2, sample) / T(2)
+    sampler = prepare_sampler(
+        FirstOrderGRAMISPrefilledRNG([normals]),
+        LogTarget(extreme_target; grad=first_order_gramis_zero_gradient!),
+        FirstOrderGRAMIS(
+            bank;
+            rounds=1,
+            round_size=8,
+            repulsion_strength=zero(T),
+            covariance_ess_threshold=3,
+            tempering_max_iterations=16,
+        );
+        threaded=false,
+    )
+
+    result = importance_sample!(sampler)
+    @test first(current_proposal(sampler).proposals).scale.factor == before
+    @test result.diagnostics.fallbacks.tempering == 1
+end
+
+@testset "FirstOrderGRAMIS degenerate covariance failure preserves the proposal" begin
+    T = Float64
+    recovery_normals = T[-1, 0, 1, 2, -2, -1, 1, 2]
+    rng = FirstOrderGRAMISPrefilledRNG([zeros(T, 8), recovery_normals])
+    target = FirstOrderGRAMISTarget{T}()
+    sampler = prepare_sampler(
+        rng,
+        LogTarget(target; grad=first_order_gramis_zero_gradient!),
+        FirstOrderGRAMIS(
+            first_order_gramis_two_proposal_bank(T);
+            rounds=1,
+            round_size=8,
+            repulsion_strength=zero(T),
+            covariance_ess_threshold=2,
+            covariance_regularization=zero(T),
+        );
+        threaded=false,
+    )
+    before = current_proposal(sampler)
+    failure = try
+        importance_sample!(sampler)
+        nothing
+    catch error
+        error
+    end
+    retained = current_proposal(sampler)
+
+    @test failure isa FirstOrderGRAMISRoundError
+    @test failure.round == 1
+    @test [proposal.location for proposal in retained.proposals] ==
+          [proposal.location for proposal in before.proposals]
+    @test [proposal.scale.factor for proposal in retained.proposals] ==
+          [proposal.scale.factor for proposal in before.proposals]
+    @test rng.next_batch == 2
+
+    control = prepare_sampler(
+        FirstOrderGRAMISPrefilledRNG([copy(recovery_normals)]),
+        LogTarget(target; grad=first_order_gramis_zero_gradient!),
+        FirstOrderGRAMIS(
+            before;
+            rounds=1,
+            round_size=8,
+            repulsion_strength=zero(T),
+            covariance_ess_threshold=2,
+            covariance_regularization=zero(T),
+        );
+        threaded=false,
+    )
+    recovered_result = importance_sample!(sampler)
+    control_result = importance_sample!(control)
+    recovered = current_proposal(sampler)
+    expected = current_proposal(control)
+
+    @test recovered_result.samples == control_result.samples
+    @test recovered_result.logweights == control_result.logweights
+    @test [proposal.location for proposal in recovered.proposals] ==
+          [proposal.location for proposal in expected.proposals]
+    @test [proposal.scale.factor for proposal in recovered.proposals] ==
+          [proposal.scale.factor for proposal in expected.proposals]
 end

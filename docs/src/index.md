@@ -51,6 +51,8 @@ target and algorithm arguments. The proposal alone determines sample shape.
   mixtures and learned Gaussian state.
 - [Adaptive population importance sampling](@ref) covers epoch-local spatial
   mixtures, proposal-local mean fits, and retained fixed-covariance state.
+- [Canonical covariance-adaptive importance sampling](@ref) covers standard
+  generating-proposal weights, raw mean fits, and robust covariance replacement.
 - [Nonlinear population Monte Carlo](@ref) covers clipped adaptation and raw
   importance-weight estimation.
 - [DM-PMC, GR-PMC, and LR-PMC](@ref) covers adaptive spatial
@@ -66,8 +68,9 @@ target and algorithm arguments. The proposal alone determines sample shape.
 - [Public API](@ref) lists every exported binding.
 
 Runnable workflows include the public
-[DM-PMC example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/dm_pmc.jl)
-and [APIS example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/apis.jl)
+[DM-PMC example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/dm_pmc.jl),
+[APIS example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/apis.jl),
+and [CAIS example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/cais.jl)
 and a plain numerical-integration example for
 [`integral(exp(-x^2)) = sqrt(pi)`](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/numerical_integration.jl).
 
