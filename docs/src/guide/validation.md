@@ -26,6 +26,7 @@ The generated matrices live with their method contracts:
 | GR-PMC | [DM-PMC, GR-PMC, and LR-PMC](@ref) | `dm_pmc_global.jl`, `cuda_dm_pmc.jl` |
 | LR-PMC | [DM-PMC, GR-PMC, and LR-PMC](@ref) | `cuda_dm_pmc.jl` |
 | APIS | [Adaptive population importance sampling](@ref), table below | `cuda_apis.jl` |
+| LAIS | [Layered importance sampling](@ref), table below | `cuda_lais.jl`; CPU recurrence checks in `test/lais.jl` |
 | CAIS | [Canonical covariance-adaptive importance sampling](@ref), table below | `cuda_cais.jl` |
 | NPMC | [Nonlinear population Monte Carlo](@ref), table below | `cuda_npmc.jl` |
 | First-order GRAMIS-CAIS | [First-order GRAMIS-CAIS](@ref) | `first_order_gramis.jl`, `cuda_first_order_gramis.jl` |
@@ -34,7 +35,7 @@ DM-PMC, GR-PMC, and LR-PMC share a constructor with explicit allocation,
 weighting, and resampling controls. Their method guide defines the combinations.
 
 The following rows execute two 64-sample rounds during each docs build.
-APIS and CAIS use a one-proposal bank. NPMC uses one proposal. Each target is
+APIS, LAIS and CAIS use a one-proposal bank. NPMC uses one proposal. Each target is
 the initial proposal's log density. The checks verify the returned count.
 Independent recurrence and failure checks belong to the test suite and CUDA
 reproducers, not this documentation table.
