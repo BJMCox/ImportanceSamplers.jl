@@ -1660,6 +1660,7 @@ end
                 view(workspace.logweights, current_indices),
                 view(workspace.logtargets, current_indices),
                 view(workspace.lognumerators, current_indices),
+                round_ids,
                 logtotal,
                 buffers.failure_scratch.record.storage,
             ),

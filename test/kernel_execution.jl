@@ -355,12 +355,6 @@ end
     default_result = importance_sample!(default_sampler)
     @test default_result.diagnostics.factor_execution_policy === :batched
 
-    @test ImportanceSamplers._use_native_factor_batch_path(
-        sampler.device,
-        sampler.algorithm.proposal,
-        ImportanceSamplers._NoSampleTransform(),
-        sampler.factor_execution,
-    )
     result = importance_sample!(sampler)
     @test size(result.samples) == (dimension, nsamples)
     @test all(isfinite, result.logweights)
@@ -369,31 +363,14 @@ end
         zeros(Float32, dimension),
         Matrix{Float32}(LinearAlgebra.I, dimension, dimension),
     )
-    bank = ImportanceSamplers._pack_native_gaussian_bank(
-        ProposalBank([factor32, factor32], Float32[0.5, 0.5]),
-    )
-    denominator = ImportanceSamplers._FullMixtureDenominator()
-    @test ImportanceSamplers._use_factor_batch_mis_path(
-        sampler.device,
-        bank,
-        denominator,
-        Float32,
-        BatchedFactorExecution(),
-    )
-    @test !ImportanceSamplers._use_factor_batch_mis_path(
-        sampler.device,
-        bank,
-        denominator,
-        Float64,
-        BatchedFactorExecution(),
-    )
-    @test !ImportanceSamplers._use_factor_batch_mis_path(
-        sampler.device,
-        bank,
-        denominator,
-        Float32,
-        FusedFactorExecution(),
-    )
+    mixed = prepare_sampler(Random.Xoshiro(41), x -> 1e8 + 0.1,
+        ImportanceSampling(ProposalBank([factor32, factor32]); nsamples=32);
+        factor_execution=BatchedFactorExecution())
+    weights = importance_sample!(mixed)
+    expected = 1e8 .+ 0.1 .+ dimension * log(2pi)/2 .+
+        vec(sum(abs2, Float64.(weights.samples); dims=1)) ./ 2
+    @test weights.logweights ≈ expected atol=1e-4 rtol=0
+    @test weights.diagnostics.factor_execution_policy === :batched
 end
 
 _view_backed_scale(scale::ImportanceSamplers._SphericalGaussianScale) = scale

@@ -170,6 +170,7 @@ if isdefined(AMISKernelIS, :_launch_prefilled_amis_round!)
             logweights,
             logtargets,
             lognumerators,
+            round_ids,
             logtotal,
             failure_storage,
             execution::Main.AMISKernelStageFailureExecution,
@@ -180,6 +181,7 @@ if isdefined(AMISKernelIS, :_launch_prefilled_amis_round!)
                 logweights,
                 logtargets,
                 lognumerators,
+                round_ids,
                 logtotal,
                 failure_storage,
                 _SerialCPUExecution(),
@@ -450,12 +452,13 @@ end
 end
 
 @testset "AMIS log-weight failure reasons stay in device storage" begin
-    logweights = fill(-123.0, 2)
+    logweights = fill(-123.0, 3)
     failures = zeros(UInt64, 3)
     AMISKernelIS._launch_form_amis_logweights!(
         logweights,
-        [0.0, 0.0],
-        [-Inf, 0.0],
+        [0.0, 0.0, -Inf],
+        [-Inf, 0.0, 0.0],
+        [1, 1, 1],
         0.0,
         failures,
         AMISKernelIS._SerialCPUExecution(),
@@ -465,7 +468,7 @@ end
     @test decoded.count == 1
     @test decoded.first_logical_index == 1
     @test decoded.reason_bits == AMISKernelIS._NATIVE_LOGWEIGHT_INVALID
-    @test logweights == [-123.0, 0.0]
+    @test logweights == [-123.0, 0.0, -Inf]
     @test AMISKernelIS._logweight_from_logmixture(0.0, -Inf, 0.0)[2] ==
           AMISKernelIS._NATIVE_LOGWEIGHT_INVALID
 end
@@ -515,6 +518,22 @@ end
             @test decoded.reason_bits == case.reason
         end
     end
+end
+
+@testset "AMIS fused target failure clears stale round IDs" begin
+    prepared = prepare_sampler(Random.Xoshiro(1), Returns(0.0),
+        AMIS(SphericalGaussian(0.0, 1.0); rounds=1, round_size=2))
+    state = prepared.method_state
+    workspace = state.workspace
+    round_ids = fill(77, 2)
+    failures = zeros(UInt64, 3)
+    target = AMISKernelIS._NativeDeviceTarget{Float64,Base.Returns{Float64}}(Returns(NaN))
+    AMISKernelIS._launch_prefilled_amis_round!(
+        workspace.samples, workspace.logtargets, workspace.lognumerators,
+        workspace.logweights, round_ids, failures, zeros(2), target,
+        state.history, state.logcounts, state.offsets, 1,
+        workspace.centered_scaled, AMISKernelIS._SerialCPUExecution())
+    @test round_ids == [0, 0]
 end
 
 @testset "AMIS native failures map to binding phases" begin

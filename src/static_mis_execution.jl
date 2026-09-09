@@ -377,10 +377,10 @@ function _importance_sample_cpu!(
         ),
         execution=_execution_name(cpu_execution),
         threaded=sampler.threaded,
-        factor_execution_policy=_factor_execution_name(
-            sampler.device,
-            sampler.factor_execution,
-        ),
+        factor_execution_policy=_use_factor_batch_mis_path(
+            sampler.device, method_state.bank, method_state.design.denominator,
+            log_type, sampler.factor_execution,
+        ) ? :batched : :fused,
         nsamples=nsamples,
         failures=0,
         transfers=snapshot.transfers,

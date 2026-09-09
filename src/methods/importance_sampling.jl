@@ -283,6 +283,9 @@ thread; accelerator launch policy does not depend on host thread count.
 The default factor path is fused on CPU and batched on accelerators that support
 factor batching. Use `FusedFactorExecution()` or `BatchedFactorExecution()` to
 override that choice; unsupported batched cases use the fused path.
+Native Gaussian MIS with wider logweights supports explicit batching without
+narrowing those weights. Its default remains fused; explicit batching uses
+a separate denominator buffer in the logweight precision.
 """
 function prepare_sampler(
     rng::Random.AbstractRNG,

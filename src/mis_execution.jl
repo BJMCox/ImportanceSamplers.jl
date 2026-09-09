@@ -282,7 +282,7 @@ function _use_factor_batch_mis_path(
     ::Type{T},
     factor_execution,
 ) where {T}
-    return T === eltype(bank.locations) &&
+    return (T === eltype(bank.locations) || factor_execution isa BatchedFactorExecution) &&
            !isnothing(_factor_batch_logcoefficients(bank, denominator)) &&
            _use_factor_batch_path(device, bank, factor_execution)
 end
@@ -294,7 +294,7 @@ function _use_factor_batch_mis_path(
     ::Type{T},
     factor_execution,
 ) where {T}
-    return T === eltype(bank.locations) &&
+    return (T === eltype(bank.locations) || factor_execution isa BatchedFactorExecution) &&
            _use_factor_batch_path(device, bank, factor_execution)
 end
 
@@ -513,7 +513,9 @@ function _launch_factor_batch_mis_round!(
         workgroupsize=_native_workgroupsize(execution, sample_count),
     )
 
-    logdenominators = view(normal_buffer, 1:sample_count)
+    # Reuse consumed normals only when their precision preserves the weights.
+    logdenominators = eltype(normal_buffer) === eltype(output.logweights) ?
+        view(normal_buffer, 1:sample_count) : similar(output.logweights)
     fill!(logdenominators, eltype(logdenominators)(-Inf))
     logcoefficients = _factor_batch_logcoefficients(bank, denominator)
     isnothing(logcoefficients) && error("unsupported factor-batch denominator")
@@ -712,6 +714,7 @@ end
     @inbounds logtargets[sample_index] = T(-Inf)
     @inbounds lognumerators[sample_index] = zero(T)
     @inbounds logweights[sample_index] = T(-Inf)
+    round_ids[sample_index] = 0
     valid, target_log, lognumerator, _, _ = _mis_round_values!(
         T,
         sample_index,

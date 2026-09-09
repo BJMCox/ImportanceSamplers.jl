@@ -104,24 +104,28 @@ end
     logweights,
     logtargets,
     lognumerators,
+    round_ids,
     logtotal,
     failure_storage,
 )
     sample_index = @index(Global, Linear)
-    value, reason = _logweight_from_logmixture(
-        @inbounds(logtargets[sample_index]),
-        @inbounds(lognumerators[sample_index]),
-        logtotal,
-    )
-    if iszero(reason)
-        @inbounds logweights[sample_index] = value
-    else
-        _record_native_failure!(
-            failure_storage,
-            sample_index,
-            0,
-            reason,
+    # Earlier stages already recorded the failure for inactive samples.
+    if !iszero(round_ids[sample_index])
+        value, reason = _logweight_from_logmixture(
+            @inbounds(logtargets[sample_index]),
+            @inbounds(lognumerators[sample_index]),
+            logtotal,
         )
+        if iszero(reason)
+            @inbounds logweights[sample_index] = value
+        else
+            _record_native_failure!(
+                failure_storage,
+                sample_index,
+                0,
+                reason,
+            )
+        end
     end
 end
 
@@ -129,6 +133,7 @@ function _launch_form_amis_logweights!(
     logweights,
     logtargets,
     lognumerators,
+    round_ids,
     logtotal,
     failure_storage,
     execution,
@@ -139,6 +144,7 @@ function _launch_form_amis_logweights!(
         logweights,
         logtargets,
         lognumerators,
+        round_ids,
         logtotal,
         failure_storage;
         ndrange=length(logweights),
@@ -239,6 +245,7 @@ function _launch_prefilled_amis_factor_batch!(
             view(logweights, current_indices),
             view(logtargets, current_indices),
             view(lognumerators, current_indices),
+            view(round_ids, current_indices),
             logtotal,
             failure_storage,
             execution,
@@ -336,6 +343,7 @@ function _launch_prefilled_amis_round!(
             view(logweights, current_indices),
             view(logtargets, current_indices),
             view(lognumerators, current_indices),
+            view(round_ids, current_indices),
             logtotal,
             failure_storage,
             execution,
@@ -417,6 +425,7 @@ function _preflight_amis_kernels(
         view(workspace.logweights, current_indices),
         view(workspace.logtargets, current_indices),
         view(workspace.lognumerators, current_indices),
+        round_ids,
         logtotal,
         buffers.failure_scratch.record.storage,
     )
