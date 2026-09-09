@@ -19,6 +19,36 @@ function Random.rand!(rng::LAISScriptedRNG, out::AbstractArray)
     return out
 end
 
+function lais_smh_oracle(centres, candidates, selection_uniforms,
+    acceptance_uniforms, logtarget, logproposal)
+    current = copy(centres)
+    accepted = 0
+    history = Vector{typeof(current)}()
+    for move in eachindex(candidates, selection_uniforms, acceptance_uniforms)
+        candidate = candidates[move]
+        candidate_target = logtarget(candidate)
+        if candidate_target != -Inf
+            ratios = exp.(logproposal.(current) .- logtarget.(current))
+            threshold = selection_uniforms[move] * sum(ratios)
+            selected = findfirst(>(threshold), cumsum(ratios))
+            candidate_ratio = exp(logproposal(candidate) - candidate_target)
+            acceptance = sum(ratios) /
+                         (sum(ratios) + candidate_ratio -
+                          min(candidate_ratio, minimum(ratios)))
+            if acceptance_uniforms[move] < acceptance
+                current[selected] = candidate
+                accepted += 1
+            end
+        end
+        push!(history, copy(current))
+    end
+    return (; centres=current, history, accepted)
+end
+
+function lais_scalar_gaussian_logdensity(x, location, scale)
+    return -log(scale * sqrt(2pi)) - abs2((x - location) / scale) / 2
+end
+
 function lais_ram_oracle(::Type{T}) where {T}
     factor = T[1 0; 1 1]
     centre = zeros(T, 2)

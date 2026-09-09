@@ -52,6 +52,7 @@ export AbstractImportanceSampler,
     LogTarget,
     LAIS,
     LAISRoundError,
+    SampleMetropolisHastings,
     RandomWalkMetropolis,
     RAM,
     WarmupTuning,
@@ -113,6 +114,7 @@ include("amis_execution.jl")
 include("npmc_execution.jl")
 include("static_mis_execution.jl")
 include("population_execution.jl")
+include("sample_metropolis_hastings.jl")
 include("cais_execution.jl")
 include("dm_pmc_execution.jl")
 include("apis_execution.jl")

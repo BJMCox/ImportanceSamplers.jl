@@ -91,6 +91,25 @@ function check_fixed_rwm(device)
     @test result.provenance == reference.provenance
 end
 
+function check_smh(device)
+    normals = [[0.5, 2.0, -1.0], zeros(2), [3.5, -2.5, 1.25], zeros(2)]
+    uniforms = [[0.2 0.8 0.55; 0.3 0.95 0.4], [0.9 0.15 0.6; 0.2 0.8 0.1]]
+    algorithm = LAIS(ProposalBank([
+            SphericalGaussian(-2.0, 0.75), SphericalGaussian(2.0, 1.25)]);
+        transition=SampleMetropolisHastings(SphericalGaussian(0.0, 1.0); moves=3),
+        rounds=2, round_size=2)
+    reference = importance_sample!(prepare_sampler(
+        LAISScriptedRNG(normals, uniforms, 1, 1), scalar_target, algorithm))
+    base = device(prepare_sampler(Xoshiro(23), scalar_target, algorithm))
+    # Existing device fixture consumes each decision-buffer column in order.
+    decisions = [collect(column) for batch in uniforms for column in eachcol(batch)]
+    result = cpu_device()(importance_sample!(scripted_sampler(base, normals, decisions)))
+    @test result.samples ≈ reference.samples
+    @test result.logweights ≈ reference.logweights
+    @test result.provenance == reference.provenance
+    @test result.diagnostics.transition == reference.diagnostics.transition
+end
+
 function check_warmup_rollback(device)
     oracle = lais_ram_oracle(Float64)
     algorithm = LAIS(ProposalBank([FactorGaussian(zeros(2), Matrix{Float64}(I, 2, 2))]);
@@ -147,6 +166,7 @@ function main()
     device = MLDataDevices.CUDADevice{typeof(physical),Nothing}(physical)
     @testset "CUDA LAIS recurrence and resident results" begin
         check_fixed_rwm(device)
+        check_smh(device)
         check_failure_rollback(device)
         check_warmup_rollback(device)
         check_warmup_batch_boundary(device)

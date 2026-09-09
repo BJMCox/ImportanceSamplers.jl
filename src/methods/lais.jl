@@ -5,6 +5,11 @@ Configure layered importance sampling. Each round advances the upper MCMC chains
 then draws equally from the lower Gaussian proposals at their new centres. Use
 current-round deterministic-mixture weights and retain all lower samples.
 
+Independent [`RandomWalkMetropolis`](@ref)/[`RAM`](@ref) chains implement
+PI-MAIS-style upper adaptation. [`SampleMetropolisHastings`](@ref) instead makes
+interacting population replacements for I²-MAIS while retaining the same LAIS
+result and lower-weighting API.
+
 `round_size` is the total lower count per round, either an integer or a vector
 with one entry per round. It must divide equally across positive, equal-mass
 proposals. Lower covariances stay fixed and independent of `transition`.
