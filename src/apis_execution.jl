@@ -96,7 +96,7 @@ end
 
 function _population_diagnostics(
     sampler,
-    ::_PreparedAPIS,
+    method_state::_PreparedAPIS,
     execution,
     schedule,
     round_ess,
@@ -109,10 +109,13 @@ function _population_diagnostics(
         method=:apis,
         execution=_execution_name(execution),
         threaded=sampler.threaded,
-        factor_execution_policy=_factor_execution_name(
+        factor_execution_policy=_use_factor_batch_mis_path(
             sampler.device,
+            method_state.run_bank,
+            _population_denominator(method_state, firstindex(schedule)),
+            eltype(method_state.workspace.round_logweights),
             sampler.factor_execution,
-        ),
+        ) ? :batched : :fused,
         rounds=sampler.algorithm.rounds,
         round_sizes=collect(schedule),
         round_ess=round_ess,

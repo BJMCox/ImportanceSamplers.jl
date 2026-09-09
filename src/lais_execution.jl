@@ -56,7 +56,11 @@ function _population_diagnostics(sampler, state::_PreparedLAIS, execution, sched
     lower_count = sum(schedule)
     return (
         method=:lais, execution=_execution_name(execution), threaded=sampler.threaded,
-        factor_execution_policy=_factor_execution_name(sampler.device, sampler.factor_execution),
+        factor_execution_policy=_use_factor_batch_mis_path(
+            sampler.device, state.run_bank,
+            _population_denominator(state, firstindex(schedule)),
+            eltype(state.workspace.round_logweights), sampler.factor_execution,
+        ) ? :batched : :fused,
         rounds=sampler.algorithm.rounds, round_sizes=collect(schedule),
         round_ess=round_ess, round_lognormalizers=round_lognormalizers,
         target_evaluations=lower_count + transition.initial_target_evaluations +
