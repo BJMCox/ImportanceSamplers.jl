@@ -1,3 +1,5 @@
+const _TRANSITION_WORKGROUP_SIZE = 32
+
 @kernel function _transition_cache_kernel!(centres, logtargets, evaluator, failures)
     chain = @index(Global, Linear)
     if chain <= length(logtargets)
@@ -22,22 +24,117 @@ end
     end
 end
 
-@kernel function _transition_warmup_kernel!(batch, evaluator, direction,
+@kernel function _cooperative_transition_warmup_kernel!(batch, evaluator, direction,
     normals, uniforms, first_step, steps, acceptance, decay, failures)
-    chain = @index(Global, Linear)
-    if chain <= length(batch.logtargets)
-        for step in 1:steps
-            isfinite(batch.logtargets[chain]) || break
-            moves = merge(batch, (normals=view(normals, :, :, step),
-                uniforms=view(uniforms, :, step)))
-            update = (direction=direction, target_acceptance=acceptance,
-                gain=oftype(decay, first_step + step)^(-decay))
-            reason, failed = _transition_step!(moves, evaluator, update, chain)
-            if failed
-                batch.logtargets[chain] = oftype(batch.logtargets[chain], NaN)
-                _record_native_failure!(failures, chain, 0, reason)
-                break
+    chain = Int(@index(Group, Linear))
+    lane = @index(Local, Linear)
+    @uniform lanes = @groupsize()[1]
+    @uniform dimension = size(normals, 1)
+    @uniform T = eltype(normals)
+    # Direction norm, adaptation coefficient, diagonal ratio, update ratio.
+    parameters = @localmem T (4,)
+    target_values = @localmem eltype(batch.logtargets) (2,)
+    status = @localmem UInt16 (2,) # failure reason and acceptance flag
+    invalid = @localmem Bool (_TRANSITION_WORKGROUP_SIZE,)
+    for step in 1:steps
+        isfinite(batch.logtargets[chain]) || break
+        invalid[lane] = false
+        if lane == 1
+            status[1] = 0
+            status[2] = 0
+        end
+        for row in lane:lanes:dimension
+            increment = zero(T)
+            for column in 1:row
+                increment += batch.factors[row, column, chain] * normals[column, chain, step]
             end
+            value = _population_sample_coordinate(batch.centres, row, chain) + increment
+            invalid[lane] |= !isfinite(value)
+            _store_population_location!(batch.candidates, row, chain, value)
+        end
+        @synchronize()
+        if lane == 1
+            if any(view(invalid, 1:lanes))
+                status[1] = _NATIVE_GENERATED_NONFINITE
+            else
+                value, reason, failed = evaluator(_native_sample_at(batch.candidates, chain), chain)
+                target_values[1] = value
+                target_values[2] = min(zero(value), value - batch.logtargets[chain])
+                status[1] = failed ? reason : UInt16(0)
+                norm = zero(T)
+                for row in 1:dimension
+                    norm = hypot(norm, normals[row, chain, step])
+                end
+                parameters[1] = norm
+                parameters[2] = T(first_step + step)^(-decay) *
+                    (T(exp(target_values[2])) - acceptance)
+                if iszero(status[1]) && !(isfinite(norm) && norm > zero(T))
+                    status[1] = _NATIVE_PROPOSAL_INVALID
+                end
+            end
+        end
+        @synchronize()
+        if iszero(status[1])
+            for row in lane:lanes:dimension
+                value = zero(T)
+                for column in 1:row
+                    value += batch.factors[row, column, chain] *
+                        (normals[column, chain, step] / parameters[1])
+                end
+                direction[row, chain] = sqrt(abs(parameters[2])) * value
+            end
+        end
+        @synchronize()
+        for column in 1:dimension
+            if lane == 1 && iszero(status[1])
+                diagonal = batch.factors[column, column, chain]
+                next, ratio = _transition_rankone_diagonal(
+                    diagonal, direction[column, chain], parameters[2] < zero(T))
+                if !(isfinite(next) && next > zero(T))
+                    status[1] = _NATIVE_PROPOSAL_INVALID
+                else
+                    parameters[3] = next / diagonal
+                    parameters[4] = ratio
+                    batch.factors[column, column, chain] = next
+                end
+            end
+            @synchronize()
+            if iszero(status[1])
+                for row in (column + lane):lanes:dimension
+                    value = direction[row, chain]
+                    factor, next_direction = _transition_rankone_entry(
+                        batch.factors[row, column, chain], value,
+                        parameters[3], parameters[4], parameters[2] < zero(T))
+                    invalid[lane] |= !isfinite(factor)
+                    batch.factors[row, column, chain] = factor
+                    direction[row, chain] = next_direction
+                end
+            end
+            @synchronize()
+        end
+        if lane == 1
+            iszero(status[1]) && any(view(invalid, 1:lanes)) &&
+                (status[1] = _NATIVE_PROPOSAL_INVALID)
+            if iszero(status[1]) && log(uniforms[chain, step]) < target_values[2]
+                status[2] = 1
+                batch.logtargets[chain] = target_values[1]
+                batch.accepted[chain] += 1
+            end
+        end
+        @synchronize()
+        if !iszero(status[2])
+            for row in lane:lanes:dimension
+                _store_population_location!(batch.centres, row, chain,
+                    _population_sample_coordinate(batch.candidates, row, chain))
+            end
+        end
+        @synchronize()
+        if !iszero(status[1])
+            if lane == 1
+                batch.logtargets[chain] = oftype(batch.logtargets[chain], NaN)
+                _record_native_failure!(failures, chain, 0, status[1])
+            end
+            break
         end
     end
 end
@@ -101,14 +198,16 @@ function _warmup_transition!(backend, state, target, rng, execution, transfers)
         capacity = min(remaining, 256, max(1, (1 << 20) ÷ bytes_per_move))
         normals = similar(walk.normals, size(walk.normals)..., capacity)
         uniforms = similar(walk.uniforms, length(walk.uniforms), capacity)
-        kernel = _transition_warmup_kernel!(backend)
+        kernel = _cooperative_transition_warmup_kernel!(backend)
+        lanes = min(_TRANSITION_WORKGROUP_SIZE, size(walk.normals, 1))
         while state.n_tuned < state.tuning.steps
             steps = min(capacity, state.tuning.steps - state.n_tuned)
             Random.randn!(rng, view(normals, :, :, 1:steps))
             Random.rand!(rng, view(uniforms, :, 1:steps))
             kernel(_transition_arrays(walk), evaluator, state.direction, normals,
                 uniforms, state.n_tuned, steps, state.target_acceptance, state.decay,
-                walk.failure_scratch.record.storage; ndrange=length(walk.logtargets))
+                walk.failure_scratch.record.storage;
+                ndrange=lanes*length(walk.logtargets), workgroupsize=lanes)
             state.n_tuned += steps
             walk.steps += steps
         end
