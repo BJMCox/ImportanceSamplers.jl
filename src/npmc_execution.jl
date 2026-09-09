@@ -14,7 +14,7 @@ function _sort_clipping_weights!(::MLDataDevices.AbstractCPUDevice, scratch, thr
 end
 
 function _sort_clipping_weights!(device, scratch, threshold_index)
-    sort!(scratch)
+    AcceleratedKernels.sort!(scratch)
     return nothing
 end
 

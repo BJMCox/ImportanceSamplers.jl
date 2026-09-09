@@ -2,7 +2,7 @@
 
 julia_version = "1.12.7"
 manifest_format = "2.0"
-project_hash = "19bdbf892fcc4afef95da37a7e4e559e14584bd2"
+project_hash = "ca2df35071d18651bf6bb1d51cf58cdeb0b2d3cc"
 
 [[deps.ADTypes]]
 deps = ["PrecompileTools"]
@@ -19,6 +19,18 @@ version = "1.24.0"
     ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
     ConstructionBase = "187b0558-2788-49d3-abe0-74a17ed4e7c9"
     EnzymeCore = "f151be2c-9106-41f4-ab19-57ee4f262869"
+
+[[deps.AcceleratedKernels]]
+deps = ["ArgCheck", "GPUArraysCore", "KernelAbstractions", "Markdown", "UnsafeAtomics"]
+git-tree-sha1 = "0de01460ed11e90b42ce666c8ed0265bad59aa6a"
+uuid = "6a4ca0a5-0e36-4168-a932-d9be78d558f1"
+version = "0.4.3"
+
+    [deps.AcceleratedKernels.extensions]
+    AcceleratedKernelsoneAPIExt = "oneAPI"
+
+    [deps.AcceleratedKernels.weakdeps]
+    oneAPI = "8f75cd03-7ff8-4ecb-9b8f-daf728133b1b"
 
 [[deps.Adapt]]
 deps = ["LinearAlgebra"]
@@ -170,17 +182,25 @@ git-tree-sha1 = "1ac2813982db52b974c9343124ca61adbf297316"
 uuid = "d9f16b24-f501-4c13-a1f2-28368ffc5196"
 version = "0.5.3"
 
+[[deps.GPUArraysCore]]
+deps = ["Adapt"]
+git-tree-sha1 = "83cf05ab16a73219e5f6bd1bdfa9848fa24ac627"
+uuid = "46192b85-c4d5-4398-a991-12ede77f4527"
+version = "0.2.0"
+
 [[deps.ImportanceSamplers]]
-deps = ["ADTypes", "Adapt", "DensityInterface", "DifferentiationInterface", "KernelAbstractions", "LinearAlgebra", "LogDensityProblems", "LogExpFunctions", "MLDataDevices", "Random"]
+deps = ["ADTypes", "AcceleratedKernels", "Adapt", "DensityInterface", "DifferentiationInterface", "KernelAbstractions", "LinearAlgebra", "LogDensityProblems", "LogExpFunctions", "MLDataDevices", "Random", "Statistics"]
 path = "."
 uuid = "f51d20bd-8e2c-46f0-bdaa-6990265b9f1c"
 version = "0.0.1"
 
     [deps.ImportanceSamplers.extensions]
     ImportanceSamplersCUDAExt = "CUDA"
+    ImportanceSamplersDistributionsExt = "Distributions"
 
     [deps.ImportanceSamplers.weakdeps]
     CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+    Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 
 [[deps.InteractiveUtils]]
 deps = ["Markdown"]

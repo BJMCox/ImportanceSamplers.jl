@@ -1,6 +1,7 @@
 module ImportanceSamplers
 
 import ADTypes
+import AcceleratedKernels
 import Adapt
 import DensityInterface
 import DifferentiationInterface

@@ -595,11 +595,12 @@ function _logweight_sum(result::_AbstractWeightedSamples)
     _is_host_storage(result.logweights) &&
         return LogExpFunctions.logsumexp(result.logweights)
     T = eltype(result.logweights)
-    accumulator = mapreduce(
+    neutral = _LogSumExpAccumulator(T(-Inf), zero(T))
+    accumulator = AcceleratedKernels.mapreduce(
         _logsumexp_accumulator,
         _merge_logsumexp_accumulators,
         result.logweights;
-        init=_LogSumExpAccumulator(T(-Inf), zero(T)),
+        init=neutral, neutral,
     )
     _record_device_scalar_transfer!(
         _result_transfers(result),
