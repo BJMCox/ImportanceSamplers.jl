@@ -182,6 +182,7 @@ Base.size(array::KernelArgumentTestDeviceArray) = array.dimensions
 struct KernelArgumentTestAdaptor end
 
 const KERNEL_ARGUMENT_TEST_ARGUMENTS = Tuple{DataType,DataType}[]
+const KERNEL_ARGUMENT_TEST_FACTOR_BATCH_SUPPORTED = Ref(false)
 
 Adapt.adapt_storage(
     ::KernelArgumentTestAdaptor,
@@ -318,6 +319,9 @@ end
 
     _owned_backend_rng(::Main.KernelArgumentTestAccelerator, seed::UInt64) =
         Random.Xoshiro(seed)
+
+    _factor_batch_supported(::Main.KernelArgumentTestAccelerator) =
+        Main.KERNEL_ARGUMENT_TEST_FACTOR_BATCH_SUPPORTED[]
 
     _preflight_first_order_gramis_factorization!(
         ::Main.KernelArgumentTestAccelerator,
@@ -1611,6 +1615,10 @@ end
         round_kernel = IS._gaussian_round_launch_kernel!(backend)
         append_kernel = IS._append_logmixture_kernel!(backend)
         weight_kernel = IS._form_amis_logweights_kernel!(backend)
+        launch_scratch = IS._fused_mis_solve_scratch(
+            workspace.centered_scaled,
+            backend,
+        )
         expected_preflight = Tuple{DataType,DataType}[]
         function expect_preflight!(kernel, arguments)
             append!(
@@ -1637,7 +1645,7 @@ end
                 history,
                 assignments,
                 denominator,
-                workspace.centered_scaled,
+                launch_scratch,
             ),
         )
         old_indices = 1:max(first_sample - 1, 1)
@@ -1650,7 +1658,7 @@ end
                 representative_round,
                 state.logcounts,
                 buffers.failure_scratch.record.storage,
-                workspace.centered_scaled,
+                launch_scratch,
             ),
         )
         current_indices = 1:last_sample
@@ -1660,6 +1668,7 @@ end
                 view(workspace.logweights, current_indices),
                 view(workspace.logtargets, current_indices),
                 view(workspace.lognumerators, current_indices),
+                round_ids,
                 logtotal,
                 buffers.failure_scratch.record.storage,
             ),
@@ -1704,6 +1713,32 @@ end
             )
         end
         @test KERNEL_ARGUMENT_TEST_ARGUMENTS == expected_preflight
+        if history isa IS._GaussianFactorHistory
+            empty!(KERNEL_ARGUMENT_TEST_ARGUMENTS)
+            KERNEL_ARGUMENT_TEST_FACTOR_BATCH_SUPPORTED[] = true
+            try
+                IS._preflight_amis_kernels(
+                    device,
+                    destination.target,
+                    state,
+                    buffers,
+                    BatchedFactorExecution(),
+                )
+            finally
+                KERNEL_ARGUMENT_TEST_FACTOR_BATCH_SUPPORTED[] = false
+            end
+            raw_scratch_type = typeof(
+                kernel_argument_test_adapt(workspace.centered_scaled),
+            )
+            batch_scratch_types = map((round_kernel, append_kernel)) do kernel
+                arguments = filter(
+                    argument -> first(argument) === typeof(kernel),
+                    KERNEL_ARGUMENT_TEST_ARGUMENTS,
+                )
+                return last(arguments)[2]
+            end
+            @test batch_scratch_types == (raw_scratch_type, raw_scratch_type)
+        end
 
         KERNEL_ARGUMENT_TEST_CPU_COPIES[] = 0
         KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] = 0

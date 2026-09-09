@@ -14,7 +14,7 @@ function _sort_clipping_weights!(::MLDataDevices.AbstractCPUDevice, scratch, thr
 end
 
 function _sort_clipping_weights!(device, scratch, threshold_index)
-    sort!(scratch)
+    AcceleratedKernels.sort!(scratch)
     return nothing
 end
 
@@ -136,18 +136,25 @@ function _preflight_accelerator_method(
     indices = _gaussian_summary_indices(algorithm, state, round)
     samples = _sample_view(workspace.samples, indices)
     round_ids = similar(workspace.logweights, Int, 1)
+    use_factor_batch = state.history isa _GaussianFactorHistory &&
+                       _use_factor_batch_path(
+        device,
+        state.history,
+        factor_execution,
+    )
+    solve_scratch = use_factor_batch ? workspace.centered_scaled :
+                    _fused_mis_solve_scratch(workspace.centered_scaled, backend)
     for argument in (
         samples, view(workspace.logtargets, indices),
         view(workspace.lognumerators, indices), view(workspace.logweights, indices),
         round_ids, zero(T), round, buffers.failure_scratch.record.storage,
         buffers.normal, target_argument, state.history,
         _FixedMISAssignments(round, length(indices)),
-        _GeneratingGaussianDenominator(), workspace.centered_scaled,
+        _GeneratingGaussianDenominator(), solve_scratch,
     )
         _preflight_kernel_argument(device, kernel, argument)
     end
-    if state.history isa _GaussianFactorHistory &&
-       _use_factor_batch_path(device, state.history, factor_execution)
+    if use_factor_batch
         target_kernel = _gaussian_batch_target_kernel!(backend)
         for argument in (
             view(workspace.logtargets, indices), view(workspace.lognumerators, indices),

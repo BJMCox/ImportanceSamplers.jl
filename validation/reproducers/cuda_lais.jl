@@ -47,7 +47,7 @@ scalar_target(x) = -abs2(x) / 2
 shifted_target(x, p) = -(abs2(x[1] - p.location[1]) + abs2(x[2] - p.location[2])) / 20
 failure_target(x) = x > 3 ? Inf : 0.0
 
-function check_transfer_budget(result, rounds, warmup=0)
+function check_transfer_budget(result, rounds)
     # Batch snapshots, one packed weight summary per round, and two counts.
     # Bounds allow fewer transfers without encoding a kernel-launch count.
     snapshots = 1 + 2rounds
@@ -167,7 +167,7 @@ function main()
             sampler = scripted_sampler(base, normals, uniforms)
             result = importance_sample!(sampler)
             CUDA.synchronize()
-            check_transfer_budget(result, warmup ? 1 : 3, warmup ? 2 : 0)
+            check_transfer_budget(result, warmup ? 1 : 3)
             @test all(x -> x isa CUDA.AnyCuArray,
                 (result.samples, result.logweights, result.provenance.round, result.provenance.proposal_id))
             host = cpu_device()(result)

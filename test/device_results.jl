@@ -3,6 +3,7 @@ using ImportanceSamplers
 import MLDataDevices
 import LogExpFunctions
 import Statistics
+import AcceleratedKernels
 struct ResultTestDevice <: MLDataDevices.AbstractAcceleratorDevice
     id::Int
 end
@@ -60,6 +61,9 @@ function Base.mapreduce(f, op, array::ResultBackendArray; kwargs...)
     result = mapreduce(f, op, array.storage; kwargs...)
     result_backend_payload_bytes[] += sizeof(typeof(result))
     return result
+end
+function AcceleratedKernels.mapreduce(f, op, array::ResultBackendArray; neutral, kwargs...)
+    return mapreduce(f, op, array; kwargs...)
 end
 function LogExpFunctions.logsumexp(array::ResultBackendArray)
     _require_result_scope(array)

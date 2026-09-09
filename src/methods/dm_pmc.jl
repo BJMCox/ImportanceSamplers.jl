@@ -700,6 +700,15 @@ function _preflight_accelerator_method(
     round_kernel = _mis_round_launch_kernel!(backend)
     denominator =
         _RealizedMixtureDenominator(plan.logcoefficients, representative_round)
+    use_factor_batch = _use_factor_batch_mis_path(
+        device,
+        bank,
+        denominator,
+        log_type,
+        factor_execution,
+    )
+    solve_scratch = use_factor_batch ? workspace.solve_scratch :
+                    _fused_mis_solve_scratch(workspace.solve_scratch, backend)
     for argument in (
         round_views.samples,
         round_views.logweights,
@@ -710,17 +719,11 @@ function _preflight_accelerator_method(
         bank,
         round_views.assignments,
         denominator,
-        workspace.solve_scratch,
+        solve_scratch,
     )
         _preflight_kernel_argument(device, round_kernel, argument)
     end
-    if _use_factor_batch_mis_path(
-        device,
-        bank,
-        denominator,
-        log_type,
-        factor_execution,
-    )
+    if use_factor_batch
         batch_kernel = _factor_batch_mis_draw_target_kernel!(backend)
         _preflight_kernel_argument(device, batch_kernel, target_argument)
     end

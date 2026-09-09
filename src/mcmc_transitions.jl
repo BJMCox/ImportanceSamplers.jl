@@ -290,28 +290,39 @@ function _adapt_transition!(update, batch, chain, alpha)
     return _transition_rankone!(batch.factors, update.direction, chain, coefficient < zero(T))
 end
 
+function _transition_rankone_diagonal(diagonal, x, downdate)
+    ratio = x / diagonal
+    if downdate
+        abs(ratio) < one(ratio) || return oftype(diagonal, NaN), ratio
+        next = diagonal * sqrt((one(ratio) - ratio) * (one(ratio) + ratio))
+    else
+        next = hypot(diagonal, x)
+    end
+    return next, ratio
+end
+
+function _transition_rankone_entry(factor, value, c, ratio, downdate)
+    signed = downdate ? -ratio * value : ratio * value
+    updated = (factor + signed) / c
+    return updated, c * value - ratio * updated
+end
+
 # Lower-Cholesky rank-one update/downdate. Scratch is consumed, not allocated.
 function _transition_rankone!(factors, direction, chain, downdate)
     for column in axes(direction, 1)
         diagonal = factors[column, column, chain]
         x = direction[column, chain]
-        ratio = x / diagonal
-        if downdate
-            abs(ratio) < one(ratio) || return false
-            next = diagonal * sqrt((one(ratio) - ratio) * (one(ratio) + ratio))
-        else
-            next = hypot(diagonal, x)
-        end
+        next, ratio = _transition_rankone_diagonal(diagonal, x, downdate)
         isfinite(next) && next > zero(next) || return false
         c = next / diagonal
         factors[column, column, chain] = next
         for row in (column + 1):size(direction, 1)
             value = direction[row, chain]
-            signed = downdate ? -ratio * value : ratio * value
-            factor = (factors[row, column, chain] + signed) / c
+            factor, next_direction = _transition_rankone_entry(
+                factors[row, column, chain], value, c, ratio, downdate)
             isfinite(factor) || return false
             factors[row, column, chain] = factor
-            direction[row, chain] = c * value - ratio * factor
+            direction[row, chain] = next_direction
         end
     end
     return true

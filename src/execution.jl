@@ -101,8 +101,10 @@ function _logweight_summary(
 )
     if !_is_host_storage(logweights)
         T = eltype(logweights)
-        moments = mapreduce(_logweight_moments, _merge_logweight_moments, logweights;
-            init=(T(-Inf), zero(T), zero(T)))
+        neutral = (T(-Inf), zero(T), zero(T))
+        moments = AcceleratedKernels.mapreduce(
+            _logweight_moments, _merge_logweight_moments, logweights;
+            init=neutral, neutral)
         _record_reported_transfer!(transfers, 1, sizeof(moments), Val(:logweight_moments))
         iszero(moments[2]) && return (ess=zero(T), lognormalizer=T(-Inf))
         return _logweight_summary(moments..., length(logweights))

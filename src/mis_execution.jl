@@ -96,6 +96,20 @@ end
 
 struct _NoMISSolveScratch end
 
+@inline function _fused_mis_solve_scratch(
+    solve_scratch,
+    backend,
+)
+    if !(solve_scratch isa AbstractMatrix) ||
+       backend isa KernelAbstractions.CPU
+        return solve_scratch
+    end
+
+    dimension, capacity = size(solve_scratch)
+    sample_major = reshape(solve_scratch, capacity, dimension)
+    return PermutedDimsArray(sample_major, (2, 1))
+end
+
 struct _MISAdaptationOutput{T,Q}
     logtargets::T
     generating_logdensities::Q
@@ -282,7 +296,7 @@ function _use_factor_batch_mis_path(
     ::Type{T},
     factor_execution,
 ) where {T}
-    return T === eltype(bank.locations) &&
+    return (T === eltype(bank.locations) || factor_execution isa BatchedFactorExecution) &&
            !isnothing(_factor_batch_logcoefficients(bank, denominator)) &&
            _use_factor_batch_path(device, bank, factor_execution)
 end
@@ -294,7 +308,7 @@ function _use_factor_batch_mis_path(
     ::Type{T},
     factor_execution,
 ) where {T}
-    return T === eltype(bank.locations) &&
+    return (T === eltype(bank.locations) || factor_execution isa BatchedFactorExecution) &&
            _use_factor_batch_path(device, bank, factor_execution)
 end
 
@@ -513,7 +527,9 @@ function _launch_factor_batch_mis_round!(
         workgroupsize=_native_workgroupsize(execution, sample_count),
     )
 
-    logdenominators = view(normal_buffer, 1:sample_count)
+    # Reuse consumed normals only when their precision preserves the weights.
+    logdenominators = eltype(normal_buffer) === eltype(output.logweights) ?
+        view(normal_buffer, 1:sample_count) : similar(output.logweights)
     fill!(logdenominators, eltype(logdenominators)(-Inf))
     logcoefficients = _factor_batch_logcoefficients(bank, denominator)
     isnothing(logcoefficients) && error("unsupported factor-batch denominator")
@@ -712,6 +728,7 @@ end
     @inbounds logtargets[sample_index] = T(-Inf)
     @inbounds lognumerators[sample_index] = zero(T)
     @inbounds logweights[sample_index] = T(-Inf)
+    round_ids[sample_index] = 0
     valid, target_log, lognumerator, _, _ = _mis_round_values!(
         T,
         sample_index,
@@ -780,6 +797,10 @@ function _launch_mis_round!(
     execution,
 )
     backend = KernelAbstractions.get_backend(normal_buffer)
+    launch_scratch = _fused_mis_solve_scratch(
+        solve_scratch,
+        backend,
+    )
     kernel = _mis_round_launch_kernel!(backend)
     kernel(
         _mis_round_kernel_arguments(
@@ -791,7 +812,7 @@ function _launch_mis_round!(
             bank,
             assignments,
             denominator,
-            solve_scratch,
+            launch_scratch,
         )...;
         ndrange=length(output.logweights),
         workgroupsize=_native_workgroupsize(
@@ -816,6 +837,10 @@ function _launch_mis_round!(
     execution,
 )
     backend = KernelAbstractions.get_backend(normal_buffer)
+    launch_scratch = _fused_mis_solve_scratch(
+        solve_scratch,
+        backend,
+    )
     kernel = _gaussian_round_launch_kernel!(backend)
     kernel(
         samples,
@@ -831,7 +856,7 @@ function _launch_mis_round!(
         history,
         assignments,
         denominator,
-        solve_scratch;
+        launch_scratch;
         ndrange=length(output.logweights),
         workgroupsize=_native_workgroupsize(
             execution,

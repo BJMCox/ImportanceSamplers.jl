@@ -5,6 +5,7 @@ authors = ["Ben Cox <bcox@mpp.mpg.de>"]
 
 [deps]
 ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
+AcceleratedKernels = "6a4ca0a5-0e36-4168-a932-d9be78d558f1"
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 DensityInterface = "b429d917-457f-4dbc-8f4c-0cc954292b1d"
 DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
@@ -26,6 +27,7 @@ ImportanceSamplersDistributionsExt = "Distributions"
 
 [compat]
 ADTypes = "1.24.0"
+AcceleratedKernels = "0.4.3"
 Adapt = "4.7.0"
 CUDA = "6.2"
 DensityInterface = "0.4.0"

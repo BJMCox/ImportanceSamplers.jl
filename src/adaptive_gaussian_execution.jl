@@ -998,10 +998,14 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAdaptiveGaus
         method=_gaussian_method_name(algorithm),
         execution=_execution_name(execution),
         threaded=sampler.threaded,
-        factor_execution_policy=_factor_execution_name(
-            sampler.device,
-            sampler.factor_execution,
-        ),
+        factor_execution_policy=(
+            history isa _GaussianFactorHistory &&
+            _use_factor_batch_path(
+                sampler.device,
+                history,
+                sampler.factor_execution,
+            )
+        ) ? :batched : :fused,
         rounds=rounds,
         round_sizes=collect(schedule),
         round_ess=round_ess,

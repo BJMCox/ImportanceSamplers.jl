@@ -934,6 +934,23 @@ function _preflight_accelerator_method(
             workspace.generating_logdensities,
         ),
     )
+    denominator = _RealizedMixtureDenominator(
+        method_state.plan.logcoefficients,
+        1,
+    )
+    resolved_factor_execution = _resolved_factor_execution(
+        device,
+        factor_execution,
+    )
+    use_factor_batch = _use_factor_batch_mis_path(
+        device,
+        bank,
+        denominator,
+        log_type,
+        resolved_factor_execution,
+    )
+    solve_scratch = use_factor_batch ? workspace.solve_scratch :
+                    _fused_mis_solve_scratch(workspace.solve_scratch, backend)
     _preflight_first_order_gramis_kernel_arguments(
         device,
         sample_kernel,
@@ -945,8 +962,8 @@ function _preflight_accelerator_method(
             target_argument,
             bank,
             view(method_state.plan.assignments, 1:1, 1),
-            _RealizedMixtureDenominator(method_state.plan.logcoefficients, 1),
-            workspace.solve_scratch,
+            denominator,
+            solve_scratch,
         ),
     )
 

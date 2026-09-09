@@ -96,7 +96,7 @@ end
 
 function _population_diagnostics(
     sampler,
-    ::_PreparedAPIS,
+    method_state::_PreparedAPIS,
     execution,
     schedule,
     round_ess,
@@ -109,10 +109,13 @@ function _population_diagnostics(
         method=:apis,
         execution=_execution_name(execution),
         threaded=sampler.threaded,
-        factor_execution_policy=_factor_execution_name(
+        factor_execution_policy=_use_factor_batch_mis_path(
             sampler.device,
+            method_state.run_bank,
+            _population_denominator(method_state, firstindex(schedule)),
+            eltype(method_state.workspace.round_logweights),
             sampler.factor_execution,
-        ),
+        ) ? :batched : :fused,
         rounds=sampler.algorithm.rounds,
         round_sizes=collect(schedule),
         round_ess=round_ess,
@@ -156,6 +159,15 @@ function _preflight_accelerator_method(
     )
     denominator =
         _RealizedMixtureDenominator(plan.logcoefficients, representative_round)
+    use_factor_batch = _use_factor_batch_mis_path(
+        device,
+        bank,
+        denominator,
+        log_type,
+        factor_execution,
+    )
+    solve_scratch = use_factor_batch ? workspace.solve_scratch :
+                    _fused_mis_solve_scratch(workspace.solve_scratch, backend)
     round_kernel = _mis_round_launch_kernel!(backend)
     for argument in (
         round_views.samples,
@@ -167,18 +179,12 @@ function _preflight_accelerator_method(
         bank,
         round_views.assignments,
         denominator,
-        workspace.solve_scratch,
+        solve_scratch,
         adaptation,
     )
         _preflight_kernel_argument(device, round_kernel, argument)
     end
-    if _use_factor_batch_mis_path(
-        device,
-        bank,
-        denominator,
-        log_type,
-        factor_execution,
-    )
+    if use_factor_batch
         draw_kernel = _factor_batch_mis_draw_target_kernel!(backend)
         for argument in (target_argument, adaptation)
             _preflight_kernel_argument(device, draw_kernel, argument)
