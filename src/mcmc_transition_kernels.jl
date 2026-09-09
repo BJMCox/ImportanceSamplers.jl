@@ -245,13 +245,25 @@ function _preflight_accelerator_method(device, target, ::LAIS, state::_PreparedL
     round = findmax(state.plan.schedule)[2]
     views = _population_round_views(state, round)
     denominator = _population_denominator(state, round)
+    use_factor_batch = _use_factor_batch_mis_path(
+        device,
+        bank,
+        denominator,
+        L,
+        factor_execution,
+    )
+    solve_scratch = use_factor_batch ? state.workspace.solve_scratch :
+                    _fused_mis_solve_scratch(
+        state.workspace.solve_scratch,
+        backend,
+    )
     kernel = _mis_round_launch_kernel!(backend)
     for argument in (views.samples, views.logweights, views.proposal_ids,
         buffers.failure_scratch.record.storage, buffers.normals, evaluator,
-        bank, views.assignments, denominator, state.workspace.solve_scratch, nothing)
+        bank, views.assignments, denominator, solve_scratch, nothing)
         _preflight_kernel_argument(device, kernel, argument)
     end
-    if _use_factor_batch_mis_path(device, bank, denominator, L, factor_execution)
+    if use_factor_batch
         _preflight_kernel_argument(device, _factor_batch_mis_draw_target_kernel!(backend), evaluator)
     end
     return nothing

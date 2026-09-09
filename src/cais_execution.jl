@@ -376,7 +376,7 @@ function _preflight_accelerator_method(
             bank,
             views.assignments,
             denominator,
-            workspace.solve_scratch,
+            _fused_mis_solve_scratch(workspace.solve_scratch, backend),
         )
             _preflight_kernel_argument(device, round_kernel, argument)
         end

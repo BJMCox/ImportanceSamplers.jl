@@ -96,6 +96,20 @@ end
 
 struct _NoMISSolveScratch end
 
+@inline function _fused_mis_solve_scratch(
+    solve_scratch,
+    backend,
+)
+    if !(solve_scratch isa AbstractMatrix) ||
+       backend isa KernelAbstractions.CPU
+        return solve_scratch
+    end
+
+    dimension, capacity = size(solve_scratch)
+    sample_major = reshape(solve_scratch, capacity, dimension)
+    return PermutedDimsArray(sample_major, (2, 1))
+end
+
 struct _MISAdaptationOutput{T,Q}
     logtargets::T
     generating_logdensities::Q
@@ -783,6 +797,10 @@ function _launch_mis_round!(
     execution,
 )
     backend = KernelAbstractions.get_backend(normal_buffer)
+    launch_scratch = _fused_mis_solve_scratch(
+        solve_scratch,
+        backend,
+    )
     kernel = _mis_round_launch_kernel!(backend)
     kernel(
         _mis_round_kernel_arguments(
@@ -794,7 +812,7 @@ function _launch_mis_round!(
             bank,
             assignments,
             denominator,
-            solve_scratch,
+            launch_scratch,
         )...;
         ndrange=length(output.logweights),
         workgroupsize=_native_workgroupsize(
@@ -819,6 +837,10 @@ function _launch_mis_round!(
     execution,
 )
     backend = KernelAbstractions.get_backend(normal_buffer)
+    launch_scratch = _fused_mis_solve_scratch(
+        solve_scratch,
+        backend,
+    )
     kernel = _gaussian_round_launch_kernel!(backend)
     kernel(
         samples,
@@ -834,7 +856,7 @@ function _launch_mis_round!(
         history,
         assignments,
         denominator,
-        solve_scratch;
+        launch_scratch;
         ndrange=length(output.logweights),
         workgroupsize=_native_workgroupsize(
             execution,

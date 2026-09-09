@@ -229,6 +229,15 @@ function _preflight_packed_static_mis_kernel_target(
         _preflight_kernel_argument(device, assignment_kernel, argument)
     end
 
+    use_factor_batch = _use_factor_batch_mis_path(
+        device,
+        bank,
+        method_state.design.denominator,
+        log_type,
+        factor_execution,
+    )
+    solve_scratch = use_factor_batch ? buffers.solve_scratch :
+                    _fused_mis_solve_scratch(buffers.solve_scratch, backend)
     sampling_kernel = _mis_round_launch_kernel!(backend)
     for argument in (
         samples,
@@ -240,18 +249,12 @@ function _preflight_packed_static_mis_kernel_target(
         bank,
         buffers.assignments,
         method_state.design.denominator,
-        buffers.solve_scratch,
+        solve_scratch,
         nothing,
     )
         _preflight_kernel_argument(device, sampling_kernel, argument)
     end
-    if _use_factor_batch_mis_path(
-        device,
-        bank,
-        method_state.design.denominator,
-        log_type,
-        factor_execution,
-    )
+    if use_factor_batch
         batch_kernel = _factor_batch_mis_draw_target_kernel!(backend)
         _preflight_kernel_argument(device, batch_kernel, target_argument)
     end

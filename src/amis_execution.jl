@@ -81,6 +81,10 @@ function _launch_append_logmixture!(
     execution,
 )
     backend = KernelAbstractions.get_backend(lognumerators)
+    launch_scratch = _fused_mis_solve_scratch(
+        solve_scratch,
+        backend,
+    )
     kernel = _append_logmixture_kernel!(backend)
     kernel(
         lognumerators,
@@ -89,7 +93,7 @@ function _launch_append_logmixture!(
         slot,
         logcounts,
         failure_storage,
-        solve_scratch;
+        launch_scratch;
         ndrange=length(lognumerators),
         workgroupsize=_native_workgroupsize(
             execution,
@@ -383,6 +387,10 @@ function _preflight_amis_kernels(
         method_state.logcounts,
         representative_round,
     )
+    use_factor_batch = history isa _GaussianFactorHistory &&
+                       _use_factor_batch_path(device, history, factor_execution)
+    solve_scratch = use_factor_batch ? workspace.centered_scaled :
+                    _fused_mis_solve_scratch(workspace.centered_scaled, backend)
 
     round_kernel = _gaussian_round_launch_kernel!(backend)
     for argument in (
@@ -399,7 +407,7 @@ function _preflight_amis_kernels(
         history,
         assignments,
         denominator,
-        workspace.centered_scaled,
+        solve_scratch,
     )
         _preflight_kernel_argument(device, round_kernel, argument)
     end
@@ -414,7 +422,7 @@ function _preflight_amis_kernels(
         representative_round,
         method_state.logcounts,
         buffers.failure_scratch.record.storage,
-        workspace.centered_scaled,
+        solve_scratch,
     )
         _preflight_kernel_argument(device, append_kernel, argument)
     end
@@ -432,8 +440,7 @@ function _preflight_amis_kernels(
         _preflight_kernel_argument(device, weight_kernel, argument)
     end
 
-    if history isa _GaussianFactorHistory &&
-       _use_factor_batch_path(device, history, factor_execution)
+    if use_factor_batch
         target_kernel = _gaussian_batch_target_kernel!(backend)
         for argument in (
             view(workspace.logtargets, new_indices),
