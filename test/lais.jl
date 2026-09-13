@@ -3,6 +3,153 @@ import Random, LinearAlgebra, Statistics
 
 include("support/lais.jl")
 
+@testset "Sample Metropolis-Hastings follows the ordered population recurrence" begin
+    logtarget(x) = -abs2(x - 0.5) / 3
+    logproposal(x) = lais_scalar_gaussian_logdensity(x, 0.5, 1.5)
+    candidates = [0.5, 2.0, -1.0, 3.5, -2.5, 1.25]
+    selection = [0.2, 0.8, 0.55, 0.9, 0.15, 0.6]
+    acceptance = [0.3, 0.95, 0.4, 0.2, 0.8, 0.1]
+    oracle = lais_smh_oracle(
+        [-2.0, 2.0], candidates, selection, acceptance, logtarget, logproposal)
+    @test oracle.history[3] == [0.5, -1.0]
+    @test oracle.centres == [0.5, 1.25]
+
+    bank = ProposalBank([
+        SphericalGaussian(-2.0, 0.75),
+        SphericalGaussian(2.0, 1.25),
+    ])
+    candidate_normals = (candidates .- 0.5) ./ 1.5
+    rng = LAISScriptedRNG(
+        [candidate_normals[1:3], zeros(2), candidate_normals[4:6], zeros(2)],
+        [permutedims(hcat(selection[1:3], acceptance[1:3])),
+         permutedims(hcat(selection[4:6], acceptance[4:6]))],
+        1, 1,
+    )
+    sampler = prepare_sampler(rng, logtarget,
+        LAIS(bank;
+            transition=SampleMetropolisHastings(
+                SphericalGaussian(0.5, 1.5); moves=3),
+            rounds=2, round_size=2))
+    result = importance_sample!(sampler)
+
+    expected_samples = [oracle.history[3]; oracle.history[6]]
+    expected_centres = oracle.centres
+    expected_logweights = map(1:4) do index
+        round_centres = index <= 2 ? oracle.history[3] : oracle.history[6]
+        x = expected_samples[index]
+        left = exp(lais_scalar_gaussian_logdensity(x, round_centres[1], 0.75))
+        right = exp(lais_scalar_gaussian_logdensity(x, round_centres[2], 1.25))
+        logtarget(x) - log((left + right) / 2)
+    end
+    @test result.samples ≈ expected_samples
+    @test result.logweights ≈ expected_logweights
+    @test [proposal.location for proposal in current_proposal(sampler).proposals] ≈
+          expected_centres
+    @test result.diagnostics.transition == (
+        initial_target_evaluations=2, warmup_target_evaluations=0,
+        production_target_evaluations=6, warmup_proposals=0,
+        production_proposals=6, accepted=oracle.accepted)
+    @test (rng.ni, rng.ui) == (5, 3)
+end
+
+@testset "Sample Metropolis-Hastings reduces to independence MH at one centre" begin
+    base_target(x) = x <= 0 ? -abs2(x) / 4 : -Inf
+    shifted_target(x) = base_target(x) == -Inf ? -Inf : base_target(x) + 1000
+    results = map((base_target, shifted_target)) do target
+        rng = LAISScriptedRNG([[1.0, 0.0], [0.0]],
+            [Float64[0.3 0.1; 0.7 0.5]], 1, 1)
+        sampler = prepare_sampler(rng, target,
+            LAIS(ProposalBank([SphericalGaussian(-1.0, 0.5)]);
+                transition=SampleMetropolisHastings(
+                    SphericalGaussian(0.0, 1.0); moves=2),
+                rounds=1, round_size=1); threaded=false)
+        result = importance_sample!(sampler)
+        return (; result, centre=only(current_proposal(sampler).proposals).location)
+    end
+    @test results[1].result.samples == results[2].result.samples == [0.0]
+    @test results[1].centre == results[2].centre == 0.0
+    @test results[2].result.logweights .- results[1].result.logweights ≈ [1000.0]
+    @test results[1].result.diagnostics.transition ==
+          results[2].result.diagnostics.transition == (
+              initial_target_evaluations=1, warmup_target_evaluations=0,
+              production_target_evaluations=2, warmup_proposals=0,
+              production_proposals=2, accepted=1)
+end
+
+@testset "Sample Metropolis-Hastings keeps extreme selection and acceptance in log scale" begin
+    logproposal(x) = lais_scalar_gaussian_logdensity(x, 0.0, 1.0)
+    logratio(x) = x == -1 ? -1000.0 : x == 1 ? log(4.0) - 1000.0 : 1000.0
+    logtarget(x) = logproposal(x) - logratio(x)
+    rng = LAISScriptedRNG([[3.0], zeros(2)], [Float64[0.1; 0.0;;]], 1, 1)
+    sampler = prepare_sampler(rng, logtarget,
+        LAIS(ProposalBank([
+                SphericalGaussian(-1.0, 1.0), SphericalGaussian(1.0, 1.0)]);
+            transition=SampleMetropolisHastings(
+                SphericalGaussian(0.0, 1.0)), rounds=1, round_size=2))
+    result = importance_sample!(sampler)
+    @test result.samples == [3.0, 1.0]
+    @test [proposal.location for proposal in current_proposal(sampler).proposals] == [3.0, 1.0]
+end
+
+@testset "Sample Metropolis-Hastings supports native Student-t candidates" begin
+    rng = LAISScriptedRNG([[1.0f0, 2.0f0], [0.0f0]],
+        [Float32[0.4; 0.9;;]], 1, 1)
+    sampler = prepare_sampler(rng, Returns(0.0f0),
+        LAIS(ProposalBank([SphericalGaussian(0.0f0, 1.0f0)]);
+            transition=SampleMetropolisHastings(
+                SphericalStudentT(1.0f0, 0.0f0, 1.0f0)),
+            rounds=1, round_size=1))
+    result = importance_sample!(sampler)
+    @test result.samples == [0.5f0]
+    @test only(current_proposal(sampler).proposals).location == 0.5f0
+end
+
+@testset "Sample Metropolis-Hastings reuse and retarget recover after failure" begin
+    armed = Ref(false)
+    target = x -> armed[] && x > 2.2 ? error("scripted SMH target failure") : 0.0
+    rng = LAISScriptedRNG(
+        [[0.5, 1.0], zeros(2), [2.0, 2.5], [-0.5, -1.0], zeros(2)],
+        [Float64[0.1 0.9; 0.0 0.0], Float64[0.1 0.9; 0.0 0.0],
+         Float64[0.1 0.9; 0.0 0.0]], 1, 1)
+    algorithm = LAIS(ProposalBank([
+            SphericalGaussian(-2.0, 1.0), SphericalGaussian(2.0, 1.0)]);
+        transition=SampleMetropolisHastings(
+            SphericalGaussian(0.0, 1.0); moves=2), rounds=1, round_size=2)
+    sampler = prepare_sampler(rng, target, algorithm)
+
+    first = importance_sample!(sampler)
+    @test [proposal.location for proposal in current_proposal(sampler).proposals] == [0.5, 1.0]
+    @test first.diagnostics.transition == (
+        initial_target_evaluations=2, warmup_target_evaluations=0,
+        production_target_evaluations=2, warmup_proposals=0,
+        production_proposals=2, accepted=2)
+
+    armed[] = true
+    failure = try
+        importance_sample!(sampler)
+        nothing
+    catch error
+        error
+    end
+    @test failure isa LAISRoundError && failure.round == 1
+    @test [proposal.location for proposal in current_proposal(sampler).proposals] == [0.5, 1.0]
+
+    armed[] = false
+    retried = importance_sample!(sampler)
+    @test [proposal.location for proposal in current_proposal(sampler).proposals] == [-0.5, -1.0]
+    @test retried.diagnostics.transition == (
+        initial_target_evaluations=0, warmup_target_evaluations=0,
+        production_target_evaluations=2, warmup_proposals=0,
+        production_proposals=2, accepted=2)
+
+    retarget_rng = LAISScriptedRNG([[0.0, 0.25], zeros(2)],
+        [Float64[0.2 0.8; 0.0 0.0]], 1, 1)
+    retargeted = retarget(retarget_rng, sampler, x -> -abs2(x) / 10)
+    retargeted_result = importance_sample!(retargeted)
+    @test retargeted_result.diagnostics.transition.initial_target_evaluations == 2
+    @test [proposal.location for proposal in current_proposal(sampler).proposals] == [-0.5, -1.0]
+end
+
 @testset "LAIS correlated upper moves allow one lower draw per proposal" begin
     factor = [1.0 0.0; 0.2 0.8]
     bank = ProposalBank([

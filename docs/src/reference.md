@@ -9,6 +9,7 @@ AMIS
 APIS
 LAIS
 AbstractMCMCTransition
+SampleMetropolisHastings
 RandomWalkMetropolis
 RAM
 WarmupTuning
