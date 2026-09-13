@@ -123,6 +123,12 @@ perform Student-t maximum-likelihood fitting, or change a method's weighting rul
 Device execution has no per-sample host reads. Student-t banks use separate
 resident radial buffers; Gaussian banks allocate none.
 
+The runnable [adaptive Student-t example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/adaptive_student_t.jl)
+uses LAIS on a curved target, converts a desired covariance factor to Student-t
+scale, and computes weighted expectations with analytic reference values.
+It also shows explicit prepared-sampler CUDA transfer. Broader tails can protect
+against extreme importance ratios, but do not guarantee better accuracy per second.
+
 The [CUDA reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_student_t.jl)
 checks fractional, Cauchy, factor, and transformed proposals on an A100.
 

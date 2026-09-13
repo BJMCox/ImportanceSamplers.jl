@@ -1,8 +1,8 @@
 # ImportanceSamplers.jl
 
-`ImportanceSamplers.jl` provides explicit plain importance sampling for Julia.
-It supports ordinary normalized proposals on CPU, and the documented native
-Gaussian and transform subset on CPU and CUDA. The package keeps estimator
+`ImportanceSamplers.jl` provides plain, multiple, and adaptive importance sampling
+for Julia. It supports ordinary normalized proposals on CPU, and documented
+native Gaussian, Student-t, and transform paths on CPU and CUDA. The package keeps estimator
 inputs, device placement, and raw log weights visible.
 
 ## Installation
@@ -60,11 +60,12 @@ target returns a `Float32` or `Float64` log density; the sampler never applies
   proposal banks, the four complete MIS schemes, provenance, and support and
   device contracts.
 - [Adaptive multiple importance sampling](docs/src/methods/amis.md) explains
-  retrospective temporal-mixture weights and learned Gaussian state.
+  retrospective temporal-mixture weights and learned Gaussian or Student-t state.
 - [Adaptive population importance sampling](docs/src/methods/apis.md) explains
   epoch-local deterministic-mixture weights and proposal-local mean updates.
 - [Layered importance sampling](docs/src/methods/lais.md) explains upper RWM/RAM
-  chains and lower importance samples with fixed covariance factors.
+  chains, interacting Sample Metropolis-Hastings, and lower importance samples
+  with fixed scale factors.
 - [Canonical covariance-adaptive importance sampling](docs/src/methods/cais.md)
   explains raw generating-proposal weights, ESS-tempered covariance fitting,
   and retained full-covariance state.
@@ -106,6 +107,9 @@ The concise end-to-end workflow is
 [`examples/static_mis.jl`](examples/static_mis.jl).
 The teaching [`examples/apis.jl`](examples/apis.jl) demonstrates fixed-scale
 population adaptation and retained learned state.
+[`examples/adaptive_student_t.jl`](examples/adaptive_student_t.jl) uses a
+Student-t population on a curved target. It explains covariance versus scale,
+weighted functional estimates, and optional explicit CUDA transfer.
 The runnable
 [`logistic_regression.jl`](examples/logistic_regression.jl) example performs
 end-to-end Bayesian inference for an intercept and two regression slopes. It

@@ -52,9 +52,11 @@ host_result = result |> cpu_device()
 
 ## Factor execution policy
 
-Factor Gaussians use fused sample kernels by default on CPU. Accelerators use
-batched matrix multiplication and triangular solves when their extension
-supports that path. This backend rule uses no hardware or sample-count cutoff.
+Supported factor paths use fused sample kernels by default on CPU. Accelerators
+use batched matrix multiplication and triangular solves when their extension
+supports that path. This includes native Gaussian factors and homogeneous
+Gaussian or Student-t banks and adaptive histories. Plain single-proposal
+Student-t IS remains fused. This backend rule uses no hardware or sample-count cutoff.
 
 Override the default explicitly when benchmarking another path:
 
@@ -78,10 +80,13 @@ remains part of the prepared sampler during device transfer. Use
 `FusedFactorExecution()` to force fusion or `BatchedFactorExecution()` to force
 batching where supported.
 
-The batch path requires a factor Gaussian, matching scalar storage, and CPU or
-CUDA support. Base IS also requires no sample transform. Static MIS requires a
-full-mixture denominator, as used by stratified and random-mixture MIS. Other
-cases use the fused path without changing the estimator.
+The default batch path requires matching native factor/log-weight precision and
+CPU or CUDA support. Explicit `BatchedFactorExecution()` also permits supported
+native MIS paths with wider log weights, using separate denominator storage.
+Base IS requires a Gaussian factor and no sample transform. Packed static MIS
+and adaptive paths also support Student-t factors. Static MIS requires a
+full-mixture denominator, as used by stratified and random-mixture MIS.
+Unsupported cases use the fused path without changing the estimator.
 
 Benchmark both policies on the target device because the crossover depends on
 the factor dimension, backend, scalar type, and hardware. The result records

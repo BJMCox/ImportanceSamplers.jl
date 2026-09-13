@@ -47,18 +47,20 @@ target and algorithm arguments. The proposal alone determines sample shape.
 |:--|:--|:--|:--|:--|:--|
 | Plain IS | one normalized proposal | nothing | generating proposal | `nsamples` | CPU; documented native subset on CUDA |
 | Static MIS | fixed proposal bank | nothing | selected spatial or generating-proposal scheme | `nsamples` | CPU; documented native subset on CUDA |
-| AMIS | one native Gaussian | mean and covariance | all-history temporal mixture | `round_size` | CPU and native Gaussian CUDA |
-| APIS | native Gaussian bank | means | current population mixture | `round_size` | CPU and native Gaussian CUDA |
-| LAIS | equal-mass native Gaussian bank | centres by independent or interacting upper MCMC; optional upper covariance tuning | equal current population mixture | divisible `round_size` | CPU and native Gaussian CUDA |
-| CAIS | native Gaussian bank | means and covariances | generating proposal | `round_size` | CPU and native Gaussian CUDA |
-| N-PMC | one native Gaussian | mean and covariance from clipped adaptation weights | generating proposal | `round_size` | CPU and native Gaussian CUDA |
+| AMIS | one native Gaussian or Student-t | mean and covariance | all-history temporal mixture | `round_size` | CPU and documented native CUDA paths |
+| APIS | native Gaussian or Student-t bank | means | current population mixture | `round_size` | CPU and documented native CUDA paths |
+| LAIS | equal-mass native Gaussian or Student-t bank | centres by independent or interacting upper MCMC; optional upper covariance tuning | equal current population mixture | divisible `round_size` | CPU and documented native CUDA paths |
+| CAIS | native Gaussian or Student-t bank | means and covariances | generating proposal | `round_size` | CPU and documented native CUDA paths |
+| N-PMC | one native Gaussian or Student-t | mean and covariance from clipped adaptation weights | generating proposal | `round_size` | CPU and documented native CUDA paths |
 | DM-PMC | proposal bank | locations by resampling | realized current population mixture | `round_size` | CPU; documented native subset on CUDA |
 | GR-PMC | equal-mass proposal bank | locations by global resampling | equal current population mixture | divisible `round_size` | CPU; documented native subset on CUDA |
 | LR-PMC | equal-mass proposal bank | locations by local resampling | equal current population mixture | divisible `round_size` | CPU; documented native subset on CUDA |
-| First-order GRAMIS-CAIS | native Gaussian bank | means by gradient/repulsion; local covariances | realized current population mixture | `round_size` | CPU and native Gaussian CUDA |
+| First-order GRAMIS-CAIS | native Gaussian or Student-t bank | means by gradient/repulsion; local covariances | realized current population mixture | `round_size` | CPU and documented native CUDA paths |
 
 Use the linked method guide for its support, allocation, adaptation, and failure
 contract; the table is only a starting point.
+Packed banks use one radial family. Student-t degrees of freedom stay fixed;
+covariance-fitting methods require `nu > 2`. See [Native proposals](@ref).
 
 ## Where next
 
@@ -67,11 +69,11 @@ contract; the table is only a starting point.
 - [Static multiple importance sampling](@ref) covers proposal banks, all four
   complete assignment/denominator schemes, provenance, and CPU/CUDA limits.
 - [Adaptive multiple importance sampling](@ref) covers retrospective temporal
-  mixtures and learned Gaussian state.
+  mixtures and learned Gaussian or Student-t state.
 - [Adaptive population importance sampling](@ref) covers epoch-local spatial
-  mixtures, proposal-local mean fits, and retained fixed-covariance state.
+  mixtures, proposal-local mean fits, and retained fixed-scale state.
 - [Layered importance sampling](@ref) covers upper RWM/RAM chains, interacting
-  Sample Metropolis-Hastings, fixed lower covariances, and all-round
+  Sample Metropolis-Hastings, fixed lower scales, and all-round
   deterministic-mixture weights.
 - [Canonical covariance-adaptive importance sampling](@ref) covers standard
   generating-proposal weights, raw mean fits, and robust covariance replacement.
@@ -82,7 +84,7 @@ contract; the table is only a starting point.
   limits.
 - [First-order GRAMIS-CAIS](@ref) covers gradient moves, robust local covariance
   fitting, repulsion, causal rounds, and CPU/CUDA limits.
-- [Native proposals](@ref) explains the Gaussian scale and factor contracts.
+- [Native proposals](@ref) explains Gaussian and Student-t scale/factor contracts.
 - [Transforms](@ref) covers constrained and structured parameters, including
   the simplex reference measure.
 - [Accelerators](@ref) gives the complete CUDA example, transfer boundary,

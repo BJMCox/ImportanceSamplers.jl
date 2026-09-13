@@ -116,5 +116,5 @@ load. Use BenchmarkTools and synchronize GPU work inside the timed boundary.
 Report repeated ranges. A single-seed concentration ESS is not a general claim
 about estimator accuracy or cross-device ESS per second.
 
-BAT/Wren extensions are deferred until the core feature set is complete.
+BAT/Wren adapters are deferred until registration and will live in those host packages.
 No BAT, Wren, Enzyme, or Reactant integration claim follows from these checks.
