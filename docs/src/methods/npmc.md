@@ -1,6 +1,6 @@
 # Nonlinear population Monte Carlo
 
-[`NPMC`](@ref) learns a Gaussian proposal from clipped importance weights.
+[`NPMC`](@ref) learns a native Gaussian or Student-t proposal from clipped importance weights.
 Clipping limits the influence of a few large weights on proposal adaptation.
 Returned samples keep their original importance weights for estimation.
 
@@ -24,8 +24,11 @@ estimate = mean(samples)
 learned = current_proposal(prepared)
 ```
 
-Scalar Gaussian proposals retain scalar samples. Vector spherical, diagonal,
-and factor Gaussian proposals learn a full covariance, including correlations.
+Scalar proposals retain scalar samples. Vector spherical, diagonal, and factor
+proposals learn a full covariance, including correlations. Student-t fits require
+`nu > 2`, preserve `nu`, and convert the clipped-weight covariance to Student-t
+scale. This extends the existing N-PMC update, not Student-t maximum-likelihood
+fitting. See [Native proposals](@ref).
 Native `Float32` and `Float64` are supported. Loading Distributions.jl also
 allows `Normal` and conventional `MvNormal` inputs through native conversion.
 
@@ -40,7 +43,7 @@ c=\text{the }k\text{-th largest }\ell_i.
 ```
 
 Normalize ``\exp(\min(\ell_i,c))`` with a stable shift. Use these clipped weights
-to fit the next Gaussian's mean and covariance from **this round only**.
+to fit the next proposal's mean and covariance from **this round only**.
 Apply a scale-relative covariance ridge and a Cholesky factorization.
 The returned `samples.logweights` contain the unchanged ``\ell_i``.
 No resampling or temporal-mixture denominator is used.
@@ -89,7 +92,7 @@ host_proposal = current_proposal(cpu_device(), prepared)
 ```
 
 The target must compile for the selected device. Samples, weights, clipping
-scratch, and Gaussian fitting buffers remain resident during each round.
+scratch, and moment-fitting buffers remain resident during each round.
 Small round summaries return to the host. Clipping needs an order statistic,
 which can cost more than target evaluation for cheap targets.
 CPU execution uses Julia's default thread pool unless `threaded=false`.

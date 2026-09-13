@@ -1,7 +1,7 @@
 # First-order GRAMIS-CAIS
 
 [`FirstOrderGRAMIS`](@ref) implements a causal first-order GRAMIS-CAIS hybrid
-for a fixed population of native Gaussian proposals. Its mean move follows
+for a fixed population of native Gaussian or Student-t proposals. Its mean move follows
 [GRAMIS](https://arxiv.org/abs/2210.10785); its local covariance fit uses the
 ESS-conditioned weighting idea from
 [CAIS](https://arxiv.org/abs/1806.00093). The package deliberately differs from
@@ -127,7 +127,13 @@ paths, and hardware label.
 Main.FIRST_ORDER_GRAMIS_CAPABILITY_TABLE
 ```
 
-These rows use an equal-mass factor-Gaussian population. The complete initial
+Student-t populations require `nu > 2` and retain each component's `nu`.
+Gradient preconditioning, pooled repulsion, covariance blending, and ridge
+regularization use actual covariance, not Student-t scale. Fitted covariance
+factors convert to Student-t scale only before publication. Mixed radial families
+are not supported. See [Native proposals](@ref).
+
+These reference rows use an equal-mass factor-Gaussian population. The complete initial
 population contract requires at least two proposals with equal positive masses,
 pairwise-distinct means, a common dimension and `Float32` or `Float64` scalar
 type, and at least ``d+2`` draws per proposal per round. Spherical, diagonal,

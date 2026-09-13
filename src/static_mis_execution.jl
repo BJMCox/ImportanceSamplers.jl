@@ -2,8 +2,8 @@ function _allocate_random_buffers(
     ::MLDataDevices.AbstractCPUDevice,
     ::ProposalBank,
     method_state::_PreparedStaticMIS{<:Union{
-        _PackedDiagonalGaussianBank,
-        _PackedFactorGaussianBank,
+        _PackedDiagonalBank,
+        _PackedFactorBank,
     }},
     nsamples,
 )
@@ -19,8 +19,8 @@ function _copy_accelerator_algorithm(
     device,
     algorithm::ImportanceSampling{<:ProposalBank},
     ::_PreparedStaticMIS{<:Union{
-        _PackedDiagonalGaussianBank,
-        _PackedFactorGaussianBank,
+        _PackedDiagonalBank,
+        _PackedFactorBank,
     }},
 )
     return deepcopy(algorithm)
@@ -28,8 +28,8 @@ end
 
 _accelerator_method_state_limit(
     ::_PreparedStaticMIS{<:Union{
-        _PackedDiagonalGaussianBank,
-        _PackedFactorGaussianBank,
+        _PackedDiagonalBank,
+        _PackedFactorBank,
     }},
 ) = nothing
 
@@ -37,12 +37,12 @@ function _prepare_transferred_method_state(
     device,
     algorithm,
     method_state::_PreparedStaticMIS{<:Union{
-        _PackedDiagonalGaussianBank,
-        _PackedFactorGaussianBank,
+        _PackedDiagonalBank,
+        _PackedFactorBank,
     }},
     _transferred_target,
 )
-    transferred_bank = _copy_packed_gaussian_bank(device, method_state.bank)
+    transferred_bank = _copy_packed_bank(device, method_state.bank)
     design = method_state.design
     transferred_design = _PreparedMISDesign(
         design.assignment,
@@ -68,8 +68,8 @@ end
 _transferred_backend_state(
     algorithm,
     method_state::_PreparedStaticMIS{<:Union{
-        _PackedDiagonalGaussianBank,
-        _PackedFactorGaussianBank,
+        _PackedDiagonalBank,
+        _PackedFactorBank,
     }},
     target,
     random_buffers,
@@ -78,8 +78,8 @@ _transferred_backend_state(
 _prepared_backend_state(
     sampler,
     method_state::_PreparedStaticMIS{<:Union{
-        _PackedDiagonalGaussianBank,
-        _PackedFactorGaussianBank,
+        _PackedDiagonalBank,
+        _PackedFactorBank,
     }},
 ) = (
     method_state,
@@ -93,8 +93,8 @@ function _preflight_accelerator_method(
     target,
     algorithm,
     method_state::_PreparedStaticMIS{<:Union{
-        _PackedDiagonalGaussianBank,
-        _PackedFactorGaussianBank,
+        _PackedDiagonalBank,
+        _PackedFactorBank,
     }},
     random_buffers,
     factor_execution,
@@ -112,8 +112,8 @@ function _allocate_random_buffers(
     device::MLDataDevices.AbstractAcceleratorDevice,
     ::ProposalBank,
     method_state::_PreparedStaticMIS{<:Union{
-        _PackedDiagonalGaussianBank,
-        _PackedFactorGaussianBank,
+        _PackedDiagonalBank,
+        _PackedFactorBank,
     }},
     nsamples,
 )
@@ -124,7 +124,7 @@ end
 
 function _allocate_packed_static_mis_random_buffers(
     prototype,
-    bank::Union{_PackedDiagonalGaussianBank,_PackedFactorGaussianBank},
+    bank::Union{_PackedDiagonalBank,_PackedFactorBank},
     nsamples,
 )
     uniform = similar(prototype, eltype(bank.cdf), nsamples)
@@ -142,6 +142,7 @@ function _allocate_packed_static_mis_random_buffers(
         assignments,
         solve_scratch,
         failure_scratch,
+        _allocate_radial_buffers(prototype, bank.family, nsamples),
     )
 end
 
@@ -163,7 +164,7 @@ end
 
 function _allocate_packed_static_mis_samples(
     prototype,
-    bank::_PackedDiagonalGaussianBank{L,S,N,M,C,I,<:_ScalarGaussianLayout},
+    bank::_PackedDiagonalBank{L,S,N,M,C,I,<:_ScalarGaussianLayout},
     nsamples,
 ) where {L,S,N,M,C,I}
     return similar(prototype, eltype(bank.locations), nsamples)
@@ -171,7 +172,7 @@ end
 
 function _allocate_packed_static_mis_samples(
     prototype,
-    bank::_PackedFactorGaussianBank,
+    bank::_PackedFactorBank,
     nsamples,
 )
     return similar(
@@ -184,7 +185,7 @@ end
 
 function _allocate_packed_static_mis_samples(
     prototype,
-    bank::_PackedDiagonalGaussianBank{L,S,N,M,C,I,<:_VectorGaussianLayout},
+    bank::_PackedDiagonalBank{L,S,N,M,C,I,<:_VectorGaussianLayout},
     nsamples,
 ) where {L,S,N,M,C,I}
     return similar(
@@ -199,8 +200,8 @@ function _preflight_packed_static_mis_kernel_target(
     device,
     target,
     method_state::_PreparedStaticMIS{<:Union{
-        _PackedDiagonalGaussianBank,
-        _PackedFactorGaussianBank,
+        _PackedDiagonalBank,
+        _PackedFactorBank,
     }},
     buffers::_PackedStaticMISRandomBuffers,
     factor_execution,
@@ -296,6 +297,8 @@ function _launch_packed_static_mis!(
     )
     KernelAbstractions.synchronize(backend)
 
+    _prepare_mis_normals!(buffers.normal, buffers.radial, method_state.bank,
+        buffers.assignments, buffers.failure_scratch.record.storage, execution)
     launch = _use_factor_batch_mis_path(
         device,
         method_state.bank,
@@ -321,8 +324,8 @@ end
 function _importance_sample_cpu!(
     sampler,
     method_state::_PreparedStaticMIS{<:Union{
-        _PackedDiagonalGaussianBank,
-        _PackedFactorGaussianBank,
+        _PackedDiagonalBank,
+        _PackedFactorBank,
     }},
     threaded,
 )

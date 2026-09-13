@@ -365,7 +365,7 @@ end
         ::Main.AMISExecutionTestAccelerator,
         target,
         algorithm::AMIS,
-        method_state::_PreparedAdaptiveGaussian,
+        method_state::_PreparedMomentSampler,
         random_buffers::_RandomBuffers,
         factor_execution,
     ) = nothing
@@ -1088,7 +1088,7 @@ end
     packed = getfield(method_state, :bank)
     denominator = getfield(getfield(method_state, :design), :denominator)
     buffers = getfield(destination, :random_buffers)
-    @test packed isa IS._PackedDiagonalGaussianBank
+    @test packed isa IS._PackedDiagonalBank
     @test all(
         array -> array isa KernelArgumentTestArray,
         (
@@ -1210,7 +1210,7 @@ end
     factor_state = getfield(factor_destination, :method_state)
     factor_packed = getfield(factor_state, :bank)
     factor_buffers = getfield(factor_destination, :random_buffers)
-    @test factor_packed isa IS._PackedFactorGaussianBank
+    @test factor_packed isa IS._PackedFactorBank
     @test all(
         array -> array isa KernelArgumentTestArray,
         (
@@ -1298,12 +1298,12 @@ end
         @test run_bank.logmasses === bank.logmasses
         @test run_bank.cdf === bank.cdf
         @test run_bank.proposal_ids === bank.proposal_ids
-        if bank isa IS._PackedDiagonalGaussianBank
+        if bank isa IS._PackedDiagonalBank
             @test run_bank.scales === bank.scales
         else
             @test run_bank.factors === bank.factors
         end
-        bank_scale = bank isa IS._PackedDiagonalGaussianBank ? bank.scales : bank.factors
+        bank_scale = bank isa IS._PackedDiagonalBank ? bank.scales : bank.factors
         solve_scratch = workspace.solve_scratch
         arrays = (
             bank.locations,
@@ -1326,7 +1326,7 @@ end
             buffers.failure_scratch.record.storage,
         )
         @test all(array -> array isa KernelArgumentTestArray, arrays)
-        if bank isa IS._PackedFactorGaussianBank
+        if bank isa IS._PackedFactorBank
             @test solve_scratch isa KernelArgumentTestArray
         else
             @test solve_scratch isa IS._NoMISSolveScratch
@@ -1377,8 +1377,8 @@ end
 
     destinations = Dict{Symbol,Any}()
     for (label, seed, bank, bank_type) in (
-        (:diagonal, 0x2222, diagonal_bank, IS._PackedDiagonalGaussianBank),
-        (:factor, 0x2223, factor_bank, IS._PackedFactorGaussianBank),
+        (:diagonal, 0x2222, diagonal_bank, IS._PackedDiagonalBank),
+        (:factor, 0x2223, factor_bank, IS._PackedFactorBank),
     )
         algorithm = DeterministicMixturePMC(
             bank;
@@ -1542,11 +1542,11 @@ end
     end
 
     for (seed, proposal, history_type) in (
-        (0x2226, SphericalGaussian(0.0, 1.0), IS._GaussianScalarHistory),
+        (0x2226, SphericalGaussian(0.0, 1.0), IS._ScalarProposalHistory),
         (
             0x2227,
             FactorGaussian([0.0, 0.0], [1.0 0.0; 0.25 0.75]),
-            IS._GaussianFactorHistory,
+            IS._FactorProposalHistory,
         ),
     )
         empty!(KERNEL_ARGUMENT_TEST_ARGUMENTS)
@@ -1558,7 +1558,7 @@ end
         history = state.history
         workspace = state.workspace
         buffers = destination.random_buffers
-        scale_storage = history isa IS._GaussianScalarHistory ?
+        scale_storage = history isa IS._ScalarProposalHistory ?
                         history.scales : history.factors
         @test history isa history_type
         @test all(
@@ -1673,12 +1673,12 @@ end
                 buffers.failure_scratch.record.storage,
             ),
         )
-        if history isa IS._GaussianScalarHistory
+        if history isa IS._ScalarProposalHistory
             ridge_kernel = IS._add_gaussian_scalar_ridge_kernel!(backend)
             finish_kernel = IS._finish_gaussian_scalar_candidate_kernel!(backend)
             expect_preflight!(
                 ridge_kernel,
-                (workspace.covariance, history.scales, representative_round),
+                (workspace.covariance, history.scales, history.family, representative_round),
             )
             expect_preflight!(
                 finish_kernel,
@@ -1688,6 +1688,7 @@ end
                     workspace.covariance,
                     buffers.failure_scratch.record.storage,
                     last_sample + 1,
+                    history.family,
                 ),
             )
         else
@@ -1698,6 +1699,7 @@ end
                 (
                     workspace.covariance,
                     history.factors,
+                    history.family,
                     representative_round,
                 ),
             )
@@ -1709,11 +1711,12 @@ end
                     workspace.candidate_lognormalizer,
                     buffers.failure_scratch.record.storage,
                     last_sample + 1,
+                    history.family,
                 ),
             )
         end
         @test KERNEL_ARGUMENT_TEST_ARGUMENTS == expected_preflight
-        if history isa IS._GaussianFactorHistory
+        if history isa IS._FactorProposalHistory
             empty!(KERNEL_ARGUMENT_TEST_ARGUMENTS)
             KERNEL_ARGUMENT_TEST_FACTOR_BATCH_SUPPORTED[] = true
             try
@@ -1752,10 +1755,10 @@ end
         snapshot = @inferred current_proposal(preserving, destination)
         @test KERNEL_ARGUMENT_TEST_CURRENT[] === :caller
         @test KERNEL_ARGUMENT_TEST_CPU_COPIES[] == 2
-        expected_elements = history isa IS._GaussianScalarHistory ? 2 : 6
+        expected_elements = history isa IS._ScalarProposalHistory ? 2 : 6
         @test KERNEL_ARGUMENT_TEST_CPU_ELEMENTS[] == expected_elements
         @test snapshot.location == proposal.location
-        if history isa IS._GaussianScalarHistory
+        if history isa IS._ScalarProposalHistory
             @test snapshot.scale.scale == proposal.scale.scale
         else
             @test snapshot.scale.factor == proposal.scale.factor
@@ -1919,12 +1922,13 @@ end
     ))
     old_state = base.method_state
     old_history = old_state.history
-    history = IS._GaussianScalarHistory(
+    history = IS._ScalarProposalHistory(
         AMISPublicationSyncArray(old_history.means),
         old_history.scales,
         old_history.lognormalizers,
+        old_history.family,
     )
-    state = IS._PreparedAdaptiveGaussian(
+    state = IS._PreparedMomentSampler(
         old_state.schedule,
         old_state.offsets,
         old_state.logcounts,
@@ -1984,7 +1988,7 @@ end
 
     old_state = prepared.method_state
     old_workspace = old_state.workspace
-    workspace = IS._GaussianMomentWorkspace(
+    workspace = IS._MomentWorkspace(
         old_workspace.samples,
         old_workspace.logtargets,
         old_workspace.lognumerators,
@@ -1996,7 +2000,7 @@ end
         old_workspace.candidate_scale,
         old_workspace.candidate_lognormalizer,
     )
-    state = IS._PreparedAdaptiveGaussian(
+    state = IS._PreparedMomentSampler(
         old_state.schedule,
         old_state.offsets,
         old_state.logcounts,
@@ -2059,6 +2063,7 @@ end
         base_buffers.uniform,
         base_buffers.normal,
         failure_scratch,
+        base_buffers.radial,
     )
     rng = AMISExecutionPrefilledRNG(
         [T[-8, 0, 8], T[-0.25, 0.25, 0.5]],

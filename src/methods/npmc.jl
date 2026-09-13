@@ -2,10 +2,11 @@
     NPMC(proposal; rounds, round_size)
 
 Configure nonlinear population Monte Carlo with a native scalar or vector
-Gaussian proposal and a fixed round schedule, as accepted by [`AMIS`](@ref).
-Each round fits a full Gaussian to that round's samples using weights clipped
+Gaussian or Student-t proposal and a fixed round schedule, as accepted by [`AMIS`](@ref).
+Each round fits a full covariance to that round's samples using weights clipped
 at the `isqrt(n)`-th largest weight, where `n` is the round size. The fit adds
-the same scale-aware covariance ridge as AMIS.
+the same scale-aware covariance ridge as AMIS. Student-t fits require `nu > 2`,
+retain `nu`, and convert covariance to Student-t scale before publication.
 
 Returned samples retain their raw `logtarget - logproposal` weights and round
 provenance. This is the N-PMC adaptation variant, not the original paper's
@@ -15,7 +16,7 @@ transformed-weight estimator. `diagnostics.round_ess` and
 The final fitted proposal persists after a successful call. A failed call
 retains the last committed proposal and throws [`NPMCRoundError`](@ref).
 """
-struct NPMC{P,S} <: _AdaptiveGaussianSampler
+struct NPMC{P,S} <: _MomentAdaptiveSampler
     proposal::P
     rounds::Int
     round_size::S
@@ -23,7 +24,7 @@ struct NPMC{P,S} <: _AdaptiveGaussianSampler
     function NPMC(proposal; rounds, round_size)
         schedule = _validate_adaptive_schedule(rounds, round_size)
         prepared = _prepare_proposal_input(proposal)
-        _validate_adaptive_gaussian_proposal(prepared)
+        _validate_moment_proposal(prepared)
         return new{typeof(prepared),typeof(schedule)}(prepared, rounds, schedule)
     end
 end

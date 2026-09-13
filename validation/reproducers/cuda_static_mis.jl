@@ -188,7 +188,7 @@ function assert_resident(prepared, result)
     bank = getfield(method_state, :bank)
     design = getfield(method_state, :design)
     buffers = getfield(prepared, :random_buffers)
-    scale_storage = bank isa ImportanceSamplers._PackedFactorGaussianBank ?
+    scale_storage = bank isa ImportanceSamplers._PackedFactorBank ?
                     bank.factors : bank.scales
     arrays = Any[
         bank.locations,

@@ -117,8 +117,13 @@ end
 )
     dof = proposal.family.dof
     dimension = _gaussian_dimension(proposal.location)
+    return _student_t_radial_multiplier(dof, normals, uniforms,
+        offset + dimension, (slot - 1) * _native_uniform_stride(proposal))
+end
+
+@inline function _student_t_radial_multiplier(dof, normals, uniforms, offset, uniform_offset)
     if isone(dof)
-        denominator = abs(@inbounds normals[offset + dimension])
+        denominator = abs(@inbounds normals[offset])
         isfinite(denominator) && denominator > zero(dof) ||
             return zero(dof), _NATIVE_PROPOSAL_DRAW_EXHAUSTED
         return inv(denominator), UInt16(0)
@@ -127,9 +132,8 @@ end
     shape = dof / typeof(dof)(2)
     adjusted_shape = shape < one(shape) ? shape + one(shape) : shape
     gamma_offset, coefficient = _gamma_parameters(adjusted_shape)
-    uniform_offset = (slot - 1) * _native_uniform_stride(proposal)
     for attempt in 1:_STUDENT_T_GAMMA_ATTEMPTS
-        normal = @inbounds normals[offset + dimension + attempt - 1]
+        normal = @inbounds normals[offset + attempt - 1]
         uniform = @inbounds uniforms[uniform_offset + attempt]
         gamma, accepted = _gamma_candidate(gamma_offset, coefficient, normal, uniform)
         accepted || continue
@@ -146,6 +150,36 @@ end
         return sqrt(dof / (typeof(dof)(2) * gamma)), UInt16(0)
     end
     return zero(shape), _NATIVE_PROPOSAL_DRAW_EXHAUSTED
+end
+
+_prepare_mis_normals!(normals, ::Nothing, bank, assignments, failures, execution) = nothing
+
+@kernel function _scale_mis_normals_kernel!(normals, radial_normals, radial_uniforms,
+    family, assignments, failures, dimension)
+    sample = @index(Global, Linear)
+    dof = _radial_family_at(family, assignments[sample]).dof
+    multiplier, reason = _student_t_radial_multiplier(dof, radial_normals,
+        radial_uniforms, (sample - 1) * _radial_normal_stride(family) + 1,
+        (sample - 1) * _radial_uniform_stride(family))
+    if !iszero(reason)
+        _record_native_failure!(failures, sample, 0, reason)
+        multiplier = oftype(multiplier, NaN)
+    end
+    offset = (sample - 1) * dimension
+    for coordinate in 1:dimension
+        normals[offset + coordinate] *= multiplier
+    end
+end
+
+function _prepare_mis_normals!(normals, radial::NamedTuple, bank, assignments,
+    failures, execution)
+    backend = KernelAbstractions.get_backend(normals)
+    kernel = _scale_mis_normals_kernel!(backend)
+    kernel(normals, radial.normal, radial.uniform, bank.family, assignments,
+        failures, _mis_dimension(bank); ndrange=length(assignments),
+        workgroupsize=_native_workgroupsize(execution, length(assignments)))
+    KernelAbstractions.synchronize(backend)
+    return nothing
 end
 
 @inline function _native_gaussian_coordinate(
@@ -165,7 +199,7 @@ end
 end
 
 @inline function _native_gaussian_coordinate(
-    bank::_PackedDiagonalGaussianBank,
+    bank::_PackedDiagonalBank,
     normals,
     offset,
     coordinate,
@@ -179,7 +213,7 @@ end
 end
 
 @inline function _native_gaussian_coordinate(
-    bank::_PackedFactorGaussianBank,
+    bank::_PackedFactorBank,
     normals,
     offset,
     coordinate,
@@ -199,34 +233,38 @@ end
 @inline _packed_sample_coordinate(sample::AbstractVector, coordinate) =
     @inbounds sample[coordinate]
 
-@inline _packed_gaussian_location(bank::_PackedFactorGaussianBank, row, slot) =
+@inline _packed_gaussian_location(bank::_PackedFactorBank, row, slot) =
     @inbounds bank.locations[row, slot]
-@inline _packed_gaussian_location(history::_GaussianFactorHistory, row, slot) =
+@inline _packed_gaussian_location(history::_FactorProposalHistory, row, slot) =
     @inbounds history.means[row, slot]
-@inline _packed_gaussian_factor(bank::_PackedFactorGaussianBank, row, column, slot) =
+@inline _packed_gaussian_factor(bank::_PackedFactorBank, row, column, slot) =
     @inbounds bank.factors[row, column, slot]
-@inline _packed_gaussian_factor(history::_GaussianFactorHistory, row, column, slot) =
+@inline _packed_gaussian_factor(history::_FactorProposalHistory, row, column, slot) =
     @inbounds history.factors[row, column, slot]
-@inline _packed_gaussian_lognormalizer(bank::_PackedFactorGaussianBank, slot) =
+@inline _packed_gaussian_lognormalizer(bank::_PackedFactorBank, slot) =
     @inbounds bank.lognormalizers[slot]
-@inline _packed_gaussian_lognormalizer(history::_GaussianFactorHistory, slot) =
+@inline _packed_gaussian_lognormalizer(history::_FactorProposalHistory, slot) =
     @inbounds history.lognormalizers[slot]
 
-_factor_batch_locations(bank::_PackedFactorGaussianBank) = bank.locations
-_factor_batch_locations(history::_GaussianFactorHistory) = history.means
-_factor_batch_factors(bank::_PackedFactorGaussianBank) = bank.factors
-_factor_batch_factors(history::_GaussianFactorHistory) = history.factors
+_factor_batch_locations(bank::_PackedFactorBank) = bank.locations
+_factor_batch_locations(history::_FactorProposalHistory) = history.means
+_factor_batch_factors(bank::_PackedFactorBank) = bank.factors
+_factor_batch_factors(history::_FactorProposalHistory) = history.factors
 
 _factor_batch_location(proposal::_GaussianProposal, proposal_slot) =
     proposal.location
 _factor_batch_factor(proposal::_GaussianProposal, proposal_slot) =
     proposal.scale.factor
-_factor_batch_lognormalizers(bank::_PackedFactorGaussianBank) =
+_factor_batch_lognormalizers(bank::_PackedFactorBank) =
     bank.lognormalizers
-_factor_batch_lognormalizers(history::_GaussianFactorHistory) =
+_factor_batch_lognormalizers(history::_FactorProposalHistory) =
     history.lognormalizers
 _factor_batch_lognormalizers(proposal::_GaussianProposal) =
     proposal.lognormalizer
+
+@inline _packed_radial_logdensity(source, slot, squared_radius) =
+    _radial_logdensity(_radial_family_at(source.family, slot),
+        _packed_gaussian_lognormalizer(source, slot), squared_radius, _mis_dimension(source))
 
 _factor_batch_location(source, proposal_slot) =
     view(_factor_batch_locations(source), :, proposal_slot)
@@ -274,7 +312,7 @@ _use_factor_batch_path(device, source, ::_DefaultFactorExecution) =
     )
 
 @inline function _packed_gaussian_logdensity!(
-    bank::Union{_PackedFactorGaussianBank,_GaussianFactorHistory},
+    bank::Union{_PackedFactorBank,_FactorProposalHistory},
     sample,
     proposal_slot,
     solve_scratch,
@@ -300,25 +338,24 @@ _use_factor_batch_path(device, source, ::_DefaultFactorExecution) =
         @inbounds solve_scratch[row, sample_index] = standardized
         squared_radius += abs2(standardized)
     end
-    return _packed_gaussian_lognormalizer(bank, proposal_slot) -
-           T(0.5) * squared_radius
+    return _packed_radial_logdensity(bank, proposal_slot, squared_radius)
 end
 
-@inline _packed_gaussian_location(bank::_PackedDiagonalGaussianBank, coordinate, slot) =
+@inline _packed_gaussian_location(bank::_PackedDiagonalBank, coordinate, slot) =
     @inbounds bank.locations[coordinate, slot]
-@inline _packed_gaussian_location(history::_GaussianScalarHistory, coordinate, slot) =
+@inline _packed_gaussian_location(history::_ScalarProposalHistory, coordinate, slot) =
     @inbounds history.means[slot]
-@inline _packed_gaussian_scale(bank::_PackedDiagonalGaussianBank, coordinate, slot) =
+@inline _packed_gaussian_scale(bank::_PackedDiagonalBank, coordinate, slot) =
     @inbounds bank.scales[coordinate, slot]
-@inline _packed_gaussian_scale(history::_GaussianScalarHistory, coordinate, slot) =
+@inline _packed_gaussian_scale(history::_ScalarProposalHistory, coordinate, slot) =
     @inbounds history.scales[slot]
-@inline _packed_gaussian_lognormalizer(bank::_PackedDiagonalGaussianBank, slot) =
+@inline _packed_gaussian_lognormalizer(bank::_PackedDiagonalBank, slot) =
     @inbounds bank.lognormalizers[slot]
-@inline _packed_gaussian_lognormalizer(history::_GaussianScalarHistory, slot) =
+@inline _packed_gaussian_lognormalizer(history::_ScalarProposalHistory, slot) =
     @inbounds history.lognormalizers[slot]
 
 @inline function _packed_gaussian_logdensity(
-    bank::Union{_PackedDiagonalGaussianBank,_GaussianScalarHistory},
+    bank::Union{_PackedDiagonalBank,_ScalarProposalHistory},
     sample,
     proposal_slot,
 )
@@ -331,13 +368,12 @@ end
         ) / _packed_gaussian_scale(bank, coordinate, proposal_slot)
         squared_radius += abs2(standardized)
     end
-    return _packed_gaussian_lognormalizer(bank, proposal_slot) -
-           T(0.5) * squared_radius
+    return _packed_radial_logdensity(bank, proposal_slot, squared_radius)
 end
 
 @inline _mis_proposal_logdensity(
     ::Type{T},
-    bank::_PackedDiagonalGaussianBank,
+    bank::_PackedDiagonalBank,
     sample,
     proposal_slot,
 ) where {T} = convert(T, _packed_gaussian_logdensity(bank, sample, proposal_slot))

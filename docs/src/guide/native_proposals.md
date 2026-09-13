@@ -82,8 +82,47 @@ fail, the run throws `SamplerExecutionError` instead of returning a biased draw.
 This path stores `d + 8` normals and eight uniforms per sample, plus one extra
 uniform when `nu < 2`. The `nu = 1` path stores only `d + 1` normals.
 
-Static MIS accepts Student-t banks on generic CPU execution. The current packed
-CUDA bank and adaptive proposal-fitting methods require native Gaussians.
+Static MIS and adaptive samplers accept Student-t proposals on CPU and CUDA.
+Choose the family in the proposal constructor, not in a sampler-specific option:
+
+```jldoctest adaptive_student_t
+using ImportanceSamplers, Random
+
+proposal = FactorStudentT(5.0, [-1.0, 1.0], [2.0 0.0; 0.3 1.5])
+algorithm = AMIS(proposal; rounds=3, round_size=256)
+prepared = prepare_sampler(Xoshiro(42), x -> -sum(abs2, x) / 2, algorithm)
+result = importance_sample!(prepared)
+length(result)
+
+# output
+
+768
+```
+
+For a population method, pass a `ProposalBank` of the same constructors.
+Each packed bank uses one radial family and floating type. Student-t components
+may have different degrees of freedom, scales, locations, and permitted masses.
+Mixed Gaussian/Student-t packed banks are not supported. Transfer the complete
+prepared sampler with `prepared |> device`; targets, data, random buffers,
+proposal parameters, and adaptation workspaces follow the existing device contract.
+
+| Methods | Student-t adaptation |
+|:--|:--|
+| DM-PMC, GR-PMC, LR-PMC, APIS, LAIS | Update locations. Preserve each supplied scale and degrees of freedom. Any finite `nu > 0` is allowed. |
+| AMIS, NPMC, CAIS, FirstOrderGRAMIS | Require `nu > 2`. Preserve degrees of freedom and fit location/covariance using the method's existing update. |
+
+Covariance-fitting methods compute in covariance units, including regularization,
+preconditioning, and repulsion where applicable. They store the fitted covariance
+`C` as Student-t scale `(nu - 2) / nu * C`. The corresponding Cholesky factor
+multiplier is `sqrt((nu - 2) / nu)`. Vector proposals learn full covariance even
+when initialized with spherical or diagonal scales.
+
+These are fixed-degrees-of-freedom family extensions. They do not fit `nu`,
+perform Student-t maximum-likelihood fitting, or change a method's weighting rule.
+`current_proposal`, repeated calls, and `retarget` retain the learned family.
+Device execution has no per-sample host reads. Student-t banks use separate
+resident radial buffers; Gaussian banks allocate none.
+
 The [CUDA reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_student_t.jl)
 checks fractional, Cauchy, factor, and transformed proposals on an A100.
 
@@ -112,5 +151,5 @@ The Distributions.jl scale matrix remains an elliptical scale matrix.
 
 The native proposal rules still apply. Parameters must use `Float32` or
 `Float64`, and scales must be finite and positive. Canonical normal forms and
-other Distributions.jl families remain generic CPU proposals. Adaptive methods
-that require native Gaussian storage reject those other forms.
+other Distributions.jl families remain generic CPU proposals. Adaptive methods accept the supported native Gaussian and Student-t forms.
+Other families remain subject to each method's proposal requirements.

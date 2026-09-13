@@ -22,18 +22,18 @@ end
     throw(_GaussianStageError(phase, cause))
 end
 
-Adapt.@adapt_structure _GaussianScalarHistory
-Adapt.@adapt_structure _GaussianFactorHistory
+Adapt.@adapt_structure _ScalarProposalHistory
+Adapt.@adapt_structure _FactorProposalHistory
 
 Base.@propagate_inbounds Base.getindex(assignments::_FixedMISAssignments, index) =
     assignments.slot
 Base.length(assignments::_FixedMISAssignments) = assignments.length
 
-@inline _mis_dimension(::_GaussianScalarHistory) = 1
-@inline _mis_dimension(history::_GaussianFactorHistory) = size(history.means, 1)
+@inline _mis_dimension(::_ScalarProposalHistory) = 1
+@inline _mis_dimension(history::_FactorProposalHistory) = size(history.means, 1)
 
 @inline function _native_gaussian_coordinate(
-    history::_GaussianScalarHistory,
+    history::_ScalarProposalHistory,
     normals,
     offset,
     coordinate,
@@ -47,7 +47,7 @@ Base.length(assignments::_FixedMISAssignments) = assignments.length
 end
 
 @inline function _native_gaussian_coordinate(
-    history::_GaussianFactorHistory,
+    history::_FactorProposalHistory,
     normals,
     offset,
     coordinate,
@@ -65,7 +65,7 @@ end
 
 @inline function _mis_proposal_logdensity(
     ::Type{T},
-    history::_GaussianScalarHistory,
+    history::_ScalarProposalHistory,
     sample,
     proposal_slot,
     solve_scratch,
@@ -79,7 +79,7 @@ end
 
 @inline function _mis_proposal_logdensity(
     ::Type{T},
-    history::_GaussianFactorHistory,
+    history::_FactorProposalHistory,
     sample,
     proposal_slot,
     solve_scratch,
@@ -141,9 +141,9 @@ function _preflight_gaussian_fit_kernels(device, method_state, buffers)
     backend = KernelAbstractions.get_backend(workspace.samples)
     representative_round = findmax(method_state.schedule)[2]
     last_sample = method_state.offsets[representative_round + 1] - 1
-    if history isa _GaussianScalarHistory
+    if history isa _ScalarProposalHistory
         ridge_kernel = _add_gaussian_scalar_ridge_kernel!(backend)
-        for argument in (workspace.covariance, history.scales, representative_round)
+        for argument in (workspace.covariance, history.scales, history.family, representative_round)
             _preflight_kernel_argument(device, ridge_kernel, argument)
         end
         finish_kernel = _finish_gaussian_scalar_candidate_kernel!(backend)
@@ -153,6 +153,7 @@ function _preflight_gaussian_fit_kernels(device, method_state, buffers)
             workspace.covariance,
             buffers.failure_scratch.record.storage,
             last_sample + 1,
+            history.family,
         )
             _preflight_kernel_argument(device, finish_kernel, argument)
         end
@@ -161,6 +162,7 @@ function _preflight_gaussian_fit_kernels(device, method_state, buffers)
         for argument in (
             workspace.covariance,
             history.factors,
+            history.family,
             representative_round,
         )
             _preflight_kernel_argument(device, ridge_kernel, argument)
@@ -172,6 +174,7 @@ function _preflight_gaussian_fit_kernels(device, method_state, buffers)
             workspace.candidate_lognormalizer,
             buffers.failure_scratch.record.storage,
             last_sample + 1,
+            history.family,
         )
             _preflight_kernel_argument(device, finish_kernel, argument)
         end
@@ -261,9 +264,9 @@ end
     return valid
 end
 
-function _fit_gaussian_proposal!(
-    workspace::_GaussianMomentWorkspace,
-    history::_GaussianScalarHistory,
+function _fit_moment_proposal!(
+    workspace::_MomentWorkspace,
+    history::_ScalarProposalHistory,
     previous_slot,
     sample_count,
 )
@@ -285,7 +288,8 @@ function _fit_gaussian_proposal!(
         centered_scaled[sample_index] = centered
         variance += abs2(centered)
     end
-    previous_variance = abs2(@inbounds(history.scales[previous_slot]))
+    previous_variance = abs2(@inbounds(history.scales[previous_slot])) *
+                       _covariance_multiplier(history.family, T)
     variance += _scale_aware_ridge(
         previous_variance,
         1,
@@ -297,15 +301,19 @@ function _fit_gaussian_proposal!(
     isfinite(variance) && variance > zero(T) || throw(
         LinearAlgebra.PosDefException(1),
     )
-    return SphericalGaussian(mean, sqrt(variance))
+    scale = sqrt(variance / _covariance_multiplier(history.family, T))
+    lognormalizer = _radial_lognormalizer(history.family, T, 1, log(scale))
+    scale > zero(T) && isfinite(lognormalizer) || throw(LinearAlgebra.PosDefException(1))
+    return _radial_proposal(history.family, mean, _SphericalGaussianScale(scale),
+        lognormalizer)
     catch cause
         _throw_gaussian_stage(phase, cause)
     end
 end
 
-function _fit_gaussian_proposal!(
-    workspace::_GaussianMomentWorkspace,
-    history::_GaussianFactorHistory,
+function _fit_moment_proposal!(
+    workspace::_MomentWorkspace,
+    history::_FactorProposalHistory,
     previous_slot,
     sample_count,
 )
@@ -345,7 +353,7 @@ function _fit_gaussian_proposal!(
         previous_trace += abs2(history.factors[row, column, previous_slot])
     end
     ridge = _scale_aware_ridge(
-        previous_trace,
+        previous_trace * _covariance_multiplier(history.family, T),
         dimension,
         sqrt(eps(T)),
     )
@@ -356,6 +364,7 @@ function _fit_gaussian_proposal!(
     phase = :factorization
     copyto!(candidate_factor, covariance)
     _gaussian_potrf!(MLDataDevices.CPUDevice(), candidate_factor)
+    _scale_covariance_factor!(candidate_factor, history.family)
     @inbounds for column in 1:dimension, row in 1:(column - 1)
         candidate_factor[row, column] = zero(T)
     end
@@ -365,7 +374,7 @@ function _fit_gaussian_proposal!(
         logabsdet += log(abs(candidate_factor[coordinate, coordinate]))
     end
     candidate_lognormalizer =
-        _gaussian_lognormalizer(T, dimension, logabsdet)
+        _radial_lognormalizer(history.family, T, dimension, logabsdet)
     _gaussian_factor_candidate_valid(
         candidate_mean,
         candidate_factor,
@@ -392,10 +401,10 @@ function _gaussian_potrf!(
     return factor
 end
 
-@kernel function _add_gaussian_scalar_ridge_kernel!(covariance, scales, previous_slot)
+@kernel function _add_gaussian_scalar_ridge_kernel!(covariance, scales, family, previous_slot)
     T = eltype(covariance)
     covariance[1] += _scale_aware_ridge(
-        abs2(scales[previous_slot]),
+        abs2(scales[previous_slot]) * _covariance_multiplier(family, T),
         1,
         sqrt(eps(T)),
     )
@@ -404,6 +413,7 @@ end
 @kernel function _add_gaussian_factor_ridge_kernel!(
     covariance,
     factors,
+    family,
     previous_slot,
 )
     T = eltype(covariance)
@@ -413,7 +423,7 @@ end
         previous_trace += abs2(factors[row, column, previous_slot])
     end
     ridge = _scale_aware_ridge(
-        previous_trace,
+        previous_trace * _covariance_multiplier(family, T),
         dimension,
         sqrt(eps(T)),
     )
@@ -428,13 +438,19 @@ end
     covariance,
     failure_storage,
     failure_index,
+    family,
 )
     T = eltype(candidate_scale)
     variance = covariance[1]
+    scale = zero(T)
+    lognormalizer = T(NaN)
     if isfinite(variance) && variance > zero(T)
-        scale = sqrt(variance)
+        scale = sqrt(variance / _covariance_multiplier(family, T))
+        lognormalizer = _radial_lognormalizer(family, T, 1, log(scale))
+    end
+    if scale > zero(T) && isfinite(lognormalizer)
         candidate_scale[1] = scale
-        candidate_lognormalizer[1] = _gaussian_lognormalizer(T, 1, log(scale))
+        candidate_lognormalizer[1] = lognormalizer
     else
         _record_native_failure!(
             failure_storage,
@@ -451,6 +467,7 @@ end
     candidate_lognormalizer,
     failure_storage,
     failure_index,
+    family,
 )
     index = @index(Global, Linear)
     dimension = size(candidate_factor, 1)
@@ -464,7 +481,7 @@ end
             logabsdet += log(abs(candidate_factor[coordinate, coordinate]))
         end
         lognormalizer =
-            _gaussian_lognormalizer(T, dimension, logabsdet)
+            _radial_lognormalizer(family, T, dimension, logabsdet)
         candidate_lognormalizer[1] = lognormalizer
         _gaussian_factor_candidate_valid(
             candidate_mean,
@@ -479,10 +496,10 @@ end
     end
 end
 
-function _fit_gaussian_proposal!(
+function _fit_moment_proposal!(
     device::MLDataDevices.AbstractAcceleratorDevice,
-    workspace::_GaussianMomentWorkspace,
-    history::_GaussianScalarHistory,
+    workspace::_MomentWorkspace,
+    history::_ScalarProposalHistory,
     previous_slot,
     sample_count,
     transfers,
@@ -514,6 +531,7 @@ function _fit_gaussian_proposal!(
     ridge_kernel(
         workspace.covariance,
         history.scales,
+        history.family,
         previous_slot;
         ndrange=1,
     )
@@ -526,7 +544,8 @@ function _fit_gaussian_proposal!(
         workspace.candidate_lognormalizer,
         workspace.covariance,
         failure_storage,
-        sample_count + 1;
+        sample_count + 1,
+        history.family;
         ndrange=1,
     )
     KernelAbstractions.synchronize(backend)
@@ -536,10 +555,10 @@ function _fit_gaussian_proposal!(
     end
 end
 
-function _fit_gaussian_proposal!(
+function _fit_moment_proposal!(
     device::MLDataDevices.AbstractAcceleratorDevice,
-    workspace::_GaussianMomentWorkspace,
-    history::_GaussianFactorHistory,
+    workspace::_MomentWorkspace,
+    history::_FactorProposalHistory,
     previous_slot,
     sample_count,
     transfers,
@@ -566,6 +585,7 @@ function _fit_gaussian_proposal!(
     ridge_kernel(
         workspace.covariance,
         history.factors,
+        history.family,
         previous_slot;
         ndrange=1,
     )
@@ -574,13 +594,15 @@ function _fit_gaussian_proposal!(
     phase = :factorization
     copyto!(workspace.candidate_scale, workspace.covariance)
     _gaussian_potrf!(device, workspace.candidate_scale)
+    _scale_covariance_factor!(workspace.candidate_scale, history.family)
     finish_kernel = _finish_gaussian_factor_candidate_kernel!(backend)
     finish_kernel(
         workspace.candidate_mean,
         workspace.candidate_scale,
         workspace.candidate_lognormalizer,
         failure_storage,
-        sample_count + 1;
+        sample_count + 1,
+        history.family;
         ndrange=length(workspace.candidate_scale),
     )
     KernelAbstractions.synchronize(backend)
@@ -591,9 +613,9 @@ function _fit_gaussian_proposal!(
 end
 
 function _store_gaussian_candidate!(
-    history::_GaussianScalarHistory,
+    history::_ScalarProposalHistory,
     slot,
-    workspace::_GaussianMomentWorkspace,
+    workspace::_MomentWorkspace,
 )
     copyto!(view(history.means, slot:slot), workspace.candidate_mean)
     copyto!(view(history.scales, slot:slot), workspace.candidate_scale)
@@ -605,9 +627,9 @@ function _store_gaussian_candidate!(
 end
 
 function _store_gaussian_candidate!(
-    history::_GaussianFactorHistory,
+    history::_FactorProposalHistory,
     slot,
-    workspace::_GaussianMomentWorkspace,
+    workspace::_MomentWorkspace,
 )
     copyto!(view(history.means, :, slot), workspace.candidate_mean)
     copyto!(view(history.factors, :, :, slot), workspace.candidate_scale)
@@ -619,9 +641,9 @@ function _store_gaussian_candidate!(
 end
 
 function _store_gaussian_proposal!(
-    history::_GaussianScalarHistory,
+    history::_ScalarProposalHistory,
     slot,
-    proposal::_GaussianProposal,
+    proposal::_NativeRadialProposal,
 )
     history.means[slot] = proposal.location
     history.scales[slot] = proposal.scale.scale
@@ -630,9 +652,9 @@ function _store_gaussian_proposal!(
 end
 
 function _store_gaussian_proposal!(
-    history::_GaussianFactorHistory,
+    history::_FactorProposalHistory,
     slot,
-    proposal::_GaussianProposal,
+    proposal::_NativeRadialProposal,
 )
     copyto!(view(history.means, :, slot), proposal.location)
     copyto!(view(history.factors, :, :, slot), proposal.scale.factor)
@@ -640,14 +662,14 @@ function _store_gaussian_proposal!(
     return nothing
 end
 
-function _store_gaussian_workspace_candidate!(workspace, proposal::_GaussianProposal)
+function _store_gaussian_workspace_candidate!(workspace, proposal::_NativeRadialProposal)
     workspace.candidate_mean[1] = proposal.location
     workspace.candidate_scale[1] = proposal.scale.scale
     workspace.candidate_lognormalizer[1] = proposal.lognormalizer
     return nothing
 end
 
-function _reset_gaussian_history!(history::_GaussianScalarHistory, rounds)
+function _reset_gaussian_history!(history::_ScalarProposalHistory, rounds)
     slots = 2:rounds
     isempty(slots) && return nothing
     fill!(view(history.means, slots), zero(eltype(history.means)))
@@ -659,7 +681,7 @@ function _reset_gaussian_history!(history::_GaussianScalarHistory, rounds)
     return nothing
 end
 
-function _reset_gaussian_history!(history::_GaussianFactorHistory, rounds)
+function _reset_gaussian_history!(history::_FactorProposalHistory, rounds)
     slots = 2:rounds
     isempty(slots) && return nothing
     fill!(view(history.means, :, slots), zero(eltype(history.means)))
@@ -675,10 +697,10 @@ function _reset_gaussian_history!(history::_GaussianFactorHistory, rounds)
 end
 
 function _with_gaussian_workspace_authority(
-    method_state::_PreparedAdaptiveGaussian{S,O,L,H,W},
+    method_state::_PreparedMomentSampler{S,O,L,H,W},
     authority::Bool,
 ) where {S,O,L,H,W}
-    return _PreparedAdaptiveGaussian{S,O,L,H,W}(
+    return _PreparedMomentSampler{S,O,L,H,W}(
         method_state.schedule,
         method_state.offsets,
         method_state.logcounts,
@@ -768,7 +790,7 @@ end
 function _capture_gaussian_round(
     f,
     algorithm,
-    state::_PreparedAdaptiveGaussian,
+    state::_PreparedMomentSampler,
     transfers,
     round,
     phase,
@@ -800,7 +822,7 @@ function _gaussian_failure_snapshot!(transfers, failure_record)
     return snapshot
 end
 
-function _importance_sample_cpu!(sampler, committed_state::_PreparedAdaptiveGaussian, threaded)
+function _importance_sample_cpu!(sampler, committed_state::_PreparedMomentSampler, threaded)
     algorithm = sampler.algorithm
     execution = threaded ? _ThreadedCPUExecution() : _SerialCPUExecution()
     history = committed_state.history
@@ -815,7 +837,7 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAdaptiveGaus
     round_ess = Vector{eltype(workspace.logweights)}(undef, rounds)
     round_lognormalizers = similar(round_ess)
     adaptation_ess = _allocate_gaussian_adaptation_ess(algorithm, round_ess)
-    workspace_candidate = accelerator || history isa _GaussianFactorHistory
+    workspace_candidate = accelerator || history isa _FactorProposalHistory
     _reset_gaussian_history!(history, rounds)
     method_state = if committed_state.committed_in_workspace
         _capture_gaussian_round(
@@ -834,7 +856,7 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAdaptiveGaus
     end
 
     target = _capture_gaussian_round(algorithm, method_state, transfers, 1, :target, 0) do
-        binding_sample = history isa _GaussianScalarHistory ?
+        binding_sample = history isa _ScalarProposalHistory ?
                          zero(eltype(history.means)) : view(history.means, :, 1)
         _bind_resolved_target(sampler.target, binding_sample)
     end
@@ -854,8 +876,12 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAdaptiveGaus
         deferred_accelerator_snapshot = accelerator
         _capture_gaussian_round(algorithm, method_state, transfers, round, :sampling, round - 1) do
             Random.randn!(sampler.rng, buffers.normal)
+            _fill_radial_buffers!(sampler.rng, buffers.radial)
         end
         _capture_gaussian_round(algorithm, method_state, transfers, round, :sampling, round - 1) do
+            _prepare_mis_normals!(buffers.normal, buffers.radial, history,
+                _FixedMISAssignments(round, schedule[round]),
+                buffers.failure_scratch.record.storage, execution)
             _launch_adaptive_gaussian_round!(
                 algorithm,
                 workspace.samples,
@@ -896,7 +922,7 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAdaptiveGaus
         fit_count = _gaussian_adaptation_count(algorithm, method_state, round)
         fit_result = if deferred_accelerator_snapshot
             try
-                _fit_gaussian_proposal!(
+                _fit_moment_proposal!(
                     sampler.device,
                     fit_workspace,
                     history,
@@ -918,7 +944,7 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAdaptiveGaus
                 round - 1,
                 workspace.covariance,
             ) do
-                _fit_gaussian_proposal!(
+                _fit_moment_proposal!(
                     fit_workspace,
                     history,
                     round,
@@ -999,7 +1025,7 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedAdaptiveGaus
         execution=_execution_name(execution),
         threaded=sampler.threaded,
         factor_execution_policy=(
-            history isa _GaussianFactorHistory &&
+            history isa _FactorProposalHistory &&
             _use_factor_batch_path(
                 sampler.device,
                 history,

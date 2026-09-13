@@ -2,7 +2,7 @@
     LAIS(bank; transition, rounds, round_size)
 
 Configure layered importance sampling. Each round advances the upper MCMC chains,
-then draws equally from the lower Gaussian proposals at their new centres. Use
+then draws equally from the lower Gaussian or Student-t proposals at their new centres. Use
 current-round deterministic-mixture weights and retain all lower samples.
 
 Independent [`RandomWalkMetropolis`](@ref)/[`RAM`](@ref) chains implement
@@ -12,9 +12,10 @@ result and lower-weighting API.
 
 `round_size` is the total lower count per round, either an integer or a vector
 with one entry per round. It must divide equally across positive, equal-mass
-proposals. Lower covariances stay fixed and independent of `transition`.
+proposals. Each bank uses one radial family. Lower scales and Student-t degrees of freedom
+stay fixed and independent of `transition`; every positive `nu` is allowed.
 """
-struct LAIS{B<:ProposalBank,K<:AbstractMCMCTransition,S} <: _FixedGaussianPopulationSampler
+struct LAIS{B<:ProposalBank,K<:AbstractMCMCTransition,S} <: _FixedPopulationSampler
     bank::B
     transition::K
     rounds::Int
@@ -55,7 +56,7 @@ mutable struct _PreparedLAIS{B,P,W,K}
     run_transition::K
 end
 
-_lais_centres(bank::_PackedDiagonalGaussianBank{L,S,N,M,C,I,<:_ScalarGaussianLayout}) where {L,S,N,M,C,I} =
+_lais_centres(bank::_PackedDiagonalBank{L,S,N,M,C,I,<:_ScalarGaussianLayout}) where {L,S,N,M,C,I} =
     vec(bank.locations)
 _lais_centres(bank) = bank.locations
 
@@ -83,7 +84,8 @@ function _allocate_random_buffers(::MLDataDevices.AbstractDevice, ::ProposalBank
     normals = similar(state.bank.locations, eltype(state.bank.locations),
         size(state.bank.locations, 1) * maximum(state.plan.schedule))
     return _PopulationNormalBuffers(normals,
-        _allocate_native_failure_scratch(normals, maximum(state.plan.schedule)))
+        _allocate_native_failure_scratch(normals, maximum(state.plan.schedule)),
+        _allocate_radial_buffers(normals, state.bank.family, maximum(state.plan.schedule)))
 end
 
 function current_proposal(sampler::_PreparedImportanceSampler{R,B,T,A}) where {R,B,T,A<:LAIS}
@@ -107,7 +109,7 @@ function _prepare_transferred_method_state(device, algorithm::LAIS, state::_Prep
     committed = Adapt.adapt(device, state.transition)
     run = Adapt.adapt(device, state.run_transition)
     shape = size(state.bank.locations)
-    bank = _copy_packed_gaussian_bank(device, state.bank;
+    bank = _copy_packed_bank(device, state.bank;
         locations=reshape(transition_centres(committed), shape))
     run_bank = _population_with_locations(bank, reshape(transition_centres(run), shape))
     workspace = map(value -> _copy_to_device(device, value), state.workspace)

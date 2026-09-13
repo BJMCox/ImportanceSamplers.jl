@@ -6,6 +6,11 @@ sampler in Section III-B of El-Laham, Elvira, and Bugallo,
 The [author-hosted paper](https://victorelvira.github.io/assets/papers/el2018robust_pre.pdf)
 contains the displayed recurrence in equations (5)--(10).
 
+Native Gaussian and Student-t populations work on CPU and CUDA. Student-t
+proposals require `nu > 2`, retain each component's `nu`, and convert the fitted
+covariance to elliptical scale. This extends the covariance update without
+fitting `nu` or using Student-t maximum likelihood. See [Native proposals](@ref).
+
 ```julia
 using ImportanceSamplers, Random
 
@@ -78,7 +83,7 @@ definite. All-zero local weights, an unreachable positive tempering solution,
 or failed Cholesky factorization therefore throws [`CAISRoundError`](@ref).
 
 Each call is transactional. Failure retains the complete pre-call proposal
-population, including covariance factors and Gaussian log normalizers, while
+population, including covariance factors and family-specific log normalizers, while
 the owned RNG remains advanced. Success commits the fit after the final round.
 Repeated calls start from that learned population, and `retarget` carries it
 into the fresh sampler.

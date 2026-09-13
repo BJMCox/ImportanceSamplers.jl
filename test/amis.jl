@@ -110,8 +110,8 @@ function assert_factor_amis_storage(proposal, expected_factor, ::Type{L}) where 
     T = eltype(proposal.location)
     d = length(proposal.location)
 
-    @test state isa AMISIS._PreparedAdaptiveGaussian
-    @test history isa AMISIS._GaussianFactorHistory
+    @test state isa AMISIS._PreparedMomentSampler
+    @test history isa AMISIS._FactorProposalHistory
     @test state.schedule == [4, 5, 6]
     @test state.offsets == [1, 5, 10, 16]
     @test state.logcounts ≈ log.(T[4, 5, 6])
@@ -188,7 +188,7 @@ end
         history = state.history
         workspace = state.workspace
 
-        @test history isa AMISIS._GaussianScalarHistory
+        @test history isa AMISIS._ScalarProposalHistory
         @test history.means isa Vector{T}
         @test history.scales isa Vector{T}
         @test history.lognormalizers isa Vector{T}
@@ -247,7 +247,7 @@ function literal_amis_moments(samples, logweights, previous_covariance)
 end
 
 function amis_factor_fit_allocated!(workspace, history, sample_count)
-    return @allocated AMISIS._fit_gaussian_proposal!(
+    return @allocated AMISIS._fit_moment_proposal!(
         workspace,
         history,
         1,
@@ -318,7 +318,7 @@ end
             abs2(scalar_proposal.scale.scale),
         )
 
-        scalar_fitted = @inferred AMISIS._fit_gaussian_proposal!(
+        scalar_fitted = @inferred AMISIS._fit_moment_proposal!(
             scalar_state.workspace,
             scalar_state.history,
             1,
@@ -350,7 +350,7 @@ end
 
         candidate_mean = vector_state.workspace.candidate_mean
         candidate_factor = vector_state.workspace.candidate_scale
-        vector_fitted = @inferred AMISIS._fit_gaussian_proposal!(
+        vector_fitted = @inferred AMISIS._fit_moment_proposal!(
             vector_state.workspace,
             vector_state.history,
             1,

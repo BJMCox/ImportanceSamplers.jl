@@ -108,7 +108,7 @@ end
 struct _ScalarGaussianLayout end
 struct _VectorGaussianLayout end
 
-struct _PackedDiagonalGaussianBank{L,S,N,M,C,I,R}
+struct _PackedDiagonalBank{L,S,N,M,C,I,R,F}
     locations::L
     scales::S
     lognormalizers::N
@@ -116,23 +116,90 @@ struct _PackedDiagonalGaussianBank{L,S,N,M,C,I,R}
     cdf::C
     proposal_ids::I
     layout::R
+    family::F
 end
 
-struct _PackedFactorGaussianBank{L,F,N,M,C,I}
+struct _PackedFactorBank{L,F,N,M,C,I,R}
     locations::L
     factors::F
     lognormalizers::N
     logmasses::M
     cdf::C
     proposal_ids::I
+    family::R
 end
 
-Adapt.@adapt_structure _PackedDiagonalGaussianBank
-Adapt.@adapt_structure _PackedFactorGaussianBank
+struct _PackedStudentTFamily{D}
+    dofs::D
+    normal_stride::Int
+    uniform_stride::Int
+end
 
-function _copy_packed_gaussian_bank(device, bank::_PackedDiagonalGaussianBank;
+Adapt.@adapt_structure _PackedStudentTFamily
+
+function _validate_radial_bank_family(proposals)
+    family_type = typeof(first(proposals).family)
+    all(p -> typeof(p.family) === family_type, proposals) || throw(
+        ArgumentError("a packed proposal bank requires one radial family and floating type"))
+    return nothing
+end
+
+# Packing callers validate the bank's family before extracting its parameters.
+_packed_family(proposals) = _packed_family(first(proposals), proposals)
+_packed_family(::_GaussianProposal, proposals) = GaussianFamily()
+function _packed_family(::_StudentTProposal, proposals)
+    dofs = [proposal.family.dof for proposal in proposals]
+    return _PackedStudentTFamily(dofs,
+        maximum(_native_normal_stride(p) - _gaussian_dimension(p.location) for p in proposals),
+        maximum(_native_uniform_stride, proposals))
+end
+
+@inline _radial_family_at(family::AbstractRadialProposalFamily, slot) = family
+@inline _radial_family_at(family::_PackedStudentTFamily, slot) = StudentTFamily(family.dofs[slot])
+
+_allocate_radial_buffers(prototype, ::GaussianFamily, count) = nothing
+_radial_normal_stride(family::_PackedStudentTFamily) = family.normal_stride
+_radial_uniform_stride(family::_PackedStudentTFamily) = family.uniform_stride
+_radial_normal_stride(family::StudentTFamily) = isone(family.dof) ? 1 : _STUDENT_T_GAMMA_ATTEMPTS
+_radial_uniform_stride(family::StudentTFamily) = isone(family.dof) ? 0 :
+    _STUDENT_T_GAMMA_ATTEMPTS + (family.dof < 2)
+function _allocate_radial_buffers(prototype, family::Union{_PackedStudentTFamily,StudentTFamily}, count)
+    return (normal=similar(prototype, eltype(prototype), _radial_normal_stride(family) * count),
+        uniform=similar(prototype, eltype(prototype), _radial_uniform_stride(family) * count))
+end
+
+Adapt.@adapt_structure _PackedDiagonalBank
+Adapt.@adapt_structure _PackedFactorBank
+
+# Copy evolving proposal parameters; share fixed allocation and family metadata.
+function _population_state_bank(bank::_PackedDiagonalBank)
+    return _PackedDiagonalBank(
+        copy(bank.locations),
+        copy(bank.scales),
+        copy(bank.lognormalizers),
+        bank.logmasses,
+        bank.cdf,
+        bank.proposal_ids,
+        bank.layout,
+        bank.family,
+    )
+end
+
+function _population_state_bank(bank::_PackedFactorBank)
+    return _PackedFactorBank(
+        copy(bank.locations),
+        copy(bank.factors),
+        copy(bank.lognormalizers),
+        bank.logmasses,
+        bank.cdf,
+        bank.proposal_ids,
+        bank.family,
+    )
+end
+
+function _copy_packed_bank(device, bank::_PackedDiagonalBank;
     locations=_copy_to_device(device, bank.locations))
-    return _PackedDiagonalGaussianBank(
+    return _PackedDiagonalBank(
         locations,
         _copy_to_device(device, bank.scales),
         _copy_to_device(device, bank.lognormalizers),
@@ -140,24 +207,25 @@ function _copy_packed_gaussian_bank(device, bank::_PackedDiagonalGaussianBank;
         _copy_to_device(device, bank.cdf),
         _copy_to_device(device, bank.proposal_ids),
         bank.layout,
+        _copy_to_device(device, bank.family),
     )
 end
 
-function _copy_packed_gaussian_bank(device, bank::_PackedFactorGaussianBank;
+function _copy_packed_bank(device, bank::_PackedFactorBank;
     locations=_copy_to_device(device, bank.locations))
-    return _PackedFactorGaussianBank(
+    return _PackedFactorBank(
         locations,
         _copy_to_device(device, bank.factors),
         _copy_to_device(device, bank.lognormalizers),
         _copy_to_device(device, bank.logmasses),
         _copy_to_device(device, bank.cdf),
         _copy_to_device(device, bank.proposal_ids),
+        _copy_to_device(device, bank.family),
     )
 end
 
 _active_proposal_count(bank::_ActiveProposalBank) = length(bank.proposals)
-_active_proposal_count(bank::_PackedDiagonalGaussianBank) = size(bank.locations, 2)
-_active_proposal_count(bank::_PackedFactorGaussianBank) = size(bank.locations, 2)
+_active_proposal_count(bank::Union{_PackedDiagonalBank,_PackedFactorBank}) = size(bank.locations, 2)
 
 function _accelerator_proposal_limit(bank::ProposalBank)
     proposal_ids = findall(!iszero, bank.masses)
@@ -165,8 +233,8 @@ function _accelerator_proposal_limit(bank::ProposalBank)
     for proposal in proposals
         proposal isa ProductProposal && return :product_proposal_cpu_only
         proposal isa TransformedProposal && return :transformed_proposal_cpu_only
-        proposal isa _GaussianProposal || return :generic_proposal_cpu_only
-        _is_packable_native_gaussian(proposal) || return :generic_proposal_cpu_only
+        proposal isa _NativeRadialProposal || return :generic_proposal_cpu_only
+        _is_packable_native_radial(proposal) || return :generic_proposal_cpu_only
     end
 
     return nothing
@@ -199,8 +267,8 @@ function _prepare_active_proposal_metadata(bank::ProposalBank)
     return proposal_ids, logmasses, cdf
 end
 
-function _is_packable_native_gaussian(proposal)
-    proposal isa _GaussianProposal || return false
+function _is_packable_native_radial(proposal)
+    proposal isa _NativeRadialProposal || return false
     return proposal.scale isa Union{
         _SphericalGaussianScale,
         _DiagonalGaussianScale,
@@ -208,12 +276,12 @@ function _is_packable_native_gaussian(proposal)
     }
 end
 
-_native_gaussian_pack_kind(::Type) = Val(:dynamic)
-_native_gaussian_pack_kind(
-    ::Type{<:_GaussianProposal{F,L,S,T}},
+_native_radial_pack_kind(::Type) = Val(:dynamic)
+_native_radial_pack_kind(
+    ::Type{<:Union{_GaussianProposal{F,L,S,T},_StudentTProposal{F,L,S,T}}},
 ) where {F,L,S<:_FactorGaussianScale,T} = Val(:factor)
-_native_gaussian_pack_kind(
-    ::Type{<:_GaussianProposal{F,L,S,T}},
+_native_radial_pack_kind(
+    ::Type{<:Union{_GaussianProposal{F,L,S,T},_StudentTProposal{F,L,S,T}}},
 ) where {
     F,
     L,
@@ -252,7 +320,7 @@ function _copy_packed_gaussian_factor!(destination, proposal, slot)
     return destination
 end
 
-function _pack_native_gaussian_storage(
+function _pack_native_radial_storage(
     locations,
     lognormalizers,
     logmasses,
@@ -268,17 +336,18 @@ function _pack_native_gaussian_storage(
     for (slot, proposal) in pairs(proposals)
         _copy_packed_gaussian_factor!(factors, proposal, slot)
     end
-    return _PackedFactorGaussianBank(
+    return _PackedFactorBank(
         locations,
         factors,
         lognormalizers,
         logmasses,
         cdf,
         proposal_ids,
+        _packed_family(proposals),
     )
 end
 
-function _pack_native_gaussian_storage(
+function _pack_native_radial_storage(
     locations,
     lognormalizers,
     logmasses,
@@ -298,7 +367,7 @@ function _pack_native_gaussian_storage(
             copyto!(view(scales, :, slot), proposal.scale.scales)
         end
     end
-    return _PackedDiagonalGaussianBank(
+    return _PackedDiagonalBank(
         locations,
         scales,
         lognormalizers,
@@ -306,10 +375,11 @@ function _pack_native_gaussian_storage(
         cdf,
         proposal_ids,
         layout,
+        _packed_family(proposals),
     )
 end
 
-function _pack_native_gaussian_storage(
+function _pack_native_radial_storage(
     locations,
     lognormalizers,
     logmasses,
@@ -321,7 +391,7 @@ function _pack_native_gaussian_storage(
 )
     kind = any(proposal -> proposal.scale isa _FactorGaussianScale, proposals) ?
            Val(:factor) : Val(:diagonal)
-    return _pack_native_gaussian_storage(
+    return _pack_native_radial_storage(
         locations,
         lognormalizers,
         logmasses,
@@ -333,22 +403,22 @@ function _pack_native_gaussian_storage(
     )
 end
 
-function _pack_native_gaussian_bank(bank::ProposalBank)
+function _pack_native_radial_bank(bank::ProposalBank)
     proposal_ids, logmasses, cdf = _prepare_active_proposal_metadata(bank)
-    return _pack_native_gaussian_bank(bank, proposal_ids, logmasses, cdf)
+    return _pack_native_radial_bank(bank, proposal_ids, logmasses, cdf)
 end
 
-function _pack_native_gaussian_bank(bank, proposal_ids, logmasses, cdf)
-    return _pack_native_gaussian_bank(
+function _pack_native_radial_bank(bank, proposal_ids, logmasses, cdf)
+    return _pack_native_radial_bank(
         bank,
         proposal_ids,
         logmasses,
         cdf,
-        _native_gaussian_pack_kind(eltype(bank.proposals)),
+        _native_radial_pack_kind(eltype(bank.proposals)),
     )
 end
 
-function _pack_native_gaussian_bank(
+function _pack_native_radial_bank(
     bank,
     proposal_ids,
     logmasses,
@@ -356,10 +426,11 @@ function _pack_native_gaussian_bank(
     pack_kind,
 )
     proposals = view(bank.proposals, proposal_ids)
-    all(_is_packable_native_gaussian, proposals) || return nothing
+    all(_is_packable_native_radial, proposals) || return nothing
     eltype(logmasses) <: _NativeGaussianFloat || return nothing
 
     first_proposal = first(proposals)
+    all(p -> typeof(p.family) === typeof(first_proposal.family), proposals) || return nothing
     first_location = first_proposal.location
     scalar_layout = first_location isa _NativeGaussianFloat
     layout = scalar_layout ? _ScalarGaussianLayout() : _VectorGaussianLayout()
@@ -396,7 +467,7 @@ function _pack_native_gaussian_bank(
         lognormalizers[slot] = proposal.lognormalizer
     end
 
-    return _pack_native_gaussian_storage(
+    return _pack_native_radial_storage(
         locations,
         lognormalizers,
         logmasses,
@@ -412,7 +483,7 @@ function _prepare_active_proposal_bank(bank::ProposalBank)
     proposal_ids, logmasses, cdf = _prepare_active_proposal_metadata(bank)
     proposal_type = eltype(bank.proposals)
     native_candidate = Val(
-        proposal_type <: _GaussianProposal || !isconcretetype(proposal_type),
+        proposal_type <: _NativeRadialProposal || !isconcretetype(proposal_type),
     )
     return _prepare_active_proposal_bank(
         bank,
@@ -435,7 +506,7 @@ function _prepare_active_proposal_bank(
         proposal_ids,
         logmasses,
         cdf,
-        _native_gaussian_pack_kind(eltype(bank.proposals)),
+        _native_radial_pack_kind(eltype(bank.proposals)),
     )
 end
 
@@ -456,7 +527,7 @@ function _prepare_active_proposal_bank(
     cdf,
     ::Val{:diagonal},
 )
-    packed = _pack_native_gaussian_bank(
+    packed = _pack_native_radial_bank(
         bank,
         proposal_ids,
         logmasses,
@@ -476,7 +547,7 @@ function _prepare_active_proposal_bank(
 )
     proposals = view(bank.proposals, proposal_ids)
     any(
-        proposal -> proposal isa _GaussianProposal &&
+        proposal -> proposal isa _NativeRadialProposal &&
                     proposal.scale isa _FactorGaussianScale,
         proposals,
     ) && throw(
@@ -618,17 +689,14 @@ function _factor_population_snapshot(
     lognormalizers::AbstractVector{T},
     proposal_ids,
     configured_masses,
+    family,
 ) where {T<:_NativeGaussianFloat}
-    D = _GaussianProposal{
-        GaussianFamily,
-        Vector{T},
-        _FactorGaussianScale{Matrix{T}},
-        T,
-    }
+    D = typeof(_radial_proposal(_radial_family_at(family, 1), Vector{T}(undef, 0),
+        _FactorGaussianScale(Matrix{T}(undef, 0, 0)), zero(T)))
     proposals = Vector{D}(undef, length(configured_masses))
     for (slot, proposal_id) in pairs(proposal_ids)
-        proposals[proposal_id] = _GaussianProposal(
-            GaussianFamily(),
+        proposals[proposal_id] = _radial_proposal(
+            _radial_family_at(family, slot),
             copy(view(locations, :, slot)),
             _FactorGaussianScale(copy(view(factors, :, :, slot))),
             lognormalizers[slot],

@@ -7,6 +7,11 @@ global and local multinomial resampling variants from Elvira et al.,
 the ancestor-selection scope; both variants use the same deterministic-mixture
 weights.
 
+Gaussian and Student-t populations work on CPU and CUDA. Student-t proposals
+retain each supplied positive degrees of freedom and scale while resampling
+changes their locations. The family does not change the spatial-mixture
+weights or ancestor-selection rule. See [Native proposals](@ref).
+
 ## Minimal prepared execution
 
 ```julia

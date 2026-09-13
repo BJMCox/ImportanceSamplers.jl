@@ -78,6 +78,7 @@ function dm_pmc_result_failure_sampler(sampler)
         DMPMCResultFailurePrototype(old_buffers.normals),
         old_buffers.resampling_uniforms,
         old_buffers.failure_scratch,
+        old_buffers.radial,
     )
     return ImportanceSamplers._PreparedImportanceSampler(
         sampler.rng,

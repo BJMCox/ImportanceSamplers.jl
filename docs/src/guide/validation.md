@@ -55,9 +55,11 @@ A100 metadata. `cuda_student_t.jl` covers selected scalar, diagonal, factor,
 fractional-degree, Cauchy, and transformed cases. It does not validate the full
 Cartesian product of shapes, degrees of freedom, types, and transforms.
 
-Student-t proposals work in plain IS on CPU and CUDA. Static MIS uses the
-generic CPU path for Student-t banks. Packed CUDA banks and adaptive Gaussian
-fits do not gain Student-t support from the plain-IS check.
+Student-t proposals also use packed static MIS and adaptive CPU/CUDA execution.
+The shared-family validation covers correlated Student-t banks and fixed-degree
+adaptation. The older Gaussian capability matrices below remain Gaussian
+reference checks; they do not imply every Student-t shape/type combination was
+hardware-tested. See [Native proposals](@ref) for the adaptation requirements.
 
 ## Run and record validation
 

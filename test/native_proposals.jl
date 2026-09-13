@@ -1,7 +1,77 @@
 import DensityInterface
 import LinearAlgebra
+import MLDataDevices
 import Random
 import Random: rand
+
+@testset "Student-t population precision conversion and family safety" begin
+    gaussian = SphericalGaussian([0.0, 0.0], 1.0)
+    student = SphericalStudentT(5.0, [1.0, 0.0], 1.5)
+    for proposals in ([gaussian, student], [student, gaussian])
+        @test_throws ArgumentError FirstOrderGRAMIS(ProposalBank(proposals);
+            rounds=1, round_size=32, repulsion_strength=0.0)
+    end
+    prepared = prepare_sampler(Random.Xoshiro(43), x -> -sum(abs2, x) / 2,
+        APIS(ProposalBank([student]); rounds=2, round_size=64))
+    converted = MLDataDevices.cpu_device(Float32)(prepared)
+    result = importance_sample!(converted)
+    learned = only(current_proposal(converted).proposals)
+    @test eltype(result.samples) === Float32
+    expected = -log(2pi) - 2log(1.5) - 3.5log1p(1 / (5 * 1.5^2))
+    @test DensityInterface.logdensityof(learned, learned.location + [1.0f0, 0.0f0]) ≈ expected rtol=2e-6
+end
+
+@testset "Student-t bank mixture density" begin
+    locations = ([-1.0, 0.0], [1.0, 0.0])
+    dofs = (1.0, 7.0)
+    masses = [0.3, 0.7]
+    bank = ProposalBank([SphericalStudentT(dofs[j], locations[j], 1.0) for j in 1:2], masses)
+    target(x) = -sum(abs2, x) / 2
+    result = importance_sample(Random.Xoshiro(41), target, ImportanceSampling(bank; nsamples=128))
+    expected = map(eachcol(result.samples)) do x
+        density = sum(masses[j] / (2pi) *
+            (1 + sum(abs2, x - locations[j]) / dofs[j])^(-(dofs[j] + 2) / 2) for j in 1:2)
+        target(x) - log(density)
+    end
+    @test result.logweights ≈ expected
+end
+
+@testset "Student-t AMIS covariance fit and retrospective density" begin
+    nu = 5.0
+    location = [1.0, -1.0]
+    factor = [2.0 0; 0.3 1.0]
+    target(x) = -sum(abs2, x) / 2
+    # In two dimensions the Student-t normalizing constant is 1/(2pi*det(L)).
+    logdensity(x, mu, L) = -log(2pi) - sum(log, LinearAlgebra.diag(L)) -
+        (nu + 2) / 2 * log1p(sum(abs2, LinearAlgebra.LowerTriangular(L) \ (x - mu)) / nu)
+    function fit(samples, logweights, previous_covariance)
+        weights = exp.(logweights .- maximum(logweights))
+        weights ./= sum(weights)
+        mu = samples * weights
+        centered = samples .- mu
+        covariance = (centered .* transpose(weights)) * transpose(centered) +
+            sqrt(eps()) * LinearAlgebra.tr(previous_covariance) / 2 * LinearAlgebra.I
+        scale_factor = Matrix(LinearAlgebra.cholesky(LinearAlgebra.Symmetric((nu - 2) / nu * covariance)).L)
+        return mu, scale_factor, covariance
+    end
+    sampler = prepare_sampler(Random.Xoshiro(42), target,
+        AMIS(FactorStudentT(nu, location, factor); rounds=2, round_size=[64, 96]))
+    result = importance_sample!(sampler)
+    first_samples = result.samples[:, 1:64]
+    first_weights = [target(x) - logdensity(x, location, factor) for x in eachcol(first_samples)]
+    mu2, factor2, covariance2 = fit(first_samples, first_weights, nu / (nu - 2) * factor * factor')
+    expected = map(eachcol(result.samples)) do x
+        a = log(0.4) + logdensity(x, location, factor)
+        b = log(0.6) + logdensity(x, mu2, factor2)
+        m = max(a, b)
+        target(x) - (m + log(exp(a - m) + exp(b - m)))
+    end
+    @test result.logweights ≈ expected
+    mu3, factor3, _ = fit(result.samples, expected, covariance2)
+    learned = current_proposal(sampler)
+    point = mu3 + [1.0, -0.5]
+    @test DensityInterface.logdensityof(learned, point) ≈ logdensity(point, mu3, factor3)
+end
 
 const IS = ImportanceSamplers
 

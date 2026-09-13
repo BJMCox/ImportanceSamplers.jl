@@ -1,8 +1,8 @@
 # Layered importance sampling
 
-[`LAIS`](@ref) moves a bank of Gaussian proposal centres using independent or
+[`LAIS`](@ref) moves a bank of native proposal centres using independent or
 interacting upper MCMC transitions. Each round then draws lower importance samples
-from those proposals. The lower covariance factors stay fixed. Upper states are
+from those proposals. The lower scale factors stay fixed. Upper states are
 not extra output samples.
 
 The fixed [`RandomWalkMetropolis`](@ref) transition follows the parallel-chain
@@ -76,9 +76,12 @@ one integer per round. Every count must divide equally among the proposals,
 with at least one draw per proposal. All proposal masses must be equal and
 positive. Target mixture masses need not be equal.
 
-Native scalar, spherical-vector, diagonal, and factor Gaussians support
-`Float32` and `Float64`. All proposals share a layout and dimension. Student-t
-lower proposals and external MCMC packages are not supported by this method.
+Native scalar, spherical-vector, diagonal, and factor Gaussian or Student-t
+proposals support `Float32` and `Float64`. All lower proposals share a layout,
+dimension, and radial family. Student-t lower proposals retain their supplied
+positive degrees of freedom and scale as their centres move. Upper transition
+settings do not change these lower parameters. See [Native proposals](@ref).
+External MCMC packages are not supported by this method.
 
 ## Upper tuning and lower weights
 

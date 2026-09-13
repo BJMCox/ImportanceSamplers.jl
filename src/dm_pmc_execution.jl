@@ -37,13 +37,13 @@ struct _DMPMCWorkspace{S,W,I,Q,C,M,A,L}
 end
 
 _population_binding_sample(
-    bank::_PackedDiagonalGaussianBank{L,S,N,M,C,I,<:_ScalarGaussianLayout},
+    bank::_PackedDiagonalBank{L,S,N,M,C,I,<:_ScalarGaussianLayout},
 ) where {L,S,N,M,C,I} = zero(eltype(bank.locations))
 
-_population_binding_sample(bank::_PackedDiagonalGaussianBank) =
+_population_binding_sample(bank::_PackedDiagonalBank) =
     view(bank.locations, :, firstindex(bank.locations, 2))
 
-_population_binding_sample(bank::_PackedFactorGaussianBank) =
+_population_binding_sample(bank::_PackedFactorBank) =
     view(bank.locations, :, firstindex(bank.locations, 2))
 
 function _allocate_dm_pmc_workspace(bank, plan, ::Type{T}) where {T}

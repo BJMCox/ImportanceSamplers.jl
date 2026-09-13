@@ -29,7 +29,7 @@ function _gaussian_adaptation_workspace!(algorithm::NPMC, device, state, round)
     _sort_clipping_weights!(device, scratch, threshold_index)
     # A one-element device view keeps the order statistic on its device.
     clipped .= min.(raw, view(scratch, threshold_index:threshold_index))
-    return _GaussianMomentWorkspace(
+    return _MomentWorkspace(
         _sample_view(workspace.samples, indices),
         clipped,
         scratch,
@@ -60,7 +60,7 @@ function _launch_adaptive_gaussian_round!(
         view(logweights, indices), view(round_ids, indices),
         zero(eltype(logweights)), round,
     )
-    if history isa _GaussianFactorHistory &&
+    if history isa _FactorProposalHistory &&
        _use_factor_batch_path(device, history, factor_execution)
         _launch_npmc_factor_batch!(
             new_samples, output, failure_storage, normal_buffer,
@@ -77,7 +77,7 @@ function _launch_adaptive_gaussian_round!(
 end
 
 @kernel function _npmc_factor_weights_kernel!(
-    logweights, logtargets, solved, lognormalizers, slot, failure_storage,
+    logweights, logtargets, solved, lognormalizers, family, slot, failure_storage,
 )
     sample_index = @index(Global, Linear)
     T = eltype(logweights)
@@ -85,7 +85,8 @@ end
     @inbounds for coordinate in axes(solved, 1)
         square_norm += abs2(solved[coordinate, sample_index])
     end
-    logproposal = convert(T, @inbounds(lognormalizers[slot]) - square_norm / 2)
+    logproposal = convert(T, _radial_logdensity(family, @inbounds(lognormalizers[slot]),
+        square_norm, size(solved, 1)))
     reason = _native_proposal_reason(logproposal)
     if iszero(reason)
         weight, reason = _subtract_logweight(@inbounds(logtargets[sample_index]), logproposal)
@@ -113,7 +114,7 @@ function _launch_npmc_factor_batch!(
     _factor_batch_solve!(solve_scratch, samples, history, output.round)
     weight_kernel = _npmc_factor_weights_kernel!(backend)
     weight_kernel(
-        output.logweights, output.logtargets, solve_scratch, history.lognormalizers,
+        output.logweights, output.logtargets, solve_scratch, history.lognormalizers, history.family,
         output.round, failure_storage;
         ndrange=count, workgroupsize=_native_workgroupsize(execution, count),
     )
@@ -122,7 +123,7 @@ function _launch_npmc_factor_batch!(
 end
 
 function _preflight_accelerator_method(
-    device, target, algorithm::NPMC, state::_PreparedAdaptiveGaussian,
+    device, target, algorithm::NPMC, state::_PreparedMomentSampler,
     buffers::_RandomBuffers, factor_execution,
 )
     workspace = state.workspace
@@ -136,7 +137,7 @@ function _preflight_accelerator_method(
     indices = _gaussian_summary_indices(algorithm, state, round)
     samples = _sample_view(workspace.samples, indices)
     round_ids = similar(workspace.logweights, Int, 1)
-    use_factor_batch = state.history isa _GaussianFactorHistory &&
+    use_factor_batch = state.history isa _FactorProposalHistory &&
                        _use_factor_batch_path(
         device,
         state.history,
@@ -166,7 +167,7 @@ function _preflight_accelerator_method(
         weight_kernel = _npmc_factor_weights_kernel!(backend)
         for argument in (
             view(workspace.logweights, indices), view(workspace.logtargets, indices),
-            view(workspace.centered_scaled, :, indices), state.history.lognormalizers,
+            view(workspace.centered_scaled, :, indices), state.history.lognormalizers, state.history.family,
             round, buffers.failure_scratch.record.storage,
         )
             _preflight_kernel_argument(device, weight_kernel, argument)

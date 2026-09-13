@@ -411,6 +411,7 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
             round - 1,
         ) do
             Random.randn!(sampler.rng, buffers.normals)
+            _fill_radial_buffers!(sampler.rng, buffers.radial)
         end
         _capture_population_round(
             algorithm,
@@ -420,6 +421,8 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
             round - 1,
         ) do
             denominator = _population_denominator(method_state, round)
+            _prepare_mis_normals!(buffers.normals, buffers.radial, bank,
+                round_views.assignments, buffers.failure_scratch.record.storage, execution)
             launch = _use_factor_batch_mis_path(
                 sampler.device,
                 bank,

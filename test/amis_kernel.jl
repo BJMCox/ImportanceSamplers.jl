@@ -300,6 +300,7 @@ end
         scalar_kernel(
             scalar_covariance,
             scales,
+            AMISKernelIS.GaussianFamily(),
             1;
             ndrange=1,
         )
@@ -311,6 +312,7 @@ end
         dense_kernel(
             dense_covariance,
             factors,
+            AMISKernelIS.GaussianFamily(),
             1;
             ndrange=1,
         )
@@ -703,7 +705,8 @@ end
             factor,
             lognormalizer,
             failures,
-            4;
+            4,
+            AMISKernelIS.GaussianFamily();
             ndrange=1,
         )
         KernelAbstractions.synchronize(backend)
@@ -724,10 +727,11 @@ end
     for T in (Float32, Float64)
         location = T[0.5, -1, 2]
         factor = T[1.5 0 0; 0.25 0.75 0; -0.1 0.2 1.25]
-        history = AMISKernelIS._GaussianFactorHistory(
+        history = AMISKernelIS._FactorProposalHistory(
             reshape(copy(location), 3, 1),
             reshape(copy(factor), 3, 3, 1),
             T[-T(1.5) * log(T(2pi)) - sum(log, LinearAlgebra.diag(factor))],
+            AMISKernelIS.GaussianFamily(),
         )
         normals = T[1 -2 0.5 3; -1 0.25 2 -0.5; 0.5 1 -1 0.75]
         samples = zeros(T, size(normals))
@@ -782,10 +786,11 @@ end
     for T in (Float32, Float64)
         wide_factor = sqrt(floatmax(T))
         overflow_normal = T(2) * wide_factor
-        history = AMISKernelIS._GaussianFactorHistory(
+        history = AMISKernelIS._FactorProposalHistory(
             zeros(T, 1, 2),
             reshape(T[wide_factor, one(T)], 1, 1, 2),
             T[-T(0.5) * log(T(2pi)) - log(wide_factor), -T(0.5) * log(T(2pi))],
+            AMISKernelIS.GaussianFamily(),
         )
         samples = zeros(T, 1, 2)
         logtargets = T[zero(T), T(-Inf)]

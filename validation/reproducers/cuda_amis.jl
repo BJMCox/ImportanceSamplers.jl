@@ -318,7 +318,7 @@ function assert_amis_residence(prepared, result)
     history = state.history
     workspace = state.workspace
     buffers = prepared.random_buffers
-    scale_storage = history isa IS._GaussianScalarHistory ?
+    scale_storage = history isa IS._ScalarProposalHistory ?
                     history.scales : history.factors
     arrays = (
         state.logcounts,

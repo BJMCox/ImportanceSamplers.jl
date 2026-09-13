@@ -37,6 +37,14 @@ const _STATIC_MIS_DIRECT_SPHERICAL_PARAMETERS =
 
 const STATIC_MIS_CAPABILITY_ROWS = (
     (
+        bank="factor Student-t banks with component-specific degrees of freedom",
+        cpu="packed CPU execution",
+        factory=T -> ProposalBank([FactorStudentT(T(3 + j), zeros(T, 2), T[1 0; 0.2 1.1]) for j in 1:4]),
+        device=:supported,
+        direct=nothing,
+        evidence=(hardware="NVIDIA A100-PCIE-40GB", types=(Float32,), schemes=(:stratified_mixture,)),
+    ),
+    (
         bank="concrete homogeneous external proposals",
         cpu="generic CPU execution",
         factory=T -> ProposalBank(fill(CapabilityGaussian(), 4), T[1, 3, 2, 4]),

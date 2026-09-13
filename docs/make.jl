@@ -437,6 +437,7 @@ function checked_population_capability_table()
             spherical=SphericalGaussian(zeros(T, 2), one(T)),
             diagonal=DiagonalGaussian(zeros(T, 2), T[1, 2]),
             factor=FactorGaussian(zeros(T, 2), T[1 0; 0.25 1]),
+            student_factor=FactorStudentT(T(5), zeros(T, 2), T[1 0; 0.25 1]),
         )
         for (layout, proposal) in pairs(proposals)
             bank = ProposalBank([proposal], T[1])
@@ -457,7 +458,7 @@ function checked_population_capability_table()
         end
     end
     return Markdown.parse(
-        "| Method | Scalar type | Initial Gaussian layout | Docs-build CPU check |\n" *
+        "| Method | Scalar type | Initial proposal layout | Docs-build CPU check |\n" *
         "|:--|:--|:--|:--|\n" * join(rows, '\n'),
     )
 end
