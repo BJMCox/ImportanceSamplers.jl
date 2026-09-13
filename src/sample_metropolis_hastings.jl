@@ -221,11 +221,13 @@ function _smh_population_summary(logratios)
     return old_maximum, old_minimum, scaled_sum
 end
 
-function _smh_selected_slot(logratios, old_maximum, scaled_sum, uniform)
+function _smh_selected_slot(logratios, old_maximum, scaled_sum, uniform, cached_ratios=())
     threshold = uniform * scaled_sum
     cumulative = zero(scaled_sum)
     for slot in eachindex(logratios)
-        scaled, status = _smh_scaled_ratio(logratios[slot], old_maximum)
+        scaled, status = slot <= length(cached_ratios) ?
+            (cached_ratios[slot], UInt16(0)) :
+            _smh_scaled_ratio(logratios[slot], old_maximum)
         iszero(status) || return 0, status
         cumulative += scaled
         threshold < cumulative && return slot, UInt16(0)
@@ -295,6 +297,8 @@ end
     maxima = @localmem eltype(logratios) (_LOCAL_REDUCTION_WORKGROUP_SIZE,)
     minima = @localmem eltype(logratios) (_LOCAL_REDUCTION_WORKGROUP_SIZE,)
     sums = @localmem eltype(logratios) (_LOCAL_REDUCTION_WORKGROUP_SIZE,)
+    # Reuse the reduction's scaled prefix in the serial CDF scan.
+    cached_ratios = @localmem eltype(logratios) (_LOCAL_REDUCTION_WORKGROUP_SIZE,)
     invalid = @localmem Bool (_LOCAL_REDUCTION_WORKGROUP_SIZE,)
     status = @localmem UInt16 (1,)
     selected = @localmem Int (1,)
@@ -334,6 +338,7 @@ end
         local_invalid = !isfinite(candidate_logweight)
         for slot in lane:lanes:length(logratios)
             scaled, scaled_status = _smh_scaled_ratio(logratios[slot], maxima[1])
+            slot <= length(cached_ratios) && (cached_ratios[slot] = scaled)
             local_invalid |= !iszero(scaled_status)
             local_sum += scaled
         end
@@ -358,7 +363,7 @@ end
                 status[1] = _NATIVE_LOGWEIGHT_INVALID
             else
                 selected[1], status[1] = _smh_selected_slot(
-                    logratios, maxima[1], sums[1], selection_uniform)
+                    logratios, maxima[1], sums[1], selection_uniform, cached_ratios)
                 candidate_logratio = -candidate_logweight
                 logacceptance, acceptance_status = _smh_logacceptance(
                     maxima[1], minima[1], sums[1], candidate_logratio)
