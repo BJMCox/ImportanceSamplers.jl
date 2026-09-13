@@ -1132,6 +1132,15 @@ function _evaluate_frozen_gradients!(
     return nothing
 end
 
+function _evaluate_frozen_gradients!(
+    values, gradients, target, bound_gradient::_BoundDIBatchGradient,
+    locations, ::_KernelExecution,
+)
+    _batch_value_and_gradient!(values, gradients, bound_gradient, locations)
+    KernelAbstractions.synchronize(KernelAbstractions.get_backend(values))
+    return nothing
+end
+
 _first_order_gramis_bound_gradient(
     method_state::_PreparedFirstOrderGRAMIS,
     ::_SerialCPUExecution,

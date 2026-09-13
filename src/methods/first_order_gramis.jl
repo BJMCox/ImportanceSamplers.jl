@@ -790,8 +790,10 @@ function _prepare_transferred_method_state(
         _copy_to_device(device, plan.logcoefficients),
         _HostIntSequence(plan.offsets),
     )
-    binding_sample = view(committed.locations, :, 1)
-    bound_gradient = _prepare_bound_gradient(transferred_target, binding_sample, 1)
+    workspace = _copy_first_order_gramis_workspace(device, method_state.workspace)
+    bound_gradient = _prepare_accelerator_gradient(
+        transferred_target, run.locations, workspace.frozen_values,
+    )
     return _PreparedFirstOrderGRAMIS(
         committed,
         run,
@@ -808,7 +810,7 @@ function _prepare_transferred_method_state(
         bound_gradient,
         bound_gradient,
         copy(method_state.active_repulsion_rounds),
-        _copy_first_order_gramis_workspace(device, method_state.workspace),
+        workspace,
     )
 end
 

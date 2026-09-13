@@ -11,6 +11,15 @@ context-free API or `logdensity(sample, p)` when an explicit context is passed,
 and must return a `Float32` or `Float64` unnormalized log density. For CUDA,
 use a device-compatible callable and pass numerical arrays through `p`; opaque
 closure captures cannot be transferred reliably.
+
+An explicit `grad` takes priority over `adtype`. CPU automatic gradients use
+DifferentiationInterface. FirstOrderGRAMIS also supports reverse-mode
+`ADTypes.AutoEnzyme()` on CUDA when Enzyme is loaded. It batches the existing
+scalar logdensity callable internally; `p` remains constant during differentiation.
+The callable and its operations must support Enzyme's device differentiation.
+Structured GPU contexts can require Enzyme's runtime-activity mode; the supplied
+AD mode is preserved, not changed implicitly.
+Other accelerator AD backends and out-of-place explicit gradients are unsupported.
 """
 struct LogTarget{F,A<:ADTypes.AbstractADType,G}
     logdensity::F

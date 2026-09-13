@@ -142,6 +142,62 @@ MLDataDevices transfer before the first call. The A100 validator's supported
 contract row is specifically context-free; it is not hardware evidence for this
 revision. AMDGPU and Metal are unclaimed.
 
+## Automatic gradients on CUDA
+
+Load Enzyme and select its reverse mode through the existing `LogTarget` API:
+
+```julia
+using ImportanceSamplers, ADTypes, Enzyme, CUDA, MLDataDevices, Random
+
+function logtarget(x, p)
+    value = zero(eltype(x))
+    for i in eachindex(x)
+        z = x[i] - p.center[i]
+        value -= z^2 / 2 + z^4 / 4
+    end
+    return value
+end
+
+bank = ProposalBank([
+    SphericalGaussian(Float32[-1, 0], 1f0),
+    SphericalGaussian(Float32[1, 0], 1f0),
+])
+algorithm = FirstOrderGRAMIS(bank;
+    rounds=4, round_size=16_384, repulsion_strength=0f0)
+# Structured GPU contexts need runtime activity on the tested Enzyme stack.
+ad = AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse))
+target = LogTarget(logtarget, ad)
+prepared = prepare_sampler(Xoshiro(42), target, (; center=Float32[0.25, -0.5]), algorithm)
+physical = CUDA.device()
+device = MLDataDevices.CUDADevice{typeof(physical),Nothing}(physical)
+prepared = device(prepared)
+samples = importance_sample!(prepared)
+```
+
+The package evaluates the scalar target for each proposal mean in a KA kernel,
+then applies one prepared DI pullback to the full batch. The context is constant
+with respect to differentiation. Values, gradients, and derivative buffers stay
+on the device. The user does not write a batch target or transfer each sample.
+An explicit `grad` still wins when both gradient sources are supplied.
+
+This path requires Enzyme-differentiable device operations. It does not make
+arbitrary Julia code GPU-compatible, and it does not imply Reactant, AMDGPU, or
+Metal support. Explicit forward-mode Enzyme is rejected for this batch pullback.
+For a flat array context, static `Enzyme.Reverse` also works on the tested stack.
+Structured contexts can require `Enzyme.set_runtime_activity(Enzyme.Reverse)`.
+The package preserves the supplied AD mode rather than changing it implicitly.
+[DI documents limitations in its Enzyme support](https://juliadiff.org/DifferentiationInterface.jl/DifferentiationInterface/stable/#Compatibility).
+
+The optional GPU regression is `test/cuda_gradients.jl`. Run it in an environment
+that contains this checkout, CUDA, Enzyme, ADTypes, MLDataDevices, and Test:
+
+```sh
+julia --project=/path/to/gpu-environment test/cuda_gradients.jl
+```
+
+GPU tests do not run in the default CPU test suite. Enzyme remains an optional,
+user-loaded backend rather than an ImportanceSamplers dependency.
+
 ## Prepared reuse, results, and failures
 
 A successful [`importance_sample!`](@ref) call promotes its unsampled final

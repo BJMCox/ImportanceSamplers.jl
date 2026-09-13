@@ -25,6 +25,61 @@ struct _DIPreparationPool{P}
     thread_slots::Vector{Int}
 end
 
+struct _BoundDIBatchGradient{T,P,S} <: _BoundGradient
+    target::T
+    preparation::P
+    seeds::S
+end
+
+function _prepare_accelerator_gradient(target, locations, values)
+    return _prepare_bound_gradient(target, view(locations, :, 1), 1)
+end
+
+function _prepare_accelerator_gradient(
+    target::_PreparedLogTarget{F,P,A,Nothing}, locations, values,
+) where {F,P,A<:ADTypes.AutoEnzyme}
+    sample = view(locations, :, 1)
+    ADTypes.mode(target.adtype) isa Union{ADTypes.ReverseMode,ADTypes.ForwardOrReverseMode} ||
+        _reject_cpu_gradient_on_accelerator(sample)
+    _bind_resolved_target(target, sample)
+    seeds = similar(values)
+    fill!(seeds, one(eltype(seeds)))
+    preparation = DifferentiationInterface.prepare_pullback(
+        _batch_logtarget!, values, target.adtype, locations, (seeds,),
+        DifferentiationInterface.Constant(target.logdensity),
+        DifferentiationInterface.Constant(target.context),
+    )
+    return _BoundDIBatchGradient(target, preparation, seeds)
+end
+
+_batch_target_value(f, x, p) = f(x, p)
+_batch_target_value(f, x, ::_NoTargetContext) = f(x)
+
+@kernel function _batch_logtarget_kernel!(values, locations, f, p)
+    column = @index(Global, Linear)
+    values[column] = _batch_target_value(f, view(locations, :, column), p)
+end
+
+function _batch_logtarget!(values, locations, f, p)
+    backend = KernelAbstractions.get_backend(locations)
+    _batch_logtarget_kernel!(backend, 64)(values, locations, f, p;
+        ndrange=size(locations, 2))
+    return nothing
+end
+
+function _batch_value_and_gradient!(
+    values, gradients, bound::_BoundDIBatchGradient, locations,
+)
+    # Independent columns give a block-diagonal Jacobian. A seed of ones returns
+    # every sample gradient without differentiating a cross-sample reduction.
+    DifferentiationInterface.pullback!(
+        _batch_logtarget!, values, (gradients,), bound.preparation, bound.target.adtype,
+        locations, (bound.seeds,), DifferentiationInterface.Constant(bound.target.logdensity),
+        DifferentiationInterface.Constant(bound.target.context),
+    )
+    return nothing
+end
+
 const _GRADIENT_SOURCE_MESSAGE =
     "a gradient requires LogTarget(logdensity; grad=grad), " *
     "LogTarget(logdensity, adtype), or a bare first-order " *

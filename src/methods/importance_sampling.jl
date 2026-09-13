@@ -144,7 +144,7 @@ function Base.showerror(io::IO, error::SamplerDeviceError)
         "transformed proposal banks are CPU-only"
     elseif error.reason === :gradient_source_cpu_only
         "the selected gradient source is CPU-only; accelerator gradients " *
-        "require an explicit device-compatible in-place gradient"
+        "require a device-compatible in-place gradient or supported batched AD"
     elseif error.reason === :out_of_place_gradient_cpu_only
         "out-of-place explicit gradients are CPU-only; accelerator gradients " *
         "require a device-compatible in-place gradient"
