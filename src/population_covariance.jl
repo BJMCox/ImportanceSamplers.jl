@@ -72,7 +72,7 @@ function _store_population_raw_mean!(
 end
 
 @inline function _population_current_covariance(
-    bank::_PackedFactorGaussianBank,
+    bank::_PackedFactorBank,
     row,
     column,
     proposal_slot,
@@ -82,7 +82,7 @@ end
         row,
         column,
         proposal_slot,
-    )
+    ) * _covariance_multiplier(_radial_family_at(bank.family, proposal_slot), eltype(bank.factors))
 end
 
 @inline function _population_factor_covariance(
@@ -102,13 +102,14 @@ end
 end
 
 @inline function _population_current_covariance(
-    bank::_PackedDiagonalGaussianBank,
+    bank::_PackedDiagonalBank,
     row,
     column,
     proposal_slot,
 )
     row == column || return zero(eltype(bank.scales))
-    return abs2(@inbounds(bank.scales[row, proposal_slot]))
+    return abs2(@inbounds(bank.scales[row, proposal_slot])) *
+        _covariance_multiplier(_radial_family_at(bank.family, proposal_slot), eltype(bank.scales))
 end
 
 @inline function _population_power_ess(
@@ -975,6 +976,22 @@ function _factor_population_covariances!(
         ndrange=_POPULATION_CHOLESKY_WORKGROUP_SIZE * proposal_count,
         workgroupsize=_POPULATION_CHOLESKY_WORKGROUP_SIZE,
     )
+    KernelAbstractions.synchronize(backend)
+    return nothing
+end
+
+# Convert fitted covariance factors once, before publishing proposal scale factors.
+_scale_population_factors!(factors, ::GaussianFamily, status, execution) = nothing
+@kernel function _scale_population_factors_kernel!(factors, family, status)
+    row, column, slot = @index(Global, NTuple)
+    if status === nothing || status[slot] == _POPULATION_COVARIANCE_READY
+        factors[row, column, slot] *= sqrt(inv(_covariance_multiplier(
+            _radial_family_at(family, slot), eltype(factors))))
+    end
+end
+function _scale_population_factors!(factors, family::_PackedStudentTFamily, status, execution)
+    backend = KernelAbstractions.get_backend(factors)
+    _scale_population_factors_kernel!(backend)(factors, family, status; ndrange=size(factors))
     KernelAbstractions.synchronize(backend)
     return nothing
 end

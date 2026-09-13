@@ -14,7 +14,7 @@ end
 
 @testset "realized mixture denominator characterization" begin
     for T in (Float32, Float64)
-        bank = DMPMCKernelIS._pack_native_gaussian_bank(
+        bank = DMPMCKernelIS._pack_native_radial_bank(
             ProposalBank(
                 [SphericalGaussian(T(-1), one(T)), SphericalGaussian(T(1), one(T))],
                 T[1, 1],
@@ -134,7 +134,7 @@ end
 
 @testset "DM-PMC realized-count denominator reuses the MIS round" begin
     for T in (Float32, Float64)
-        bank = DMPMCKernelIS._pack_native_gaussian_bank(
+        bank = DMPMCKernelIS._pack_native_radial_bank(
             ProposalBank(
                 [SphericalGaussian(T(-1), one(T)), SphericalGaussian(T(1), one(T))],
                 T[1, 1],

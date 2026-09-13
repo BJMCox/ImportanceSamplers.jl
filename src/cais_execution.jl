@@ -57,8 +57,8 @@ function _population_execution(sampler, threaded, ::_PreparedCAIS)
 end
 
 function _copy_cais_bank!(
-    destination::_PackedDiagonalGaussianBank,
-    source::_PackedDiagonalGaussianBank,
+    destination::_PackedDiagonalBank,
+    source::_PackedDiagonalBank,
 )
     copyto!(destination.locations, source.locations)
     copyto!(destination.scales, source.scales)
@@ -67,8 +67,8 @@ function _copy_cais_bank!(
 end
 
 function _copy_cais_bank!(
-    destination::_PackedFactorGaussianBank,
-    source::_PackedFactorGaussianBank,
+    destination::_PackedFactorBank,
+    source::_PackedFactorBank,
 )
     copyto!(destination.locations, source.locations)
     copyto!(destination.factors, source.factors)
@@ -93,6 +93,7 @@ end
 @kernel function _update_cais_lognormalizers_kernel!(
     lognormalizers,
     fitted_factors,
+    family,
 )
     proposal_slot = @index(Global, Linear)
     T = eltype(lognormalizers)
@@ -101,11 +102,11 @@ end
         logabsdet += log(@inbounds(fitted_factors[coordinate, coordinate, proposal_slot]))
     end
     @inbounds lognormalizers[proposal_slot] =
-        _gaussian_lognormalizer(T, size(fitted_factors, 1), logabsdet)
+        _radial_lognormalizer(_radial_family_at(family, proposal_slot), T, size(fitted_factors, 1), logabsdet)
 end
 
 function _install_cais_factors!(
-    candidate::_PackedDiagonalGaussianBank,
+    candidate::_PackedDiagonalBank,
     fitted_factors,
     execution,
 )
@@ -125,7 +126,7 @@ function _install_cais_factors!(
 end
 
 function _install_cais_factors!(
-    candidate::_PackedFactorGaussianBank,
+    candidate::_PackedFactorBank,
     fitted_factors,
     execution,
 )
@@ -146,7 +147,7 @@ function _update_cais_lognormalizers!(
             logabsdet += log(fitted_factors[coordinate, coordinate, proposal_slot])
         end
         candidate.lognormalizers[proposal_slot] =
-            _gaussian_lognormalizer(T, dimension, logabsdet)
+            _radial_lognormalizer(_radial_family_at(candidate.family, proposal_slot), T, dimension, logabsdet)
     end
     return nothing
 end
@@ -157,7 +158,8 @@ function _update_cais_lognormalizers!(candidate, fitted_factors, execution::_Ker
     proposal_count = length(candidate.lognormalizers)
     kernel(
         candidate.lognormalizers,
-        fitted_factors;
+        fitted_factors,
+        candidate.family;
         ndrange=proposal_count,
         workgroupsize=_population_workgroupsize(
             execution,
@@ -259,6 +261,7 @@ function _advance_population!(
         execution,
     )
     _throw_cais_factor_failure(sampler.device, workspace.factor_info, transfers)
+    _scale_population_factors!(workspace.fitted_factors, candidate.family, nothing, execution)
     _install_cais_factors!(candidate, workspace.fitted_factors, execution)
     _update_cais_lognormalizers!(candidate, workspace.fitted_factors, execution)
     copyto!(view(workspace.local_ess_history, :, round), workspace.local_ess)
@@ -358,6 +361,7 @@ function _preflight_accelerator_method(
             view(output.logweights, group),
             view(workspace.solve_scratch, :, group),
             bank.lognormalizers,
+            bank.family,
             1,
             view(output.proposal_ids, group),
             buffers.failure_scratch.record.storage,

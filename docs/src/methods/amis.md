@@ -20,8 +20,11 @@ learned = current_proposal(sampler)
 ```
 
 The proposal must use native `Float32` or `Float64` storage. A scalar spherical
-Gaussian keeps its scalar layout. Vector spherical, diagonal, and factor
-Gaussians use the vector factor path and learn a full covariance.
+Gaussian or Student-t keeps its scalar layout. Vector spherical, diagonal, and
+factor proposals use the vector factor path and learn a full covariance.
+Student-t proposals require `nu > 2` and keep `nu` fixed. Moment updates and the
+ridge use covariance, then convert to Student-t scale. Retrospective densities
+use each stored Student-t proposal. See [Native proposals](@ref).
 
 `round_size` is either one positive `Int`, repeated for all `rounds`, or a
 positive `Vector{Int}` with one entry per round. Preparation copies and resolves

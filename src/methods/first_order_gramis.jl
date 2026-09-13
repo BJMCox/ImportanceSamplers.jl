@@ -10,8 +10,11 @@ const _VALIDATED_FIRST_ORDER_GRAMIS_TOKEN = _ValidatedFirstOrderGRAMISToken()
                      max_backtracking_trials=20)
 
 Configure the package's first-order GRAMIS-CAIS hybrid for a fixed population
-of at least two equally weighted native Gaussian proposals. Spherical,
-diagonal, and factor Gaussians may be mixed when they share one positive
+of at least two equally weighted native Gaussian or Student-t proposals.
+Student-t fits require `nu > 2` and retain each `nu`. Preconditioning, repulsion,
+blending, and regularization use actual covariance, then fitted factors convert
+to Student-t scale. Each bank uses one radial family. Spherical,
+diagonal, and factor forms may be mixed when they share one positive
 dimension and one `Float32` or `Float64` scalar type. Initial means must be
 distinct. Preparation canonicalizes every proposal to a dense lower-factor
 representation while preserving configured masses and stable proposal IDs.
@@ -193,7 +196,7 @@ function _validate_first_order_gramis_bank(bank::ProposalBank)
             DimensionMismatch("FirstOrderGRAMIS proposals must share one dimension"),
         )
     end
-
+    _validate_radial_bank_family(bank.proposals)
     return nothing
 end
 
@@ -214,12 +217,13 @@ function _validate_first_order_gramis_distinct_means(bank::ProposalBank)
 end
 
 function _validate_first_order_gramis_proposal(proposal)
-    proposal isa _GaussianProposal && _is_packable_native_gaussian(proposal) || throw(
+    proposal isa _NativeRadialProposal && _is_packable_native_radial(proposal) || throw(
         ArgumentError(
             "FirstOrderGRAMIS requires native Float32 or Float64 spherical, " *
-            "diagonal, or factor Gaussian proposals",
+            "diagonal, or factor Gaussian or Student-t proposals",
         ),
     )
+    _validate_moment_family(proposal.family)
     return nothing
 end
 
@@ -316,24 +320,14 @@ function _first_order_gramis_factor_bank(bank::ProposalBank)
         _copy_packed_gaussian_factor!(factors, proposal, slot)
         lognormalizers[slot] = proposal.lognormalizer
     end
-    return _PackedFactorGaussianBank(
+    return _PackedFactorBank(
         locations,
         factors,
         lognormalizers,
         logmasses,
         cdf,
         proposal_ids,
-    )
-end
-
-function _first_order_gramis_state_bank(bank::_PackedFactorGaussianBank)
-    return _PackedFactorGaussianBank(
-        copy(bank.locations),
-        copy(bank.factors),
-        copy(bank.lognormalizers),
-        bank.logmasses,
-        bank.cdf,
-        bank.proposal_ids,
+        _packed_family(bank.proposals),
     )
 end
 
@@ -529,13 +523,13 @@ end
 
 function _prepare_first_order_gramis_state(
     algorithm::FirstOrderGRAMIS,
-    committed::_PackedFactorGaussianBank,
+    committed::_PackedFactorBank,
     ::Type{L},
     serial_gradient,
     threaded_gradient,
 ) where {L}
-    run = _first_order_gramis_state_bank(committed)
-    candidate = _first_order_gramis_state_bank(committed)
+    run = _population_state_bank(committed)
+    candidate = _population_state_bank(committed)
     T = eltype(committed.locations)
     schedule = _resolve_adaptive_schedule(algorithm.rounds, algorithm.round_size)
     proposal_count = size(committed.locations, 2)
@@ -714,7 +708,8 @@ function _allocate_random_buffers(
     uniform = similar(prototype, T, 0)
     normal = similar(prototype, T, dimension * capacity)
     failure_scratch = _allocate_native_failure_scratch(normal, capacity)
-    return _RandomBuffers(uniform, normal, failure_scratch)
+    return _RandomBuffers(uniform, normal, failure_scratch,
+        _allocate_radial_buffers(prototype, method_state.committed.family, capacity))
 end
 
 function _copy_algorithm(device, algorithm::FirstOrderGRAMIS)
@@ -784,9 +779,9 @@ function _prepare_transferred_method_state(
     method_state::_PreparedFirstOrderGRAMIS,
     transferred_target,
 )
-    committed = _copy_packed_gaussian_bank(device, method_state.committed)
-    run = _first_order_gramis_state_bank(committed)
-    candidate = _first_order_gramis_state_bank(committed)
+    committed = _copy_packed_bank(device, method_state.committed)
+    run = _population_state_bank(committed)
+    candidate = _population_state_bank(committed)
     plan = method_state.plan
     transferred_plan = _DeterministicAllocationPlan(
         _HostIntSequence(plan.schedule),
@@ -1063,7 +1058,8 @@ end
     current_proposal(sampler)
     current_proposal(destination, sampler)
 
-Return an independent `ProposalBank` of dense [`FactorGaussian`](@ref)
+Return an independent `ProposalBank` of dense [`FactorGaussian`](@ref) or
+[`FactorStudentT`](@ref)
 snapshots from the population committed by a prepared [`FirstOrderGRAMIS`](@ref)
 sampler. Configured masses and stable proposal IDs are preserved. The returned
 locations, factors, log normalizers, proposal vector, and masses do not alias
@@ -1101,19 +1097,21 @@ function current_proposal(
             committed.lognormalizers,
             committed.proposal_ids,
             sampler.algorithm.bank.masses,
+            committed.family,
         )
     end
-    parameters = _with_backend_device(sampler.device) do
-        (
+    parameters, family = _with_backend_device(sampler.device) do
+        ((
             destination(Array(committed.locations)),
             destination(Array(committed.factors)),
             destination(Array(committed.lognormalizers)),
             destination(Array(committed.proposal_ids)),
-        )
+        ), _copy_to_device(destination, committed.family))
     end
     return _factor_population_snapshot(
         parameters...,
         sampler.algorithm.bank.masses,
+        family,
     )
 end
 

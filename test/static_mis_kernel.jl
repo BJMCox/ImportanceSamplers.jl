@@ -117,9 +117,9 @@ end
             ],
             T[3, 1],
         )
-        scalar = @inferred ISK._pack_native_gaussian_bank(scalar_bank)
+        scalar = @inferred ISK._pack_native_radial_bank(scalar_bank)
 
-        @test scalar isa ISK._PackedDiagonalGaussianBank
+        @test scalar isa ISK._PackedDiagonalBank
         @test scalar.layout isa ISK._ScalarGaussianLayout
         @test size(scalar.locations) == (1, 2)
         @test size(scalar.scales) == (1, 2)
@@ -137,9 +137,9 @@ end
             ],
             T[3, 0, 1],
         )
-        vector = ISK._pack_native_gaussian_bank(vector_bank)
+        vector = ISK._pack_native_radial_bank(vector_bank)
 
-        @test vector isa ISK._PackedDiagonalGaussianBank
+        @test vector isa ISK._PackedDiagonalBank
         @test vector.layout isa ISK._VectorGaussianLayout
         @test size(vector.locations) == (2, 2)
         @test size(vector.scales) == (2, 2)
@@ -154,7 +154,7 @@ end
         [SphericalGaussian(-1.0f0, 1.0f0), SphericalGaussian(1.0f0, 1.0f0)],
         Float32[1.0f-8, 1.0f0],
     )
-    coherent = @inferred ISK._pack_native_gaussian_bank(coherent_bank)
+    coherent = @inferred ISK._pack_native_radial_bank(coherent_bank)
     partial = prepare_sampler(
         Random.Xoshiro(0x5408),
         _ -> 0.0f0,
@@ -181,9 +181,9 @@ end
         ],
         [1.0, 2.0, 3.0],
     )
-    packed = ISK._pack_native_gaussian_bank(bank)
+    packed = ISK._pack_native_radial_bank(bank)
 
-    @test packed isa ISK._PackedFactorGaussianBank
+    @test packed isa ISK._PackedFactorBank
     @test packed.proposal_ids == [1, 2, 3]
     @test packed.locations == [0.0 1.0 2.0; 0.0 1.0 2.0]
     @test packed.factors[:, :, 1] == [2.0 0.0; 0.0 2.0]
@@ -198,14 +198,14 @@ end
             FactorGaussian(ones(2), [1.0 0.0; 0.25 1.0]),
         ],
     )
-    homogeneous = @inferred ISK._pack_native_gaussian_bank(homogeneous_bank)
-    @test homogeneous isa ISK._PackedFactorGaussianBank
+    homogeneous = @inferred ISK._pack_native_radial_bank(homogeneous_bank)
+    @test homogeneous isa ISK._PackedFactorBank
 
     factor32 = FactorGaussian(
         Float32[1, -1],
         Float32[0.5 0; -0.25 1.5],
     )
-    packed32 = ISK._pack_native_gaussian_bank(
+    packed32 = ISK._pack_native_radial_bank(
         ProposalBank(
             Any[
                 factor32,
@@ -214,7 +214,7 @@ end
             Float32[3, 1],
         ),
     )
-    @test packed32 isa ISK._PackedFactorGaussianBank
+    @test packed32 isa ISK._PackedFactorBank
     @test eltype(packed32.locations) === Float32
     @test eltype(packed32.factors) === Float32
     @test packed32.proposal_ids == [2, 1]
@@ -225,7 +225,7 @@ end
         fill(99.0, 3),
         Matrix{Float64}(LinearAlgebra.I, 3, 3),
     )
-    diagonal_only = ISK._pack_native_gaussian_bank(
+    diagonal_only = ISK._pack_native_radial_bank(
         ProposalBank(
             Any[
                 SphericalGaussian(zeros(2), 2.0),
@@ -235,10 +235,10 @@ end
             [1.0, 0.0, 2.0],
         ),
     )
-    @test diagonal_only isa ISK._PackedDiagonalGaussianBank
+    @test diagonal_only isa ISK._PackedDiagonalBank
     @test diagonal_only.proposal_ids == [1, 3]
 
-    @test_throws DimensionMismatch ISK._pack_native_gaussian_bank(
+    @test_throws DimensionMismatch ISK._pack_native_radial_bank(
         ProposalBank(
             Any[
                 FactorGaussian(zeros(2), Matrix{Float64}(LinearAlgebra.I, 2, 2)),
@@ -246,7 +246,7 @@ end
             ],
         ),
     )
-    @test_throws ArgumentError ISK._pack_native_gaussian_bank(
+    @test_throws ArgumentError ISK._pack_native_radial_bank(
         ProposalBank(
             Any[
                 SphericalGaussian(0.0, 1.0),
@@ -260,7 +260,7 @@ end
         Matrix{Float64}(LinearAlgebra.I, 2, 2),
     )
     nontriangular.scale.factor[1, 2] = 0.5
-    @test_throws ArgumentError ISK._pack_native_gaussian_bank(
+    @test_throws ArgumentError ISK._pack_native_radial_bank(
         ProposalBank(Any[nontriangular]),
     )
 end
@@ -268,7 +268,7 @@ end
 @testset "packed factor Gaussian sampling and density primitives" begin
     for T in (Float32, Float64)
         factor = T[1 0; 0.25 2]
-        packed = ISK._pack_native_gaussian_bank(
+        packed = ISK._pack_native_radial_bank(
             ProposalBank(Any[FactorGaussian(fill(T(2), 2), factor)], T[1]),
         )
         normals = T[1, 2]
@@ -404,7 +404,7 @@ end
         threaded=false,
     )
 
-    @test factor_sampler.method_state.bank isa ISK._PackedFactorGaussianBank
+    @test factor_sampler.method_state.bank isa ISK._PackedFactorBank
     @test factor_sampler.random_buffers isa ISK._PackedStaticMISRandomBuffers
     @test size(factor_sampler.random_buffers.solve_scratch) == (2, 4)
     factor_result = @inferred importance_sample!(factor_sampler)
@@ -458,7 +458,7 @@ end
         threaded=false,
     )
     @test erased_factor_sampler.method_state.bank isa
-          ISK._PackedFactorGaussianBank
+          ISK._PackedFactorBank
     @test length(importance_sample!(erased_factor_sampler)) == 4
 
     for generic_sampler in (transformed_sampler, product_sampler)
@@ -475,7 +475,7 @@ end
 
 function static_mis_kernel_sample(bank, normals, sample_index, slot)
     values = static_mis_prefilled_sample(bank, normals, sample_index, slot)
-    return bank isa ISK._PackedDiagonalGaussianBank &&
+    return bank isa ISK._PackedDiagonalBank &&
            bank.layout isa ISK._ScalarGaussianLayout ? only(values) : values
 end
 
@@ -568,7 +568,7 @@ function static_mis_prefilled_sample(bank, normals, sample_index, proposal_slot)
     sample = Vector{T}(undef, dimension)
     for row in 1:dimension
         value = bank.locations[row, proposal_slot]
-        if bank isa ISK._PackedFactorGaussianBank
+        if bank isa ISK._PackedFactorBank
             for column in 1:row
                 value += bank.factors[row, column, proposal_slot] *
                          normals[offset + column]
@@ -589,7 +589,7 @@ function static_mis_prefilled_logdensity(bank, sample, proposal_slot)
     for row in 1:dimension
         coordinate = sample isa Real ? sample : sample[row]
         standardized = coordinate - bank.locations[row, proposal_slot]
-        if bank isa ISK._PackedFactorGaussianBank
+        if bank isa ISK._PackedFactorBank
             for column in 1:(row - 1)
                 standardized -= bank.factors[row, column, proposal_slot] *
                                 solved[column]
@@ -700,7 +700,7 @@ end
 
 @testset "batched factor execution accepts capacity-sized solve scratch" begin
     T = Float64
-    bank = ISK._pack_native_gaussian_bank(ProposalBank([
+    bank = ISK._pack_native_radial_bank(ProposalBank([
         FactorGaussian(T[-1, 1], T[1 0; 0.5 2]),
         FactorGaussian(T[1, -1], T[2 0; -0.5 1]),
     ]))
@@ -765,7 +765,7 @@ end
 
 @testset "shared packed MIS round execution" begin
     for T in (Float32, Float64)
-        diagonal_bank = @inferred ISK._pack_native_gaussian_bank(
+        diagonal_bank = @inferred ISK._pack_native_radial_bank(
             ProposalBank(
                 [
                     DiagonalGaussian(T[-1, 1], T[0.5, 2]),
@@ -774,7 +774,7 @@ end
                 T[1, 3],
             ),
         )
-        factor_bank = @inferred ISK._pack_native_gaussian_bank(
+        factor_bank = @inferred ISK._pack_native_radial_bank(
             ProposalBank(
                 [
                     FactorGaussian(T[-1, 1], T[1 0; 0.5 2]),
@@ -1011,7 +1011,7 @@ end
             )
             result = importance_sample!(sampler)
 
-            @test packed isa ISK._PackedFactorGaussianBank
+            @test packed isa ISK._PackedFactorBank
             @test collect(eachcol(result.samples)) == oracle.samples
             @test result.logweights ≈ oracle.logweights rtol = 32eps(T)
             @test result.provenance.proposal_id == oracle.proposal_ids
@@ -1194,7 +1194,7 @@ end
 
     function packed_table_denominator(logdensities, denominator; generating_slot=1)
         T = eltype(logdensities)
-        bank = ISK._PackedDiagonalGaussianBank(
+        bank = ISK._PackedDiagonalBank(
             zeros(T, 1, 2),
             ones(T, 1, 2),
             collect(logdensities),
@@ -1202,6 +1202,7 @@ end
             T[0.5, 1],
             [1, 2],
             ISK._ScalarGaussianLayout(),
+            ISK.GaussianFamily(),
         )
         return ISK._mis_logdenominator_core(
             T,

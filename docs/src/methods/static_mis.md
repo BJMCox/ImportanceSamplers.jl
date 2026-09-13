@@ -98,7 +98,7 @@ no strict variance ordering holds for every target and proposal bank.
 ## Preparation and execution capabilities
 
 Positive-mass proposals must have one logical sample dimension. Packed native
-Gaussian banks additionally require one scalar/vector layout and one floating
+Gaussian or Student-t banks additionally require one scalar/vector layout and one floating
 type. Mixed dimensions, mixed `Float32`/`Float64`, and scalar mixed with a
 length-one vector are rejected during preparation, before RNG use.
 

@@ -4,16 +4,17 @@ const _VALIDATED_APIS_TOKEN = _ValidatedAPISToken()
 """
     APIS(bank; rounds, round_size)
 
-Configure adaptive population importance sampling with a fixed Gaussian
-proposal population. Each round is one APIS epoch. `round_size` is the total
+Configure adaptive population importance sampling with a fixed Gaussian or Student-t
+proposal population. Student-t locations adapt, but each positive `nu` and
+scale stays fixed. A bank uses one radial family. Each round is one APIS epoch. `round_size` is the total
 number of samples in an epoch and may be a positive `Int` or a vector with one
 entry per epoch.
 
 APIS requires equal positive proposal masses, equal allocation within every
 epoch, and at least two samples per proposal. It updates proposal means after
-each epoch while retaining the configured covariance factors.
+each epoch while retaining the configured scale factors.
 """
-struct APIS{B<:ProposalBank,S} <: _FixedGaussianPopulationSampler
+struct APIS{B<:ProposalBank,S} <: _FixedPopulationSampler
     bank::B
     rounds::Int
     round_size::S
@@ -76,8 +77,8 @@ end
 
 _accelerator_method_state_limit(
     ::_PreparedAPIS{<:Union{
-        _PackedDiagonalGaussianBank,
-        _PackedFactorGaussianBank,
+        _PackedDiagonalBank,
+        _PackedFactorBank,
     }},
 ) = nothing
 
@@ -121,7 +122,8 @@ function _allocate_random_buffers(
         normals,
         maximum_round_size,
     )
-    return _PopulationNormalBuffers(normals, failure_scratch)
+    return _PopulationNormalBuffers(normals, failure_scratch,
+        _allocate_radial_buffers(normals, bank.family, maximum_round_size))
 end
 
 function _apis_round_views(method_state::_PreparedAPIS, round)
@@ -167,7 +169,7 @@ function _prepare_transferred_method_state(
         _copy_to_device(device, workspace.candidate_locations),
         _copy_to_device(device, workspace.solve_scratch),
     )
-    transferred_bank = _copy_packed_gaussian_bank(device, method_state.bank)
+    transferred_bank = _copy_packed_bank(device, method_state.bank)
     return _PreparedAPIS(
         transferred_bank,
         _population_run_bank(transferred_bank),

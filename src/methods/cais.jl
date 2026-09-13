@@ -5,7 +5,9 @@ const _VALIDATED_CAIS_TOKEN = _ValidatedCAISToken()
     CAIS(bank; rounds, round_size, covariance_ess_threshold=nothing)
 
 Configure canonical covariance-adaptive importance sampling for an equally
-weighted population of native Gaussian proposals. `round_size` is the total
+weighted population of native Gaussian or Student-t proposals. Student-t fits
+require `nu > 2`, retain each component's `nu`, and convert fitted covariance
+to Student-t scale. Each bank must use one radial family. `round_size` is the total
 sample count in each round and may be a positive `Int` or a `Vector{Int}` with
 one entry per round.
 
@@ -15,7 +17,7 @@ Every proposal receives the same number of samples. If
 package default, not a default specified by the CAIS paper. An explicit real
 threshold must satisfy `d < threshold < m` in every round.
 """
-struct CAIS{B<:ProposalBank,S,E} <: _FixedGaussianPopulationSampler
+struct CAIS{B<:ProposalBank,S,E} <: _FixedPopulationSampler
     bank::B
     rounds::Int
     round_size::S
@@ -70,6 +72,7 @@ function CAIS(
         )
     end
 
+    _validate_radial_bank_family(proposals)
     threshold = covariance_ess_threshold
     threshold === nothing ||
         threshold isa Real && !(threshold isa Bool) && isfinite(threshold) || throw(
@@ -108,12 +111,13 @@ function CAIS(
 end
 
 function _validate_cais_proposal(proposal)
-    proposal isa _GaussianProposal && _is_packable_native_gaussian(proposal) || throw(
+    proposal isa _NativeRadialProposal && _is_packable_native_radial(proposal) || throw(
         ArgumentError(
             "CAIS requires native Float32 or Float64 spherical, diagonal, " *
-            "or factor Gaussian proposals",
+            "or factor Gaussian or Student-t proposals",
         ),
     )
+    _validate_moment_family(proposal.family)
     return nothing
 end
 
@@ -158,39 +162,16 @@ function _prepare_cais_bank(bank::ProposalBank)
     proposals = view(bank.proposals, proposal_ids)
     layout = first(proposals).location isa _NativeGaussianFloat
     pack_kind = layout ? Val(:diagonal) : Val(:factor)
-    packed = _pack_native_gaussian_bank(
+    packed = _pack_native_radial_bank(
         bank,
         proposal_ids,
         logmasses,
         cdf,
         pack_kind,
     )
-    packed isa Union{_PackedDiagonalGaussianBank,_PackedFactorGaussianBank} ||
-        error("validated CAIS bank did not pack as a native Gaussian population")
+    packed isa Union{_PackedDiagonalBank,_PackedFactorBank} ||
+        error("validated CAIS bank did not pack as a native population")
     return packed
-end
-
-function _cais_state_bank(bank::_PackedDiagonalGaussianBank)
-    return _PackedDiagonalGaussianBank(
-        copy(bank.locations),
-        copy(bank.scales),
-        copy(bank.lognormalizers),
-        bank.logmasses,
-        bank.cdf,
-        bank.proposal_ids,
-        bank.layout,
-    )
-end
-
-function _cais_state_bank(bank::_PackedFactorGaussianBank)
-    return _PackedFactorGaussianBank(
-        copy(bank.locations),
-        copy(bank.factors),
-        copy(bank.lognormalizers),
-        bank.logmasses,
-        bank.cdf,
-        bank.proposal_ids,
-    )
 end
 
 function _cais_group_starts(counts)
@@ -287,8 +268,8 @@ function _prepare_cais_state(algorithm::CAIS, prepared_target=nothing)
     workspace = _allocate_cais_workspace(bank, plan, log_type)
     return _PreparedCAIS(
         bank,
-        _cais_state_bank(bank),
-        _cais_state_bank(bank),
+        _population_state_bank(bank),
+        _population_state_bank(bank),
         plan,
         thresholds,
         tolerance,
@@ -303,8 +284,8 @@ _prepare_method_state(algorithm::CAIS, prepared_target) =
 
 _accelerator_method_state_limit(
     ::_PreparedCAIS{<:Union{
-        _PackedDiagonalGaussianBank,
-        _PackedFactorGaussianBank,
+        _PackedDiagonalBank,
+        _PackedFactorBank,
     }},
 ) = nothing
 
@@ -322,7 +303,8 @@ function _allocate_random_buffers(
         size(bank.locations, 1) * capacity,
     )
     failure_scratch = _allocate_native_failure_scratch(normals, capacity)
-    return _PopulationNormalBuffers(normals, failure_scratch)
+    return _PopulationNormalBuffers(normals, failure_scratch,
+        _allocate_radial_buffers(normals, bank.family, capacity))
 end
 
 function _cais_round_views(method_state::_PreparedCAIS, round)
@@ -363,12 +345,12 @@ function _prepare_transferred_method_state(
     method_state::_PreparedCAIS,
     _transferred_target,
 )
-    bank = _copy_packed_gaussian_bank(device, method_state.bank)
+    bank = _copy_packed_bank(device, method_state.bank)
     plan = _transfer_population_plan(device, method_state.plan)
     return _PreparedCAIS(
         bank,
-        _cais_state_bank(bank),
-        _cais_state_bank(bank),
+        _population_state_bank(bank),
+        _population_state_bank(bank),
         plan,
         _copy_to_device(device, method_state.covariance_ess_threshold),
         method_state.tempering_tolerance,
@@ -436,17 +418,19 @@ function current_proposal(
 ) where {R,B,T,A<:CAIS,M,D}
     _preserving_cpu_destination(destination)
     committed = sampler.method_state.bank
-    parameters = if sampler.device isa MLDataDevices.AbstractCPUDevice
-        _cais_snapshot_parameters(committed)
+    parameters, family = if sampler.device isa MLDataDevices.AbstractCPUDevice
+        _cais_snapshot_parameters(committed), committed.family
     else
         _with_backend_device(sampler.device) do
-            map(destination ∘ Array, _cais_snapshot_parameters(committed))
+            (map(destination ∘ Array, _cais_snapshot_parameters(committed)),
+                _copy_to_device(destination, committed.family))
         end
     end
     return _cais_snapshot(
         committed,
         parameters...,
         sampler.algorithm.bank.masses,
+        family,
     )
 end
 
@@ -462,14 +446,14 @@ function current_proposal(
     )
 end
 
-_cais_snapshot_parameters(bank::_PackedDiagonalGaussianBank) = (
+_cais_snapshot_parameters(bank::_PackedDiagonalBank) = (
     copy(bank.locations),
     copy(bank.scales),
     copy(bank.lognormalizers),
     copy(bank.proposal_ids),
 )
 
-_cais_snapshot_parameters(bank::_PackedFactorGaussianBank) = (
+_cais_snapshot_parameters(bank::_PackedFactorBank) = (
     copy(bank.locations),
     copy(bank.factors),
     copy(bank.lognormalizers),
@@ -477,20 +461,22 @@ _cais_snapshot_parameters(bank::_PackedFactorGaussianBank) = (
 )
 
 function _cais_snapshot(
-    bank::_PackedDiagonalGaussianBank,
+    bank::_PackedDiagonalBank,
     locations,
     scales,
     lognormalizers,
     proposal_ids,
     configured_masses,
+    family,
 )
-    proposals = Vector{typeof(SphericalGaussian(zero(eltype(locations)), one(eltype(scales))))}(
+    proposals = Vector{typeof(_radial_proposal(_radial_family_at(family, 1),
+        zero(eltype(locations)), _SphericalGaussianScale(one(eltype(scales))), zero(eltype(lognormalizers))))}(
         undef,
         length(configured_masses),
     )
     for (slot, proposal_id) in pairs(proposal_ids)
-        proposals[proposal_id] = _GaussianProposal(
-            GaussianFamily(),
+        proposals[proposal_id] = _radial_proposal(
+            _radial_family_at(family, slot),
             locations[1, slot],
             _SphericalGaussianScale(scales[1, slot]),
             lognormalizers[slot],
@@ -502,12 +488,13 @@ function _cais_snapshot(
 end
 
 function _cais_snapshot(
-    bank::_PackedFactorGaussianBank,
+    bank::_PackedFactorBank,
     locations,
     factors,
     lognormalizers,
     proposal_ids,
     configured_masses,
+    family,
 )
     return _factor_population_snapshot(
         locations,
@@ -515,5 +502,6 @@ function _cais_snapshot(
         lognormalizers,
         proposal_ids,
         configured_masses,
+        family,
     )
 end

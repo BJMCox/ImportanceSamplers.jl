@@ -18,6 +18,38 @@ struct StudentTFamily{T} <: AbstractRadialProposalFamily
     dof::T
 end
 
+@inline _radial_logdensity(::GaussianFamily, lognormalizer, squared_radius, dimension) =
+    lognormalizer - oftype(squared_radius, 0.5) * squared_radius
+
+@inline function _radial_logdensity(family::StudentTFamily, lognormalizer, squared_radius, dimension)
+    dof = family.dof
+    return lognormalizer - (dof + oftype(dof, dimension)) / oftype(dof, 2) *
+           log1p(squared_radius / dof)
+end
+
+# Moment updates use covariance. Student-t proposal storage uses elliptical scale.
+_covariance_multiplier(::GaussianFamily, ::Type{T}) where {T} = one(T)
+_covariance_multiplier(family::StudentTFamily, ::Type{T}) where {T} =
+    T(family.dof / (family.dof - 2))
+_scale_covariance_factor!(factor, ::GaussianFamily) = factor
+function _scale_covariance_factor!(factor, family::StudentTFamily)
+    factor .*= sqrt(inv(_covariance_multiplier(family, eltype(factor))))
+    return factor
+end
+_validate_moment_family(::GaussianFamily) = nothing
+function _validate_moment_family(family::StudentTFamily)
+    family.dof > 2 || throw(ArgumentError("covariance adaptation requires Student-t degrees of freedom > 2"))
+    return nothing
+end
+_radial_lognormalizer(::GaussianFamily, ::Type{T}, dimension, logabsdet) where {T} =
+    _gaussian_lognormalizer(T, dimension, logabsdet)
+_radial_lognormalizer(family::StudentTFamily, ::Type{T}, dimension, logabsdet) where {T} =
+    _student_t_lognormalizer(T, family.dof, dimension, logabsdet)
+_radial_proposal(::GaussianFamily, location, scale, lognormalizer) =
+    _GaussianProposal(GaussianFamily(), location, scale, lognormalizer)
+_radial_proposal(family::StudentTFamily, location, scale, lognormalizer) =
+    _StudentTProposal(family, location, scale, lognormalizer)
+
 _prepare_proposal_input(proposal) = proposal
 _prepare_proposal_inputs(proposals) = copy(proposals)
 
@@ -594,11 +626,8 @@ end
         coordinates,
         offset,
     )
-    dof = proposal.family.dof
-    dimension = _gaussian_dimension(proposal.location)
-    return proposal.lognormalizer -
-           (dof + typeof(dof)(dimension)) / typeof(dof)(2) *
-           log1p(squared_radius / dof)
+    return _radial_logdensity(proposal.family, proposal.lognormalizer,
+        squared_radius, _gaussian_dimension(proposal.location))
 end
 
 function _gaussian_from_normal(

@@ -70,8 +70,9 @@ later prepared call, not samples already returned.
 ## Assumptions, failure, and reuse
 
 Every proposal must be a normalized native `Float32` or `Float64` spherical,
-diagonal, or lower-triangular-factor Gaussian with the same scalar/vector
-layout and dimension. The target is an unnormalized **log density** with the
+diagonal, or lower-triangular-factor Gaussian or Student-t with the same
+scalar/vector layout, dimension, and radial family. Student-t locations adapt,
+while each scale and positive degrees of freedom stay fixed. See [Native proposals](@ref). The target is an unnormalized **log density** with the
 same reference measure. As in the paper, proposals must cover the target mass;
 tail adequacy cannot be proved at construction.
 

@@ -325,6 +325,7 @@ end
     pooled_covariance,
     factors,
     entry,
+    family=GaussianFamily(),
 )
     dimension = size(pooled_covariance, 1)
     row = (entry - 1) % dimension + 1
@@ -338,7 +339,7 @@ end
             row,
             column,
             proposal_slot,
-        )
+        ) * _covariance_multiplier(_radial_family_at(family, proposal_slot), T)
     end
     @inbounds pooled_covariance[row, column] = covariance / T(proposal_count)
     return nothing
@@ -386,6 +387,21 @@ function _pooled_covariance!(
     _threaded_foreach(1:length(pooled_covariance)) do entry
         _pooled_covariance_entry!(pooled_covariance, factors, entry)
     end
+    return nothing
+end
+
+_pooled_covariance!(covariance, factors, execution, ::GaussianFamily) =
+    _pooled_covariance!(covariance, factors, execution)
+@kernel function _pooled_radial_covariance_kernel!(covariance, factors, family)
+    entry = @index(Global, Linear)
+    _pooled_covariance_entry!(covariance, factors, entry, family)
+end
+function _pooled_covariance!(covariance, factors, execution, family::_PackedStudentTFamily)
+    backend = KernelAbstractions.get_backend(covariance)
+    _pooled_radial_covariance_kernel!(backend)(covariance, factors, family;
+        ndrange=length(covariance),
+        workgroupsize=_native_workgroupsize(execution, length(covariance)))
+    KernelAbstractions.synchronize(backend)
     return nothing
 end
 
@@ -701,7 +717,8 @@ function _repulsion!(
     factors,
     strength::T,
     softening::T,
-    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution};
+    family=GaussianFamily(),
 ) where {T}
     if iszero(strength)
         fill!(repulsion, zero(eltype(repulsion)))
@@ -709,7 +726,7 @@ function _repulsion!(
         return nothing
     end
 
-    _pooled_covariance!(pooled_covariance, factors, execution)
+    _pooled_covariance!(pooled_covariance, factors, execution, family)
     _factor_pooled_covariance!(pooled_covariance)
     _whiten_means!(whitened_means, pooled_covariance, means)
     _repulsion_force!(
@@ -735,7 +752,8 @@ function _repulsion!(
     strengths::AbstractVector,
     round,
     softening,
-    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution},
+    execution::Union{_SerialCPUExecution,_ThreadedCPUExecution};
+    family=GaussianFamily(),
 )
     return _repulsion!(
         repulsion,
@@ -746,7 +764,8 @@ function _repulsion!(
         factors,
         @inbounds(strengths[round]),
         softening,
-        execution,
+        execution;
+        family,
     )
 end
 
@@ -761,12 +780,13 @@ function _repulsion!(
     round,
     softening,
     execution::_KernelExecution;
+    family=GaussianFamily(),
     device=nothing,
     failure_record=nothing,
     failure_values=nothing,
     transfers=nothing,
 )
-    _pooled_covariance!(pooled_covariance, factors, execution)
+    _pooled_covariance!(pooled_covariance, factors, execution, family)
     backend = KernelAbstractions.get_backend(pooled_covariance)
     if device !== nothing
         fill!(failure_record.storage, zero(eltype(failure_record.storage)))
@@ -915,6 +935,7 @@ end
     gradients,
     factors,
     proposal_slot,
+    family,
 )
     dimension = size(gradients, 1)
     T = eltype(gradients)
@@ -936,7 +957,8 @@ end
                 moves[factor_column, proposal_slot]
             )
         end
-        @inbounds moves[row, proposal_slot] = move
+        @inbounds moves[row, proposal_slot] = move *
+            _covariance_multiplier(_radial_family_at(family, proposal_slot), T)
     end
     return nothing
 end
@@ -946,17 +968,18 @@ function _precondition_gradients!(
     gradients,
     factors,
     ::_SerialCPUExecution,
+    family=GaussianFamily(),
 )
     @inbounds for proposal_slot in axes(gradients, 2)
-        _precondition_gradient_slot!(moves, gradients, factors, proposal_slot)
+        _precondition_gradient_slot!(moves, gradients, factors, proposal_slot, family)
     end
     _validate_preconditioned_moves!(moves)
     return nothing
 end
 
-@kernel function _precondition_gradients_kernel!(moves, gradients, factors)
+@kernel function _precondition_gradients_kernel!(moves, gradients, factors, family)
     proposal_slot = @index(Global, Linear)
-    _precondition_gradient_slot!(moves, gradients, factors, proposal_slot)
+    _precondition_gradient_slot!(moves, gradients, factors, proposal_slot, family)
 end
 
 @kernel function _validate_preconditioned_moves_kernel!(
@@ -977,6 +1000,7 @@ function _precondition_gradients!(
     gradients,
     factors,
     execution::_KernelExecution,
+    family=GaussianFamily(),
 )
     backend = KernelAbstractions.get_backend(moves)
     kernel = _precondition_gradients_kernel!(backend)
@@ -984,7 +1008,8 @@ function _precondition_gradients!(
     kernel(
         moves,
         gradients,
-        factors;
+        factors,
+        family;
         ndrange=proposal_count,
         workgroupsize=_population_workgroupsize(
             execution,
@@ -1001,9 +1026,10 @@ function _precondition_gradients!(
     gradients,
     factors,
     ::_ThreadedCPUExecution,
+    family=GaussianFamily(),
 )
     _threaded_foreach(axes(gradients, 2)) do proposal_slot
-        _precondition_gradient_slot!(moves, gradients, factors, proposal_slot)
+        _precondition_gradient_slot!(moves, gradients, factors, proposal_slot, family)
     end
     _validate_preconditioned_moves!(moves)
     return nothing
@@ -1185,6 +1211,7 @@ function _precondition_gradients!(
         workspace.gradients,
         method_state.run.factors,
         execution,
+        method_state.run.family,
     )
     device === nothing && return nothing
     backend = KernelAbstractions.get_backend(workspace.moves)
@@ -1758,6 +1785,7 @@ function _first_order_gramis_covariance_kernel_arguments(
         (
             workspace.covariances,
             bank.factors,
+            bank.family,
             workspace.factor_status,
             method_state.covariance_rate,
             round,
@@ -1849,6 +1877,7 @@ end
 @kernel function _blend_local_covariances_kernel!(
     covariances,
     factors,
+    family,
     status,
     covariance_rate,
     round,
@@ -1862,8 +1891,9 @@ end
         for column in 1:dimension, row in column:dimension
             previous_trace += abs2(@inbounds factors[row, column, proposal_slot])
         end
+        multiplier = _covariance_multiplier(_radial_family_at(family, proposal_slot), T)
         ridge = _scale_aware_ridge(
-            previous_trace,
+            previous_trace * multiplier,
             dimension,
             regularization,
         )
@@ -1879,7 +1909,7 @@ end
                 column,
                 proposal_slot,
             )
-            blended = (one(T) - rate) * old + rate * estimate
+            blended = (one(T) - rate) * old * multiplier + rate * estimate
             row == column && (blended += ridge)
             @inbounds covariances[row, column, proposal_slot] = blended
             @inbounds covariances[column, row, proposal_slot] = blended
@@ -1929,6 +1959,8 @@ function _update_local_covariances!(
         workspace.factor_status,
         execution,
     )
+    _scale_population_factors!(method_state.candidate.factors,
+        method_state.candidate.family, workspace.factor_status, execution)
     if any(!iszero, info)
         copyto!(method_state.candidate.factors, method_state.run.factors)
     end
@@ -1967,6 +1999,8 @@ function _update_local_covariances!(
         workspace.factor_status,
         execution,
     )
+    _scale_population_factors!(method_state.candidate.factors,
+        method_state.candidate.family, workspace.factor_status, execution)
     fill!(failure_record.storage, zero(eltype(failure_record.storage)))
     backend = KernelAbstractions.get_backend(info)
     kernel = _record_first_order_gramis_factor_failures!(backend)
@@ -2261,7 +2295,7 @@ function _add_first_order_gramis_repulsion!(
     )
 end
 
-@inline function _candidate_factor_validation(factors, status, proposal_slot)
+@inline function _candidate_factor_validation(factors, status, proposal_slot, family)
     T = eltype(factors)
     @inbounds(status[proposal_slot]) == _POPULATION_COVARIANCE_READY ||
         return (false, UInt16(0), zero(T), zero(T))
@@ -2282,7 +2316,7 @@ end
             logabsdet += log(value)
         end
     end
-    lognormalizer = _gaussian_lognormalizer(T, dimension, logabsdet)
+    lognormalizer = _radial_lognormalizer(_radial_family_at(family, proposal_slot), T, dimension, logabsdet)
     reason = isfinite(lognormalizer) ?
              UInt16(0) : _GRAMIS_LOGNORMALIZER_NONFINITE
     return (true, reason, lognormalizer, lognormalizer)
@@ -2300,6 +2334,7 @@ function _validate_first_order_gramis_candidate_factors!(
             candidate.factors,
             status,
             proposal_slot,
+            candidate.family,
         )
         ready || continue
         iszero(reason) || throw(
@@ -2320,12 +2355,14 @@ end
     factors,
     lognormalizers,
     status,
+    family,
 )
     proposal_slot = @index(Global, Linear)
     ready, reason, value, lognormalizer = _candidate_factor_validation(
         factors,
         status,
         proposal_slot,
+        family,
     )
     if ready
         if !iszero(reason)
@@ -2355,7 +2392,8 @@ function _validate_first_order_gramis_candidate_factors!(
         failure_values,
         candidate.factors,
         candidate.lognormalizers,
-        status;
+        status,
+        candidate.family;
         ndrange=proposal_count,
         workgroupsize=_population_workgroupsize(
             execution,
@@ -2641,6 +2679,9 @@ function _importance_sample_cpu!(
             round - 1,
             begin
                 Random.randn!(sampler.rng, normal_buffer)
+                _fill_radial_buffers!(sampler.rng, buffers.radial)
+                _prepare_mis_normals!(normal_buffer, buffers.radial, method_state.run,
+                    views.assignments, buffers.failure_scratch.record.storage, execution)
                 _first_order_gramis_sample_round!(
                     views.samples,
                     views.logweights,
@@ -2732,11 +2773,12 @@ function _importance_sample_cpu!(
                         method_state.repulsion_softening,
                     )
                     if accelerator_device === nothing
-                        _repulsion!(repulsion_arguments..., execution)
+                        _repulsion!(repulsion_arguments..., execution; family=method_state.run.family)
                     else
                         _repulsion!(
                             repulsion_arguments...,
                             execution;
+                            family=method_state.run.family,
                             device=accelerator_device,
                             failure_record=buffers.failure_scratch.record,
                             failure_values=workspace.candidate_values,

@@ -5,10 +5,11 @@ const _VALIDATED_AMIS_TOKEN = _ValidatedAMISToken()
     AMIS(proposal; rounds, round_size)
 
 Configure adaptive multiple importance sampling with a fixed round schedule.
-`proposal` must be a native `Float32` or `Float64` scalar spherical Gaussian,
-or a vector spherical, diagonal, or factor Gaussian. Loading Distributions.jl
-also accepts `Normal` and conventional `MvNormal` values through automatic
-native conversion. `round_size` is either one positive `Int` repeated for every
+`proposal` must be a native `Float32` or `Float64` scalar spherical, vector
+spherical, diagonal, or factor Gaussian or Student-t. Student-t fits require
+`nu > 2`, keep `nu` fixed, and convert fitted covariance to Student-t scale.
+Loading Distributions.jl accepts its supported normal and Student-t forms
+through native conversion. `round_size` is either one positive `Int` repeated for every
 round or a positive `Vector{Int}` with one entry per round.
 
 Each successful result reports `diagnostics.method == :amis`.
@@ -17,7 +18,7 @@ all samples retained through round `t` using their retrospective weights after
 that round. Each round log normalizer is a numerical estimate; no finite-sample
 unbiasedness or generic consistency guarantee is claimed.
 """
-struct AMIS{P,S} <: _AdaptiveGaussianSampler
+struct AMIS{P,S} <: _MomentAdaptiveSampler
     proposal::P
     rounds::Int
     round_size::S
@@ -38,7 +39,7 @@ end
 function AMIS(proposal; rounds, round_size)
     schedule = _validate_adaptive_schedule(rounds, round_size)
     prepared_proposal = _prepare_proposal_input(proposal)
-    _validate_adaptive_gaussian_proposal(prepared_proposal)
+    _validate_moment_proposal(prepared_proposal)
     return AMIS(prepared_proposal, rounds, schedule, _VALIDATED_AMIS_TOKEN)
 end
 
@@ -81,7 +82,7 @@ end
 
 function _copy_algorithm(device, algorithm::AMIS)
     proposal = _copy_to_device(device, algorithm.proposal)
-    _validate_adaptive_gaussian_proposal(proposal)
+    _validate_moment_proposal(proposal)
     round_size = algorithm.round_size isa Vector ?
                  copy(algorithm.round_size) : algorithm.round_size
     return AMIS(
@@ -96,7 +97,7 @@ function _preflight_accelerator_method(
     device,
     target,
     algorithm::AMIS,
-    method_state::_PreparedAdaptiveGaussian,
+    method_state::_PreparedMomentSampler,
     random_buffers::_RandomBuffers,
     factor_execution,
 )

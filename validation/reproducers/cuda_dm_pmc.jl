@@ -217,7 +217,7 @@ function assert_dm_pmc_residence(prepared, result)
     plan = state.plan
     workspace = state.workspace
     buffers = prepared.random_buffers
-    scale_storage = bank isa IS._PackedDiagonalGaussianBank ?
+    scale_storage = bank isa IS._PackedDiagonalBank ?
                     bank.scales : bank.factors
     arrays = Any[
         bank.locations,

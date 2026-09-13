@@ -207,12 +207,12 @@ end
         threaded=false,
     )
 
-    @test sampler32.method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
+    @test sampler32.method_state.bank isa DMPMCIS._PackedDiagonalBank
     @test eltype(sampler32.method_state.bank.locations) === Float32
     @test eltype(sampler32.method_state.plan.logcoefficients) === Float32
-    @test diagonal_sampler.method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
+    @test diagonal_sampler.method_state.bank isa DMPMCIS._PackedDiagonalBank
     @test eltype(diagonal_sampler.method_state.plan.logcoefficients) === Float64
-    @test factor_sampler.method_state.bank isa DMPMCIS._PackedFactorGaussianBank
+    @test factor_sampler.method_state.bank isa DMPMCIS._PackedFactorBank
     @test eltype(factor_sampler.method_state.plan.logcoefficients) === Float64
     @test sampler32.random_buffers isa DMPMCIS._DMPMCRandomBuffers
     @test factor_sampler.random_buffers isa DMPMCIS._DMPMCRandomBuffers
@@ -237,7 +237,7 @@ end
         DeterministicMixturePMC(configured_bank; rounds=1, round_size=4);
         threaded=false,
     )
-    @test inert_sampler.method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
+    @test inert_sampler.method_state.bank isa DMPMCIS._PackedDiagonalBank
     @test inert_sampler.method_state.bank.proposal_ids == [1]
     @test configured_bank.proposals == original_proposals
     @test configured_bank.masses == original_masses
@@ -356,10 +356,10 @@ end
     cpu32 = MLDataDevices.cpu_device(Float32)
     erased, spherical_diagonal, diagonal_factor, inert = map(cpu32, sources)
 
-    @test sources[1].method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
-    @test sources[2].method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
-    @test sources[3].method_state.bank isa DMPMCIS._PackedFactorGaussianBank
-    @test sources[4].method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
+    @test sources[1].method_state.bank isa DMPMCIS._PackedDiagonalBank
+    @test sources[2].method_state.bank isa DMPMCIS._PackedDiagonalBank
+    @test sources[3].method_state.bank isa DMPMCIS._PackedFactorBank
+    @test sources[4].method_state.bank isa DMPMCIS._PackedDiagonalBank
     @test sources[4].method_state.bank.proposal_ids == [1]
 
     for copied in (erased, spherical_diagonal, diagonal_factor, inert)
@@ -378,10 +378,10 @@ end
         proposal -> eltype(proposal.location) === Float32,
         spherical_diagonal.algorithm.bank.proposals,
     )
-    @test diagonal_factor.method_state.bank isa DMPMCIS._PackedFactorGaussianBank
+    @test diagonal_factor.method_state.bank isa DMPMCIS._PackedFactorBank
     @test eltype(diagonal_factor.method_state.bank.locations) === Float32
     @test eltype(diagonal_factor.method_state.bank.factors) === Float32
-    @test inert.method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
+    @test inert.method_state.bank isa DMPMCIS._PackedDiagonalBank
     @test inert.method_state.bank.proposal_ids == [1]
     @test eltype(inert.algorithm.bank.proposals[1].location) === Float32
     @test inert.algorithm.bank.proposals[2] !== inert_factor
@@ -535,7 +535,7 @@ end
         diagonal.algorithm.bank.proposals,
     )
     @test eltype(diagonal.method_state.bank.locations) === Float32
-    @test diagonal.method_state.bank isa DMPMCIS._PackedDiagonalGaussianBank
+    @test diagonal.method_state.bank isa DMPMCIS._PackedDiagonalBank
     @test eltype(diagonal.method_state.bank.scales) === Float32
     @test eltype(diagonal.method_state.bank.lognormalizers) === Float32
     @test eltype(diagonal.method_state.bank.logmasses) === Float32
@@ -557,7 +557,7 @@ end
         factor.algorithm.bank.proposals,
     )
     @test eltype(factor.method_state.bank.locations) === Float32
-    @test factor.method_state.bank isa DMPMCIS._PackedFactorGaussianBank
+    @test factor.method_state.bank isa DMPMCIS._PackedFactorBank
     @test eltype(factor.method_state.bank.factors) === Float32
     @test eltype(factor.method_state.bank.lognormalizers) === Float32
     @test eltype(factor.method_state.bank.logmasses) === Float32

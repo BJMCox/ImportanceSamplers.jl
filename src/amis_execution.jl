@@ -283,7 +283,7 @@ function _launch_prefilled_amis_round!(
     old_sample_count = first_sample - 1
     phase = :sampling
     try
-        if history isa _GaussianFactorHistory &&
+        if history isa _FactorProposalHistory &&
            _use_factor_batch_path(device, history, factor_execution)
             return _launch_prefilled_amis_factor_batch!(
                 samples,
@@ -361,7 +361,7 @@ end
 function _preflight_amis_kernels(
     device,
     target,
-    method_state::_PreparedAdaptiveGaussian,
+    method_state::_PreparedMomentSampler,
     buffers::_RandomBuffers,
     factor_execution,
 )
@@ -387,7 +387,7 @@ function _preflight_amis_kernels(
         method_state.logcounts,
         representative_round,
     )
-    use_factor_batch = history isa _GaussianFactorHistory &&
+    use_factor_batch = history isa _FactorProposalHistory &&
                        _use_factor_batch_path(device, history, factor_execution)
     solve_scratch = use_factor_batch ? workspace.centered_scaled :
                     _fused_mis_solve_scratch(workspace.centered_scaled, backend)
@@ -460,6 +460,7 @@ function _preflight_amis_kernels(
             view(workspace.lognumerators, new_indices),
             view(workspace.centered_scaled, :, new_indices),
             history.lognormalizers,
+            history.family,
             method_state.logcounts,
             representative_round,
             buffers.failure_scratch.record.storage,

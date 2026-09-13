@@ -55,7 +55,7 @@ end
 function _prepare_static_mis_bank(bank::ProposalBank)
     proposal_type = eltype(bank.proposals)
     native_candidate = Val(
-        proposal_type <: _GaussianProposal || !isconcretetype(proposal_type),
+        proposal_type <: _NativeRadialProposal || !isconcretetype(proposal_type),
     )
     return _prepare_static_mis_bank(
         bank,
@@ -66,7 +66,7 @@ end
 function _prepare_static_mis_bank(bank, ::Val{true})
     return _prepare_static_mis_bank(
         bank,
-        _native_gaussian_pack_kind(eltype(bank.proposals)),
+        _native_radial_pack_kind(eltype(bank.proposals)),
     )
 end
 
@@ -78,7 +78,7 @@ _prepare_static_mis_bank(bank, ::Val{:diagonal}) =
 
 function _prepare_static_mis_bank(bank, ::Val{:factor})
     proposal_ids, logmasses, cdf = _prepare_active_proposal_metadata(bank)
-    packed = _pack_native_gaussian_bank(
+    packed = _pack_native_radial_bank(
         bank,
         proposal_ids,
         logmasses,
@@ -95,7 +95,7 @@ function _prepare_static_mis_bank(bank, ::Val{:factor})
 end
 
 function _prepare_static_mis_bank(bank, ::Val{:dynamic})
-    packed = _pack_native_gaussian_bank(bank)
+    packed = _pack_native_radial_bank(bank)
     isnothing(packed) || return packed
     return _prepare_active_proposal_bank(bank)
 end

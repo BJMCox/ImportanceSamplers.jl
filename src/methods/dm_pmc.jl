@@ -26,7 +26,7 @@ struct LocalResampling <: AbstractPMCResamplingPolicy end
 _pmc_resampling_name(::GlobalResampling) = :global
 _pmc_resampling_name(::LocalResampling) = :local
 
-abstract type _FixedGaussianPopulationSampler <: AbstractImportanceSampler end
+abstract type _FixedPopulationSampler <: AbstractImportanceSampler end
 
 function _validate_adaptive_schedule(rounds, round_size)
     rounds isa Int && rounds > 0 || throw(ArgumentError("rounds must be a positive Int"))
@@ -84,12 +84,15 @@ schedule. `round_size` is either one positive `Int` repeated for every round or
 a positive `Vector{Int}` with one entry per round. `resampling` selects global
 or local ancestor selection while keeping the same deterministic-mixture
 weights.
+
+Native Gaussian and Student-t populations use one radial family. Adaptation
+changes locations and preserves each scale and positive Student-t degrees of freedom.
 """
 struct DeterministicMixturePMC{
     B<:ProposalBank,
     S,
     R<:AbstractPMCResamplingPolicy,
-} <: _FixedGaussianPopulationSampler
+} <: _FixedPopulationSampler
     bank::B
     rounds::Int
     round_size::S
@@ -262,7 +265,8 @@ function _population_proposal_snapshot(locations, proposal_ids, sampler)
             slot,
             sampler.method_state.bank,
         )
-        proposals[proposal_id] = _population_with_location(proposal, location)
+        proposals[proposal_id] = _radial_proposal(proposal.family, location,
+            proposal.scale, proposal.lognormalizer)
     end
     configured_masses = sampler.algorithm.bank.masses
     snapshot = ProposalBank(proposals, configured_masses)
@@ -272,26 +276,14 @@ function _population_proposal_snapshot(locations, proposal_ids, sampler)
     return snapshot
 end
 
-_population_snapshot_location(locations, slot, bank::_PackedDiagonalGaussianBank) =
+_population_snapshot_location(locations, slot, bank::_PackedDiagonalBank) =
     _population_snapshot_location(locations, slot, bank.layout)
 
 _population_snapshot_location(locations, slot, ::_ScalarGaussianLayout) =
     locations[1, slot]
 
-_population_snapshot_location(locations, slot, ::_VectorGaussianLayout) =
+_population_snapshot_location(locations, slot, ::Union{_VectorGaussianLayout,_PackedFactorBank}) =
     copy(view(locations, :, slot))
-
-_population_snapshot_location(locations, slot, ::_PackedFactorGaussianBank) =
-    copy(view(locations, :, slot))
-
-function _population_with_location(proposal::_GaussianProposal, location)
-    return _GaussianProposal(
-        proposal.family,
-        location,
-        deepcopy(proposal.scale),
-        proposal.lognormalizer,
-    )
-end
 
 struct _DeterministicAllocationPlan{S,C,A,L,O}
     schedule::S
@@ -327,8 +319,8 @@ mutable struct _PreparedDMPMC{B,P,W}
     workspace::W
 end
 
-function _population_with_locations(bank::_PackedDiagonalGaussianBank, locations)
-    return _PackedDiagonalGaussianBank(
+function _population_with_locations(bank::_PackedDiagonalBank, locations)
+    return _PackedDiagonalBank(
         locations,
         bank.scales,
         bank.lognormalizers,
@@ -336,17 +328,19 @@ function _population_with_locations(bank::_PackedDiagonalGaussianBank, locations
         bank.cdf,
         bank.proposal_ids,
         bank.layout,
+        bank.family,
     )
 end
 
-function _population_with_locations(bank::_PackedFactorGaussianBank, locations)
-    return _PackedFactorGaussianBank(
+function _population_with_locations(bank::_PackedFactorBank, locations)
+    return _PackedFactorBank(
         locations,
         bank.factors,
         bank.lognormalizers,
         bank.logmasses,
         bank.cdf,
         bank.proposal_ids,
+        bank.family,
     )
 end
 
@@ -357,8 +351,8 @@ end
 
 _accelerator_method_state_limit(
     ::_PreparedDMPMC{<:Union{
-        _PackedDiagonalGaussianBank,
-        _PackedFactorGaussianBank,
+        _PackedDiagonalBank,
+        _PackedFactorBank,
     }},
 ) = nothing
 
@@ -372,16 +366,16 @@ end
 
 function _prepare_population_bank(bank::ProposalBank, ::Nothing)
     proposal_ids, logmasses, cdf = _prepare_active_proposal_metadata(bank)
-    packed = _pack_native_gaussian_bank(
+    packed = _pack_native_radial_bank(
         bank,
         proposal_ids,
         logmasses,
         cdf,
     )
-    packed isa Union{_PackedDiagonalGaussianBank,_PackedFactorGaussianBank} || throw(
+    packed isa Union{_PackedDiagonalBank,_PackedFactorBank} || throw(
         ArgumentError(
-            "fixed Gaussian population adaptation requires native Float32 or " *
-            "Float64 spherical, diagonal, or factor Gaussian proposals",
+            "fixed population adaptation requires native Float32 or " *
+            "Float64 spherical, diagonal, or factor Gaussian or Student-t proposals",
         ),
     )
     return packed
@@ -423,7 +417,7 @@ function _prepare_population_bank(
         lognormalizers[slot] = proposal.lognormalizer
     end
 
-    return _pack_native_gaussian_storage(
+    return _pack_native_radial_storage(
         locations,
         lognormalizers,
         logmasses,
@@ -431,7 +425,7 @@ function _prepare_population_bank(
         proposal_ids,
         proposals,
         _dm_pmc_gaussian_layout(D),
-        _native_gaussian_pack_kind(D),
+        _native_radial_pack_kind(D),
     )
 end
 
@@ -539,7 +533,7 @@ function _deterministic_allocation_plan(bank, active_masses, schedule)
 end
 
 function _prepare_fixed_population_state(
-    algorithm::_FixedGaussianPopulationSampler,
+    algorithm::_FixedPopulationSampler,
 )
     schedule = _resolve_adaptive_schedule(algorithm.rounds, algorithm.round_size)
     bank = _prepare_population_bank(algorithm.bank)
@@ -597,6 +591,7 @@ function _allocate_random_buffers(
         normals,
         resampling_uniforms,
         failure_scratch,
+        _allocate_radial_buffers(normals, bank.family, maximum_round_size),
     )
 end
 
@@ -651,7 +646,7 @@ function _prepare_transferred_method_state(
         _copy_to_device(device, workspace.ancestors),
         _copy_to_device(device, workspace.candidate_locations),
     )
-    transferred_bank = _copy_packed_gaussian_bank(device, method_state.bank)
+    transferred_bank = _copy_packed_bank(device, method_state.bank)
     return _PreparedDMPMC(
         transferred_bank,
         _population_run_bank(transferred_bank),
@@ -819,15 +814,39 @@ function _preflight_dm_pmc_resampling(
     return nothing
 end
 
-function _copy_dm_pmc_active_proposal(device, proposal::_GaussianProposal)
+function _copy_dm_pmc_active_proposal(device, proposal::_NativeRadialProposal)
     adapted = _copy_to_device(device, proposal)
     T = _gaussian_float_type(adapted.location)
-    return _GaussianProposal(
+    return _radial_proposal(
         adapted.family,
         adapted.location,
         adapted.scale,
         convert(T, adapted.lognormalizer),
     )
+end
+
+function _copy_dm_pmc_active_proposal(
+    ::MLDataDevices.CPUDevice{T},
+    proposal::_StudentTProposal{F,L,<:_SphericalGaussianScale},
+) where {T<:_NativeGaussianFloat,F,L}
+    return SphericalStudentT(T(proposal.family.dof),
+        _copy_dm_pmc_location(T, proposal.location), T(proposal.scale.scale))
+end
+
+function _copy_dm_pmc_active_proposal(
+    ::MLDataDevices.CPUDevice{T},
+    proposal::_StudentTProposal{F,L,<:_DiagonalGaussianScale},
+) where {T<:_NativeGaussianFloat,F,L}
+    return DiagonalStudentT(T(proposal.family.dof),
+        _copy_dm_pmc_location(T, proposal.location), T.(proposal.scale.scales))
+end
+
+function _copy_dm_pmc_active_proposal(
+    ::MLDataDevices.CPUDevice{T},
+    proposal::_StudentTProposal{F,L,<:_FactorGaussianScale},
+) where {T<:_NativeGaussianFloat,F,L}
+    return FactorStudentT(T(proposal.family.dof),
+        _copy_dm_pmc_location(T, proposal.location), T.(proposal.scale.factor))
 end
 
 _copy_dm_pmc_location(::Type{T}, location::_NativeGaussianFloat) where {T} =

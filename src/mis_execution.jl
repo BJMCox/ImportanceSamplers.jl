@@ -9,7 +9,7 @@
 
 @inline function _mis_proposal_logdensity(
     ::Type{T},
-    bank::_PackedFactorGaussianBank,
+    bank::_PackedFactorBank,
     sample,
     proposal_slot,
     solve_scratch,
@@ -191,6 +191,7 @@ end
     lognumerators,
     standardized,
     lognormalizers,
+    family,
     logcoefficients,
     proposal_slot,
     assignments,
@@ -205,8 +206,9 @@ end
         @inbounds for coordinate in axes(standardized, 1)
             squared_radius += abs2(standardized[coordinate, sample_index])
         end
-        logdensity = _factor_batch_slot_value(lognormalizers, proposal_slot) -
-                     T(0.5) * squared_radius
+        logdensity = _radial_logdensity(_radial_family_at(family, proposal_slot),
+            _factor_batch_slot_value(lognormalizers, proposal_slot),
+            squared_radius, size(standardized, 1))
         _store_mis_adaptation!(
             adaptation,
             assignments,
@@ -264,6 +266,7 @@ function _launch_factor_batch_logmixture!(
         lognumerators,
         solve_scratch,
         _factor_batch_lognormalizers(factor_source),
+        factor_source.family,
         logcoefficients,
         proposal_slot,
         assignments,
@@ -291,7 +294,7 @@ end
 
 function _use_factor_batch_mis_path(
     device,
-    bank::_PackedFactorGaussianBank,
+    bank::_PackedFactorBank,
     denominator,
     ::Type{T},
     factor_execution,
@@ -303,7 +306,7 @@ end
 
 function _use_factor_batch_mis_path(
     device,
-    bank::_PackedFactorGaussianBank,
+    bank::_PackedFactorBank,
     ::_EqualAllocationGeneratingDenominator,
     ::Type{T},
     factor_execution,
@@ -401,6 +404,7 @@ end
     logweights,
     standardized,
     lognormalizers,
+    family,
     proposal_slot,
     proposal_ids,
     failure_storage,
@@ -413,8 +417,8 @@ end
         @inbounds for coordinate in axes(standardized, 1)
             squared_radius += abs2(standardized[coordinate, local_index])
         end
-        logdensity = T(@inbounds(lognormalizers[proposal_slot])) -
-                     T(0.5) * squared_radius
+        logdensity = _radial_logdensity(_radial_family_at(family, proposal_slot),
+            T(@inbounds(lognormalizers[proposal_slot])), squared_radius, size(standardized, 1))
         reason = _native_proposal_reason(logdensity)
         if iszero(reason)
             value, reason = _subtract_logweight(
@@ -438,7 +442,7 @@ function _launch_factor_batch_mis_round!(
     failure_storage,
     normal_buffer,
     target,
-    bank::_PackedFactorGaussianBank,
+    bank::_PackedFactorBank,
     assignments,
     ::_EqualAllocationGeneratingDenominator,
     solve_scratch,
@@ -486,6 +490,7 @@ function _launch_factor_batch_mis_round!(
             group_logweights,
             group_scratch,
             bank.lognormalizers,
+            bank.family,
             proposal_slot,
             group_proposal_ids,
             failure_storage,
@@ -504,7 +509,7 @@ function _launch_factor_batch_mis_round!(
     failure_storage,
     normal_buffer,
     target,
-    bank::_PackedFactorGaussianBank,
+    bank::_PackedFactorBank,
     assignments,
     denominator,
     solve_scratch,
@@ -567,7 +572,7 @@ end
 
 function _allocate_mis_solve_scratch(
     prototype,
-    bank::_PackedDiagonalGaussianBank,
+    bank::_PackedDiagonalBank,
     nsamples,
 )
     return _NoMISSolveScratch()
@@ -575,7 +580,7 @@ end
 
 function _allocate_mis_solve_scratch(
     prototype,
-    bank::_PackedFactorGaussianBank,
+    bank::_PackedFactorBank,
     nsamples,
 )
     return similar(

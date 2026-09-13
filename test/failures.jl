@@ -284,7 +284,7 @@ end
 function amis_result_copy_failure_sampler(sampler)
     old_state = sampler.method_state
     old_workspace = old_state.workspace
-    workspace = ImportanceSamplers._GaussianMomentWorkspace(
+    workspace = ImportanceSamplers._MomentWorkspace(
         AMISResultFailureArray(old_workspace.samples),
         old_workspace.logtargets,
         old_workspace.lognumerators,
@@ -296,7 +296,7 @@ function amis_result_copy_failure_sampler(sampler)
         old_workspace.candidate_scale,
         old_workspace.candidate_lognormalizer,
     )
-    state = ImportanceSamplers._PreparedAdaptiveGaussian(
+    state = ImportanceSamplers._PreparedMomentSampler(
         old_state.schedule,
         old_state.offsets,
         old_state.logcounts,
@@ -378,12 +378,13 @@ function amis_publication_failure_sampler(fail_at)
     old_state = base.method_state
     failure = AMISPublicationFailure(0, fail_at, 0x00)
     old_history = old_state.history
-    history = ImportanceSamplers._GaussianFactorHistory(
+    history = ImportanceSamplers._FactorProposalHistory(
         AMISPublicationFailureArray(old_history.means, failure, 1),
         AMISPublicationFailureArray(old_history.factors, failure, 2),
         AMISPublicationFailureArray(old_history.lognormalizers, failure, 3),
+        old_history.family,
     )
-    state = ImportanceSamplers._PreparedAdaptiveGaussian(
+    state = ImportanceSamplers._PreparedMomentSampler(
         old_state.schedule,
         old_state.offsets,
         old_state.logcounts,
@@ -1117,7 +1118,7 @@ end
         threaded=false,
     )
     old_workspace = moment_base.method_state.workspace
-    moment_workspace = ImportanceSamplers._GaussianMomentWorkspace(
+    moment_workspace = ImportanceSamplers._MomentWorkspace(
         old_workspace.samples,
         old_workspace.logtargets,
         old_workspace.lognumerators,
@@ -1129,7 +1130,7 @@ end
         old_workspace.candidate_scale,
         old_workspace.candidate_lognormalizer,
     )
-    moment_state = ImportanceSamplers._PreparedAdaptiveGaussian(
+    moment_state = ImportanceSamplers._PreparedMomentSampler(
         moment_base.method_state.schedule,
         moment_base.method_state.offsets,
         moment_base.method_state.logcounts,

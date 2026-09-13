@@ -193,31 +193,35 @@ end
 struct _NoSampleTransform end
 struct _NoRandomBuffers end
 
-struct _RandomBuffers{U,N,F}
+struct _RandomBuffers{U,N,F,R}
     uniform::U
     normal::N
     failure_scratch::F
+    radial::R
 end
 
-struct _PackedStaticMISRandomBuffers{U,N,A,S,F}
+struct _PackedStaticMISRandomBuffers{U,N,A,S,F,R}
     uniform::U
     normal::N
     assignments::A
     solve_scratch::S
     failure_scratch::F
+    radial::R
 end
 
 Adapt.@adapt_structure _PackedStaticMISRandomBuffers
 
-struct _DMPMCRandomBuffers{N,U,F}
+struct _DMPMCRandomBuffers{N,U,F,R}
     normals::N
     resampling_uniforms::U
     failure_scratch::F
+    radial::R
 end
 
-struct _PopulationNormalBuffers{N,F}
+struct _PopulationNormalBuffers{N,F,R}
     normals::N
     failure_scratch::F
+    radial::R
 end
 
 struct _DeviceFailureRecord{A}
@@ -327,7 +331,7 @@ function _allocate_random_buffers(device, proposal, nsamples)
     uniform = similar(prototype, T, _native_uniform_count(proposal, nsamples))
     normal = similar(prototype, T, _native_normal_count(proposal, nsamples))
     failure_scratch = _allocate_native_failure_scratch(normal, nsamples)
-    return _RandomBuffers(uniform, normal, failure_scratch)
+    return _RandomBuffers(uniform, normal, failure_scratch, nothing)
 end
 
 function _allocate_random_buffers(
@@ -355,7 +359,15 @@ function _fill_random_buffers!(
 )
     isempty(buffers.uniform) || Random.rand!(rng, buffers.uniform)
     isempty(buffers.normal) || Random.randn!(rng, buffers.normal)
+    _fill_radial_buffers!(rng, buffers.radial)
     return buffers
+end
+
+_fill_radial_buffers!(rng, ::Nothing) = nothing
+function _fill_radial_buffers!(rng, buffers::NamedTuple)
+    isempty(buffers.normal) || Random.randn!(rng, buffers.normal)
+    isempty(buffers.uniform) || Random.rand!(rng, buffers.uniform)
+    return nothing
 end
 
 _owned_backend_rng(
