@@ -104,10 +104,48 @@ function check_smh(device)
     # Existing device fixture consumes each decision-buffer column in order.
     decisions = [collect(column) for batch in uniforms for column in eachcol(batch)]
     result = cpu_device()(importance_sample!(scripted_sampler(base, normals, decisions)))
+    check_transfer_budget(result, 2)
     @test result.samples ≈ reference.samples
     @test result.logweights ≈ reference.logweights
     @test result.provenance == reference.provenance
     @test result.diagnostics.transition == reference.diagnostics.transition
+end
+
+smh_failure_target(x, invalid_candidate) = invalid_candidate && x > 2.2 ? oftype(x, NaN) : zero(x)
+
+function check_smh_failure_rollback(device)
+    algorithm = LAIS(ProposalBank([
+            SphericalGaussian(-2.0, 1.0), SphericalGaussian(2.0, 1.0)]);
+        transition=SampleMetropolisHastings(SphericalGaussian(0.0, 1.0); moves=2),
+        rounds=1, round_size=2)
+    for phase in (:candidate, :ordered)
+        base = device(prepare_sampler(Xoshiro(24), smh_failure_target,
+            phase === :candidate, algorithm))
+        normals = [[0.5, 1.0], zeros(2), [2.0, 2.5], [-0.5, -1.0], zeros(2)]
+        # A candidate failure must win over invalid ordered arithmetic, even
+        # when the previous successful call left usable values in its scratch.
+        decisions = [[0.1, 0.0], [0.9, 0.0], [phase === :candidate ? NaN : 0.1, 0.0],
+            [0.9, phase === :ordered ? NaN : 0.0], [0.1, 0.0], [0.9, 0.0]]
+        sampler = scripted_sampler(base, normals, decisions)
+        first = cpu_device()(importance_sample!(sampler))
+        failure = try
+            importance_sample!(sampler)
+            nothing
+        catch error
+            error
+        end
+        @test failure isa LAISRoundError && failure.round == 1
+        @test failure.cause.phase == (phase === :candidate ? :target : :logweight) &&
+              failure.cause.sample_index == 2
+        @test [p.location for p in current_proposal(cpu_device(), sampler).proposals] ==
+              first.samples == [0.5, 1.0]
+        retried = cpu_device()(importance_sample!(sampler))
+        @test retried.samples == [-0.5, -1.0]
+        @test retried.diagnostics.transition == (
+            initial_target_evaluations=0, warmup_target_evaluations=0,
+            production_target_evaluations=2, warmup_proposals=0,
+            production_proposals=2, accepted=2)
+    end
 end
 
 function check_warmup_rollback(device)
@@ -167,6 +205,7 @@ function main()
     @testset "CUDA LAIS recurrence and resident results" begin
         check_fixed_rwm(device)
         check_smh(device)
+        check_smh_failure_rollback(device)
         check_failure_rollback(device)
         check_warmup_rollback(device)
         check_warmup_batch_boundary(device)

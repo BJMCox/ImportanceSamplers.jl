@@ -299,8 +299,11 @@ end
     status = @localmem UInt16 (1,)
     selected = @localmem Int (1,)
     @uniform lanes = @groupsize()[1]
+    # Failed candidate slots may retain old values. Skip the whole batch and
+    # preserve its failure record for the single host check after replacement.
+    @uniform batch_steps = iszero(failures[1]) ? steps : 0
     dimension = _transition_dimension(centres)
-    for move in 1:steps
+    for move in 1:batch_steps
         if lane == 1
             status[1] = 0
             selected[1] = 0
@@ -410,7 +413,7 @@ function _initialize_smh_cache!(state, target, execution, transfers)
     return nothing
 end
 
-function _smh_candidate_batch!(state, target, rng, execution, transfers, steps)
+function _smh_candidate_batch!(state, target, rng, execution, steps)
     normal_count = _native_normal_count(state.proposal, steps)
     uniform_count = _native_uniform_count(state.proposal, steps)
     normal_count > 0 && Random.randn!(rng, view(state.normals, 1:normal_count))
@@ -427,16 +430,15 @@ function _smh_candidate_batch!(state, target, rng, execution, transfers, steps)
         view(state.proposal_uniforms, 1:uniform_count),
         view(state.normals, 1:normal_count), evaluator, state.proposal,
         _NoSampleTransform(), execution)
-    _check_smh_failures!(state, transfers)
     return nothing
 end
 
 function _smh_ordered_batch!(::KernelAbstractions.CPU, state, steps, transfers)
+    _check_smh_failures!(state, transfers)
     return _smh_ordered_cpu!(state, steps)
 end
 
 function _smh_ordered_batch!(backend, state, steps, transfers)
-    _reset_native_failure_scratch!(state.failure_scratch)
     kernel = _smh_ordered_kernel!(backend)
     workload = max(length(state.logratios), _transition_dimension(state.centres))
     lanes = min(_LOCAL_REDUCTION_WORKGROUP_SIZE, nextpow(2, workload))
@@ -456,7 +458,7 @@ function transition!(state::_SampleMetropolisHastingsState, target, rng,
     completed = 0
     while completed < state.moves
         steps = min(state.capacity, state.moves - completed)
-        _smh_candidate_batch!(state, target, rng, execution, transfers, steps)
+        _smh_candidate_batch!(state, target, rng, execution, steps)
         _smh_ordered_batch!(backend, state, steps, transfers)
         state.production_evaluations += steps
         completed += steps
