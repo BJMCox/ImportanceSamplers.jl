@@ -1045,8 +1045,15 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedMomentSample
     result = _capture_gaussian_round(
         algorithm, method_state, transfers, rounds, :result_construction, rounds,
     ) do
+        result_samples = _map_owned_result_samples(
+            sampler.target,
+            workspace.samples,
+            buffers.failure_scratch,
+            transfers,
+            sampler.threaded,
+        )
         _adopt_validated_weighted_samples(
-            copy(workspace.samples),
+            result_samples,
             copy(workspace.logweights);
             provenance=(round=round_ids,),
             diagnostics=diagnostics,

@@ -302,7 +302,9 @@ function _allocate_random_buffers(
         eltype(bank.locations),
         size(bank.locations, 1) * capacity,
     )
-    failure_scratch = _allocate_native_failure_scratch(normals, capacity)
+    failure_scratch = _allocate_native_failure_scratch(
+        normals, capacity; capacity=max(sample_budget, _active_proposal_count(bank)),
+    )
     return _PopulationNormalBuffers(normals, failure_scratch,
         _allocate_radial_buffers(normals, bank.family, capacity))
 end

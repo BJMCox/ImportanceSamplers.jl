@@ -422,3 +422,32 @@ end
     @test maximum(abs, flat_result.logweights) <= 256eps()
     @test abs(lognormalizer(flat_result)) <= 256eps()
 end
+
+@testset "named target transform preserves the normalized chart measure" begin
+    factor = [
+        1.0 0.0 0.0 0.0
+        0.3 1.2 0.0 0.0
+        -0.2 0.4 0.8 0.0
+        0.1 -0.3 0.25 1.5
+    ]
+    proposal = FactorGaussian(zeros(4), factor)
+    layout = (
+        weights=(1:2 => SimplexTransform(3)),
+        rate=(3 => PositiveTransform()),
+        offset=(4 => IdentityTransform()),
+    )
+    target(sample) = _dependent_structured_logdensity(sample, factor)
+    result = importance_sample(
+        Random.Xoshiro(0x7209),
+        target,
+        ImportanceSampling(proposal; nsamples=128);
+        transform=layout,
+        threaded=false,
+    )
+
+    @test size(result.samples.weights) == (3, 128)
+    @test length(result.samples.rate) == 128
+    @test length(result.samples.offset) == 128
+    @test maximum(abs, result.logweights) <= 256eps()
+    @test abs(lognormalizer(result)) <= 256eps()
+end

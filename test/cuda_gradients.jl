@@ -1,4 +1,4 @@
-using Test, CUDA, Enzyme, ImportanceSamplers, Random
+using Test, CUDA, Enzyme, ImportanceSamplers, Random, LinearAlgebra
 import ADTypes, MLDataDevices
 
 CUDA.allowscalar(false)
@@ -22,6 +22,52 @@ end
 
 cuda_gradient_logtarget(x) = cuda_gradient_logtarget(x, (; center=(0f0, 0f0)))
 cuda_gradient!(g, x) = cuda_gradient!(g, x, (; center=(0f0, 0f0)))
+
+function cuda_named_logtarget(theta, p)
+    value = -p.rate * theta.scale - theta.offset^2 / 2
+    for i in eachindex(theta.weights)
+        value += p.alpha[i] * log(theta.weights[i])
+    end
+    return value
+end
+
+function cuda_named_gradient!(g, theta, p)
+    for i in eachindex(theta.weights)
+        g.weights[i] = p.alpha[i] / theta.weights[i]
+    end
+    g.scale[] = -p.rate
+    g.offset[] = -theta.offset
+    return nothing
+end
+
+@testset "CUDA named gradients retain the transform through reuse and retarget" begin
+    device = MLDataDevices.CUDADevice{typeof(CUDA.device()),Nothing}(CUDA.device())
+    bank = ProposalBank([
+        FactorGaussian(zeros(Float32, 4), 0.5f0 * Matrix{Float32}(I, 4, 4)),
+        FactorGaussian(fill(0.1f0, 4), 0.5f0 * Matrix{Float32}(I, 4, 4)),
+    ])
+    algorithm = FirstOrderGRAMIS(bank; rounds=2, round_size=192, repulsion_strength=0f0)
+    layout = (weights=(1:2=>SimplexTransform(3)), scale=(3=>PositiveTransform()),
+        offset=(4=>IdentityTransform()))
+    ad = ADTypes.AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse))
+    automatic = LogTarget(cuda_named_logtarget, ad)
+    explicit = LogTarget(cuda_named_logtarget; grad=cuda_named_gradient!)
+    p = (; alpha=Float32[0.7, 1.4, 2.1], rate=0.8f0)
+    generated = device(prepare_sampler(Xoshiro(91), automatic, p, algorithm; transform=layout))
+    reference = device(prepare_sampler(Xoshiro(91), explicit, p, algorithm; transform=layout))
+    for pass in 1:3
+        if pass == 3
+            p2 = (; alpha=Float32[1.2, 0.7, 1.4], rate=1.3f0)
+            generated = retarget(Xoshiro(12), generated, automatic, p2)
+            reference = retarget(Xoshiro(12), reference, explicit, p2)
+        end
+        actual, expected = importance_sample!(generated), importance_sample!(reference)
+        for field in keys(actual.samples)
+            @test Array(actual.samples[field]) ≈ Array(expected.samples[field]) rtol=8f-4 atol=8f-5
+        end
+        @test Array(actual.logweights) ≈ Array(expected.logweights) rtol=8f-4 atol=8f-5
+    end
+end
 
 @testset "CUDA automatic gradients preserve adaptation and retargeting ($T)" for T in (Float32, Float64)
     device = MLDataDevices.CUDADevice{typeof(CUDA.device()),Nothing}(CUDA.device())

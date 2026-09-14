@@ -707,7 +707,9 @@ function _allocate_random_buffers(
     capacity = maximum(method_state.plan.schedule)
     uniform = similar(prototype, T, 0)
     normal = similar(prototype, T, dimension * capacity)
-    failure_scratch = _allocate_native_failure_scratch(normal, capacity)
+    failure_scratch = _allocate_native_failure_scratch(
+        normal, capacity; capacity=max(sample_budget, dimension * dimension),
+    )
     return _RandomBuffers(uniform, normal, failure_scratch,
         _allocate_radial_buffers(prototype, method_state.committed.family, capacity))
 end
@@ -840,8 +842,77 @@ _first_order_gramis_resident_state(method_state::_PreparedFirstOrderGRAMIS) =
         method_state.workspace,
     )
 
-function _preflight_first_order_gramis_factorization!(device, method_state)
-    throw(SamplerDeviceError(device, :first_order_gramis_accelerator_unavailable))
+KernelAbstractions.@kernel function _factorization_preflight_covariances!(
+    covariances,
+)
+    entry = KernelAbstractions.@index(Global, Linear)
+    dimension = size(covariances, 1)
+    entries_per_proposal = dimension * dimension
+    proposal_slot = (entry - 1) ÷ entries_per_proposal + 1
+    matrix_entry = (entry - 1) % entries_per_proposal
+    row = matrix_entry % dimension + 1
+    column = matrix_entry ÷ dimension + 1
+    T = eltype(covariances)
+    covariances[row, column, proposal_slot] = row == column ?
+        T(dimension + proposal_slot) : T(row + column) / T(100)
+end
+
+function _preflight_first_order_gramis_factorization!(
+    device::MLDataDevices.AbstractAcceleratorDevice,
+    method_state::_PreparedFirstOrderGRAMIS,
+)
+    T = eltype(method_state.committed.locations)
+    dimension = 3
+    proposal_count = 2
+    prototype = method_state.workspace.covariances
+    covariances = similar(
+        prototype,
+        T,
+        dimension,
+        dimension,
+        proposal_count,
+    )
+    factors = similar(covariances)
+    info = similar(method_state.workspace.factor_info, Int32, proposal_count)
+    status = similar(method_state.workspace.factor_status, UInt8, proposal_count)
+    fill!(status, _POPULATION_COVARIANCE_READY)
+    backend = KernelAbstractions.get_backend(covariances)
+    covariance_kernel = _factorization_preflight_covariances!(backend)
+    covariance_kernel(
+        covariances;
+        ndrange=length(covariances),
+    )
+    execution = _KernelExecution(
+        _ThreadedCPUExecution(),
+    )
+    _factor_population_covariances!(
+        factors,
+        covariances,
+        info,
+        status,
+        execution,
+    )
+    any(!iszero, Array(info)) && throw(
+        SamplerDeviceError(
+            device,
+            :kernel_argument_unsupported,
+        ),
+    )
+
+    pooled = similar(method_state.workspace.pooled_covariance, T, dimension, dimension)
+    _pooled_covariance!(pooled, factors, execution)
+    _factor_pooled_covariance!(pooled)
+    means = similar(method_state.workspace.whitened_means, T, dimension, proposal_count)
+    fill!(means, one(T))
+    whitened = similar(means)
+    _whiten_means!(whitened, pooled, means)
+    all(isfinite, Array(whitened)) || throw(
+        SamplerDeviceError(
+            device,
+            :kernel_argument_unsupported,
+        ),
+    )
+    return nothing
 end
 
 function _preflight_first_order_gramis_kernel_arguments(

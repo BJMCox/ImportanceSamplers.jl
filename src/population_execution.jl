@@ -532,8 +532,15 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
         plan.schedule[final_round],
         final_round,
     ) do
-        _adopt_validated_weighted_samples(
+        result_samples = _map_result_samples(
+            sampler.target,
             samples,
+            buffers.failure_scratch,
+            transfers,
+            sampler.threaded,
+        )
+        _adopt_validated_weighted_samples(
+            result_samples,
             logweights;
             provenance=(round=round_ids, proposal_id=proposal_ids),
             diagnostics=diagnostics,

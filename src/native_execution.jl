@@ -811,7 +811,7 @@ function _launch_native_fused!(
         samples,
         logweights,
         failure_record.storage,
-        uniform_buffer,
+        iszero(length(uniform_buffer)) ? nothing : uniform_buffer,
         normal_buffer,
         target,
         base,

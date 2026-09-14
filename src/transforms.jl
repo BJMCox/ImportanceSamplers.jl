@@ -154,12 +154,12 @@ end
     return _native_checked_transform_result(z, z)
 end
 
-@inline function _native_transform_with_logjac(::IdentityTransform, z::T) where {T<:_TransformFloat}
+@inline function _native_transform_with_logjac(::IdentityTransform, z::T) where {T}
     isfinite(z) || return (z, zero(T), _NATIVE_TRANSFORM_NONFINITE_INPUT)
     return _native_transform_success(z, zero(T))
 end
 
-@inline function _native_transform_with_logjac(::PositiveTransform, z::T) where {T<:_TransformFloat}
+@inline function _native_transform_with_logjac(::PositiveTransform, z::T) where {T}
     isfinite(z) || return (z, z, _NATIVE_TRANSFORM_NONFINITE_INPUT)
     x = exp(z)
     isfinite(x) || return (x, z, _NATIVE_TRANSFORM_NONFINITE_OUTPUT)
@@ -167,7 +167,7 @@ end
     return _native_transform_success(x, z)
 end
 
-@inline function _native_transform_with_logjac(::SoftplusTransform, z::T) where {T<:_TransformFloat}
+@inline function _native_transform_with_logjac(::SoftplusTransform, z::T) where {T}
     isfinite(z) || return (z, z, _NATIVE_TRANSFORM_NONFINITE_INPUT)
     x = _softplus(z)
     logabsjac = z - x
@@ -178,9 +178,9 @@ end
 end
 
 @inline function _native_transform_with_logjac(
-    transform::IntervalTransform{T,T,Nothing},
+    transform::IntervalTransform{B,B,Nothing},
     z::T,
-) where {T<:_TransformFloat}
+) where {B<:_TransformFloat,T}
     distance, logabsjac, reason = _native_transform_with_logjac(PositiveTransform(), z)
     iszero(reason) || return (distance, logabsjac, reason)
     x = transform.lower + distance
@@ -205,9 +205,9 @@ end
 end
 
 @inline function _native_transform_with_logjac(
-    transform::IntervalTransform{T,Nothing,T},
+    transform::IntervalTransform{B,Nothing,B},
     z::T,
-) where {T<:_TransformFloat}
+) where {B<:_TransformFloat,T}
     distance, logabsjac, reason = _native_transform_with_logjac(PositiveTransform(), z)
     iszero(reason) || return (distance, logabsjac, reason)
     x = transform.upper - distance
@@ -217,9 +217,9 @@ end
 end
 
 @inline function _native_transform_with_logjac(
-    transform::IntervalTransform{T,T,T},
+    transform::IntervalTransform{B,B,B},
     z::T,
-) where {T<:_TransformFloat}
+) where {B<:_TransformFloat,T}
     isfinite(z) || return (z, z, _NATIVE_TRANSFORM_NONFINITE_INPUT)
     probability = _logistic(z)
     x = _bounded_interval_value(transform.lower, transform.upper, probability)
@@ -291,15 +291,15 @@ end
     return value, logabsjac
 end
 
-@inline function _softplus(z::T) where {T<:_TransformFloat}
-    return max(z, zero(T)) + log1p(exp(-abs(z)))
+@inline function _softplus(z)
+    return z > zero(z) ? z + log1p(exp(-z)) : log1p(exp(z))
 end
 
-@inline function _logsigmoid(z::T) where {T<:_TransformFloat}
+@inline function _logsigmoid(z)
     return -_softplus(-z)
 end
 
-@inline function _logistic(z::T) where {T<:_TransformFloat}
+@inline function _logistic(z::T) where {T}
     if z >= zero(T)
         exponent = exp(-z)
         return inv(one(T) + exponent)
@@ -320,8 +320,8 @@ end
     return log(upper - lower)
 end
 
-@inline function _bounded_interval_value(lower::T, upper::T, probability::T) where {T<:_TransformFloat}
-    return (one(T) - probability) * lower + probability * upper
+@inline function _bounded_interval_value(lower, upper, probability)
+    return (one(probability) - probability) * lower + probability * upper
 end
 
 @inline _transform_with_logjac(transform::_NativeScalarTransform, z::_TransformFloat) =

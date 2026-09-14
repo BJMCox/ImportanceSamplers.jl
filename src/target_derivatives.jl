@@ -1,5 +1,7 @@
 abstract type _BoundGradient end
 
+_record_gradient_transfers!(transfers, bound::_BoundGradient) = nothing
+
 struct _BoundInPlaceGradient{T} <: _BoundGradient
     target::T
 end
@@ -20,15 +22,18 @@ struct _BoundDIGradient{T,A,C} <: _BoundGradient
     preparation::C
 end
 
-struct _DIPreparationPool{P}
+struct _GradientWorkerPool{P}
     preparations::Vector{P}
     thread_slots::Vector{Int}
 end
 
-struct _BoundDIBatchGradient{T,P,S} <: _BoundGradient
+abstract type _BoundBatchGradient <: _BoundGradient end
+
+struct _BoundDIBatchGradient{T,P,S,C} <: _BoundBatchGradient
     target::T
     preparation::P
     seeds::S
+    context::C
 end
 
 function _prepare_accelerator_gradient(target, locations, values)
@@ -44,12 +49,14 @@ function _prepare_accelerator_gradient(
     _bind_resolved_target(target, sample)
     seeds = similar(values)
     fill!(seeds, one(eltype(seeds)))
+    # Ref keeps mixed scalar/array context constant through Enzyme's kernel rule.
+    context = Ref(target.context)
     preparation = DifferentiationInterface.prepare_pullback(
         _batch_logtarget!, values, target.adtype, locations, (seeds,),
         DifferentiationInterface.Constant(target.logdensity),
-        DifferentiationInterface.Constant(target.context),
+        DifferentiationInterface.Constant(context),
     )
-    return _BoundDIBatchGradient(target, preparation, seeds)
+    return _BoundDIBatchGradient(target, preparation, seeds, context)
 end
 
 _batch_target_value(f, x, p) = f(x, p)
@@ -57,7 +64,7 @@ _batch_target_value(f, x, ::_NoTargetContext) = f(x)
 
 @kernel function _batch_logtarget_kernel!(values, locations, f, p)
     column = @index(Global, Linear)
-    values[column] = _batch_target_value(f, view(locations, :, column), p)
+    values[column] = _batch_target_value(f, view(locations, :, column), p[])
 end
 
 function _batch_logtarget!(values, locations, f, p)
@@ -75,7 +82,7 @@ function _batch_value_and_gradient!(
     DifferentiationInterface.pullback!(
         _batch_logtarget!, values, (gradients,), bound.preparation, bound.target.adtype,
         locations, (bound.seeds,), DifferentiationInterface.Constant(bound.target.logdensity),
-        DifferentiationInterface.Constant(bound.target.context),
+        DifferentiationInterface.Constant(bound.context),
     )
     return nothing
 end
@@ -245,11 +252,17 @@ function _reject_out_of_place_gradient_on_accelerator(sample)
 end
 
 function _prepare_di_pool(target, sample, worker_count)
-    first_preparation = _prepare_di_gradient(target, target.context, sample)
+    return _prepare_gradient_pool(worker_count) do
+        _prepare_di_gradient(target, target.context, sample)
+    end
+end
+
+function _prepare_gradient_pool(make_preparation, worker_count)
+    first_preparation = make_preparation()
     preparations = Vector{typeof(first_preparation)}(undef, worker_count)
     preparations[1] = first_preparation
     for worker in 2:worker_count
-        preparations[worker] = _prepare_di_gradient(target, target.context, sample)
+        preparations[worker] = make_preparation()
     end
 
     thread_slots = zeros(Int, Threads.maxthreadid())
@@ -266,7 +279,7 @@ function _prepare_di_pool(target, sample, worker_count)
             thread_slots[thread_id] = slot
         end
     end
-    return _DIPreparationPool(preparations, thread_slots)
+    return _GradientWorkerPool(preparations, thread_slots)
 end
 
 function _prepare_di_gradient(
@@ -358,7 +371,7 @@ end
 end
 
 @inline function _gradient!(destination, gradient::_BoundDIGradient, sample)
-    preparation = _di_preparation(gradient.preparation)
+    preparation = _gradient_workspace(gradient.preparation)
     return _di_gradient!(
         destination,
         gradient.target,
@@ -369,7 +382,7 @@ end
     )
 end
 
-@inline function _di_preparation(pool::_DIPreparationPool)
+@inline function _gradient_workspace(pool::_GradientWorkerPool)
     thread_id = Threads.threadid()
     thread_id <= length(pool.thread_slots) || throw(
         ArgumentError("gradient evaluation must run on a prepared worker"),

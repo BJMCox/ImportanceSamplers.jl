@@ -20,6 +20,15 @@ retarget_array_logdensity(sample, p) =
 retarget_origin_logdensity(sample) = -abs2(sample) / 2
 retarget_shifted_logdensity(sample) = -abs2(sample - 0.5) / 2
 
+named_correlated_logdensity(sample) =
+    -(abs2(sample.a) + abs2((sample.b - 0.8sample.a) / 0.6)) / 2
+flat_correlated_logdensity(sample) =
+    -(abs2(sample[1]) + abs2((sample[2] - 0.8sample[1]) / 0.6)) / 2
+named_shifted_correlated_logdensity(sample) =
+    -(abs2(sample.a - 0.25) + abs2((sample.b + 0.2 - 0.8sample.a) / 0.6)) / 2
+flat_shifted_correlated_logdensity(sample) =
+    -(abs2(sample[1] - 0.25) + abs2((sample[2] + 0.2 - 0.8sample[1]) / 0.6)) / 2
+
 mutable struct CountingRetargetControl
     calls::Int
 end
@@ -72,6 +81,26 @@ function assert_same_result(actual, expected)
     end
 end
 
+function assert_named_flat_result(named, flat)
+    @test named.samples.a ≈ vec(flat.samples[1, :])
+    @test named.samples.b ≈ vec(flat.samples[2, :])
+    @test named.logweights ≈ flat.logweights
+    @test named.provenance == flat.provenance
+end
+
+function assert_same_public_proposal(actual, expected)
+    points = ([-1.0, 0.25], [0.0, 0.0], [1.25, -0.5])
+    for point in points
+        @test DensityInterface.logdensityof(actual, point) ≈
+              DensityInterface.logdensityof(expected, point)
+    end
+    actual_rng = Random.Xoshiro(0x7961)
+    expected_rng = copy(actual_rng)
+    for _ in 1:3
+        @test rand(actual_rng, actual) ≈ rand(expected_rng, expected)
+    end
+end
+
 function assert_retarget_equivalent(
     algorithm,
     rebuild,
@@ -117,6 +146,63 @@ function assert_retarget_equivalent(
         current_proposal(retargeted),
         current_proposal(expected),
         points,
+    )
+end
+
+@testset "named AMIS target preserves numerical adaptation and retarget" begin
+    layout = (a=(1 => IdentityTransform()), b=(2 => IdentityTransform()))
+    algorithm = AMIS(
+        FactorGaussian(zeros(2), [1.0 0.0; 0.3 1.0]);
+        rounds=3,
+        round_size=128,
+    )
+    named = prepare_sampler(
+        Random.Xoshiro(43),
+        named_correlated_logdensity,
+        algorithm;
+        transform=layout,
+        threaded=false,
+    )
+    flat = prepare_sampler(
+        Random.Xoshiro(43),
+        flat_correlated_logdensity,
+        algorithm;
+        threaded=false,
+    )
+
+    named_first = importance_sample!(named)
+    flat_first = importance_sample!(flat)
+    assert_named_flat_result(named_first, flat_first)
+    retained_first = (
+        a=copy(named_first.samples.a),
+        b=copy(named_first.samples.b),
+        logweights=copy(named_first.logweights),
+    )
+
+    assert_named_flat_result(importance_sample!(named), importance_sample!(flat))
+    @test named_first.samples.a == retained_first.a
+    @test named_first.samples.b == retained_first.b
+    @test named_first.logweights == retained_first.logweights
+    assert_same_public_proposal(current_proposal(named), current_proposal(flat))
+
+    retarget_rng = Random.Xoshiro(0x7962)
+    named_retargeted = retarget(
+        copy(retarget_rng),
+        named,
+        named_shifted_correlated_logdensity,
+    )
+    flat_retargeted = retarget(
+        copy(retarget_rng),
+        flat,
+        flat_shifted_correlated_logdensity,
+    )
+    assert_same_public_proposal(
+        current_proposal(named_retargeted),
+        current_proposal(flat_retargeted),
+    )
+    assert_named_flat_result(
+        importance_sample!(named_retargeted),
+        importance_sample!(flat_retargeted),
     )
 end
 

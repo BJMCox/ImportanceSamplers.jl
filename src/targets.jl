@@ -20,6 +20,13 @@ The callable and its operations must support Enzyme's device differentiation.
 Structured GPU contexts can require Enzyme's runtime-activity mode; the supplied
 AD mode is preserved, not changed implicitly.
 Other accelerator AD backends and out-of-place explicit gradients are unsupported.
+
+With a named `transform=` layout, the callable receives named logical parameters.
+An explicit gradient differentiates only this logical target. Write scalar
+gradient fields with `g.field[]` and vector fields with `g.field[i]`. The package
+adds the transform pullback and Jacobian derivative. Borrowed inputs and gradient
+buffers must not escape the callback. CPU automatic gradients use ordinary arrays
+in the composed target through DifferentiationInterface.
 """
 struct LogTarget{F,A<:ADTypes.AbstractADType,G}
     logdensity::F

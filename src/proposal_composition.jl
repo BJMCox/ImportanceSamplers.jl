@@ -12,6 +12,20 @@ struct _FlatTransformLayout{B<:NamedTuple} <: AbstractSampleTransform
     dimension::Int
 end
 
+_logical_block_length(block::_LocatedTransform{Int}) = 1
+_logical_block_length(block::_LocatedTransform{<:UnitRange}) = length(block.location)
+_logical_block_length(block::_LocatedTransform{<:UnitRange,SimplexTransform}) =
+    block.transform.dimension
+
+_logical_block_shape(block::_LocatedTransform{Int}) = ()
+_logical_block_shape(block::_LocatedTransform{<:UnitRange}) = (_logical_block_length(block),)
+
+function _allocate_flat_samples(prototype, ::Type{T}, layout::_FlatTransformLayout, count) where {T}
+    return map(layout.blocks) do block
+        similar(prototype, T, _logical_block_shape(block)..., count)
+    end
+end
+
 function _prepare_transformed_proposal(base, transform::AbstractSampleTransform)
     _validate_known_transform_input(transform, _known_proposal_transform_input(base))
     return TransformedProposal(base, transform, _PreparedProposalToken())
@@ -154,7 +168,7 @@ function _prepare_flat_transform_block(pair::Pair, dimension, selected)
     return _LocatedTransform(selector, transform)
 end
 
-function _prepare_flat_transformed_proposal(base, specification::NamedTuple)
+function _prepare_flat_transform_layout(base, specification::NamedTuple)
     dimension = _proposal_dimension(base)
     dimension isa Int && dimension > 0 || throw(
         ArgumentError("flat selector transforms require a base with a known positive dimension"),
@@ -167,9 +181,13 @@ function _prepare_flat_transformed_proposal(base, specification::NamedTuple)
         ArgumentError("flat transform selectors must collectively cover the base dimension"),
     )
 
+    return _FlatTransformLayout(blocks, dimension)
+end
+
+function _prepare_flat_transformed_proposal(base, specification::NamedTuple)
     return TransformedProposal(
         base,
-        _FlatTransformLayout(blocks, dimension),
+        _prepare_flat_transform_layout(base, specification),
         _PreparedProposalToken(),
     )
 end
