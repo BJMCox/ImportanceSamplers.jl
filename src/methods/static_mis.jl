@@ -574,7 +574,14 @@ function _importance_sample_cpu!(sampler, method_state::_PreparedStaticMIS, thre
         ),
         nsamples=sampler.algorithm.nsamples,
         failures=0,
-        transfers=(count=0, bytes=0),
+        transfers=_ResultTransferCounter(0, 0),
+    )
+    samples = _map_result_samples(
+        sampler.target,
+        samples,
+        _native_failure_scratch(sampler.random_buffers),
+        diagnostics.transfers,
+        sampler.threaded,
     )
     return _adopt_weighted_samples(
         samples,

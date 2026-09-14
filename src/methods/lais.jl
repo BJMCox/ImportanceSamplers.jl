@@ -84,7 +84,9 @@ function _allocate_random_buffers(::MLDataDevices.AbstractDevice, ::ProposalBank
     normals = similar(state.bank.locations, eltype(state.bank.locations),
         size(state.bank.locations, 1) * maximum(state.plan.schedule))
     return _PopulationNormalBuffers(normals,
-        _allocate_native_failure_scratch(normals, maximum(state.plan.schedule)),
+        _allocate_native_failure_scratch(
+            normals, maximum(state.plan.schedule); capacity=sample_budget,
+        ),
         _allocate_radial_buffers(normals, state.bank.family, maximum(state.plan.schedule)))
 end
 

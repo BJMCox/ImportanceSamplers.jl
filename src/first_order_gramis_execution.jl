@@ -1046,7 +1046,7 @@ end
     location = view(locations, :, proposal_slot)
     gradient = view(gradients, :, proposal_slot)
     @inbounds values[proposal_slot] = target(location)
-    _gradient!(gradient, bound_gradient, location)
+    _gradient!(gradient, bound_gradient, location, proposal_slot)
     return nothing
 end
 
@@ -1133,7 +1133,7 @@ function _evaluate_frozen_gradients!(
 end
 
 function _evaluate_frozen_gradients!(
-    values, gradients, target, bound_gradient::_BoundDIBatchGradient,
+    values, gradients, target, bound_gradient::_BoundBatchGradient,
     locations, ::_KernelExecution,
 )
     _batch_value_and_gradient!(values, gradients, bound_gradient, locations)
@@ -1170,11 +1170,13 @@ function _evaluate_frozen_gradients!(
         failure_record.storage,
         zero(eltype(failure_record.storage)),
     )
+    bound_gradient = _first_order_gramis_bound_gradient(method_state, execution)
+    transfers === nothing || _record_gradient_transfers!(transfers, bound_gradient)
     _evaluate_frozen_gradients!(
         workspace.frozen_values,
         workspace.gradients,
         target,
-        _first_order_gramis_bound_gradient(method_state, execution),
+        bound_gradient,
         method_state.run.locations,
         execution,
     )
@@ -2503,6 +2505,46 @@ function _minimum_first_order_gramis_whitened_distance(
     return _first_order_gramis_failure_value(device, output, 1, transfers)
 end
 
+function _first_order_gramis_failure_value(
+    ::MLDataDevices.AbstractAcceleratorDevice,
+    values,
+    index,
+    transfers,
+)
+    snapshot = Array(view(vec(values), index:index))
+    _record_device_scalar_transfer!(
+        transfers,
+        values,
+        eltype(values),
+    )
+    return only(snapshot)
+end
+
+function _first_order_gramis_diagnostic_summary(
+    ::MLDataDevices.AbstractAcceleratorDevice,
+    status,
+    steps,
+    trials,
+    transfers,
+    ::_KernelExecution,
+)
+    all_zero = count(==(_POPULATION_ALL_ZERO_LOCAL), status)
+    tempering = count(
+        ==(_POPULATION_TEMPERING_FAILED),
+        status,
+    )
+    backtracking = count(iszero, steps)
+    target_trials = sum(trials)
+    for values in (status, status, steps, trials)
+        _record_device_scalar_transfer!(
+            transfers,
+            values,
+            Int,
+        )
+    end
+    return (; all_zero, tempering, backtracking, target_trials)
+end
+
 function _first_order_gramis_diagnostic_summary(
     ::MLDataDevices.AbstractCPUDevice,
     status,
@@ -3018,8 +3060,15 @@ function _importance_sample_cpu!(
         :result_construction,
         rounds,
         begin
-            constructed = _adopt_validated_weighted_samples(
+            result_samples = _map_result_samples(
+                sampler.target,
                 samples,
+                buffers.failure_scratch,
+                transfers,
+                sampler.threaded,
+            )
+            constructed = _adopt_validated_weighted_samples(
+                result_samples,
                 logweights;
                 provenance=(round=round_ids, proposal_id=proposal_ids),
                 diagnostics=diagnostics,

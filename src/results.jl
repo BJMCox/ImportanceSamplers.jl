@@ -587,25 +587,28 @@ function normalized_weights(result::_AbstractWeightedSamples)
     return _with_backend_device(_storage_device(result.logweights)) do
         logweight_sum = _logweight_sum(result)
         logweight_sum == -Inf && throw(AllZeroWeightsError())
-        return exp.(result.logweights .- logweight_sum)
+        return _normalized_weights(result.logweights, logweight_sum)
     end
 end
+
+_normalized_weights(logweights, logweight_sum) = exp.(logweights .- logweight_sum)
 
 function _logweight_sum(result::_AbstractWeightedSamples)
     _is_host_storage(result.logweights) &&
         return LogExpFunctions.logsumexp(result.logweights)
-    T = eltype(result.logweights)
-    neutral = _LogSumExpAccumulator(T(-Inf), zero(T))
-    accumulator = AcceleratedKernels.mapreduce(
-        _logsumexp_accumulator,
-        _merge_logsumexp_accumulators,
-        result.logweights;
-        init=neutral, neutral,
-    )
+    accumulator = _logsumexp_accumulator(result.logweights)
     _record_device_scalar_transfer!(
         _result_transfers(result),
         result.logweights,
         typeof(accumulator),
     )
     return _finish_logsumexp(accumulator)
+end
+
+function _logsumexp_accumulator(logweights::AbstractArray{T}) where {T}
+    neutral = _LogSumExpAccumulator(T(-Inf), zero(T))
+    return AcceleratedKernels.mapreduce(
+        _logsumexp_accumulator, _merge_logsumexp_accumulators, logweights;
+        init=neutral, neutral,
+    )
 end

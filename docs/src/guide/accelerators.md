@@ -83,7 +83,8 @@ batching where supported.
 The default batch path requires matching native factor/log-weight precision and
 CPU or CUDA support. Explicit `BatchedFactorExecution()` also permits supported
 native MIS paths with wider log weights, using separate denominator storage.
-Base IS requires a Gaussian factor and no sample transform. Packed static MIS
+Base IS requires an untransformed Gaussian factor proposal. A named target layout
+passed through `transform=` still keeps that numerical factor path. Packed static MIS
 and adaptive paths also support Student-t factors. Static MIS requires a
 full-mixture denominator, as used by stratified and random-mixture MIS.
 Unsupported cases use the fused path without changing the estimator.
@@ -182,12 +183,68 @@ CUDA execution requires `threaded=true`, a supported native proposal and
 transform layout, and a target that compiles for the device. Gaussian A100
 metadata does not describe Student-t coverage. The separate Student-t reproducer
 and its limits appear in [Validation and support](@ref). Generic proposals and `ProductProposal` are
-rejected. AMDGPU and Metal remain unclaimed; a KernelAbstractions backend
-alone is not a package support guarantee.
+rejected. AMDGPU remains unclaimed; a KernelAbstractions backend alone is not
+a package support guarantee.
 
 Static MIS uses the same transfer and residency contract. Its generated bank
 matrix and scheme-specific limits are maintained on the
 [Static multiple importance sampling](@ref) page.
+
+## Metal
+
+Load `Metal` and transfer a prepared sampler with
+`MLDataDevices.MetalDevice{Float32}()`. This explicitly converts numerical state
+to the precision supported by Metal. Sampling, owned-result reuse and resident
+resampling have been checked with native Gaussian proposals for Base IS, static
+MIS, AMIS, NPMC, DM-PMC, APIS, CAIS, LAIS and first-order GRAMIS.
+GRAMIS requires a supplied gradient on Metal. Automatic Enzyme gradients are
+not supported by the tested Metal backend.
+
+Metal uses 32-bit atomic failure records. This fallback needs eight bytes per
+logical sample slot plus eight bytes for its count. Successful runs read only
+the count. An error also copies the diagnostic payload to report the first
+failing sample and transform block. CPU and CUDA retain their compact record.
+
+## Reactant
+
+Load `Reactant` and `CUDA`, then apply
+`MLDataDevices.with_eltype(MLDataDevices.ReactantDevice(), nothing)` to the
+prepared sampler. CUDA must be loaded for Reactant's KernelAbstractions
+integration even when Reactant runs on CPU.
+
+Native Gaussian Base IS supports named fields and result/RNG reuse. The owned
+RNG fills use cached compiled functions. On the tested NVIDIA A100, GRAMIS also
+supports `LogTarget(logtarget, AutoEnzyme())` with resident array context,
+simplex/positive/identity fields, adaptation, reuse and `retarget`.
+
+The A100 checks also cover static MIS, AMIS, NPMC, DM-PMC, APIS, CAIS and LAIS
+with `Float32` `FactorGaussian` proposals. LAIS covers RandomWalkMetropolis, RAM and
+SampleMetropolisHastings transitions. These checks use a shifted correlated
+Gaussian target, named fields and resident array context, including prepared
+sampler reuse, adaptive retargeting and resident resampling. They establish
+correctness for these cases, not throughput or other proposal families.
+
+`normalized_weights`, `lognormalizer` and `resample` support Reactant results
+and their applicable view operations. Result normalization transfers two
+scalars. CDF construction compiles normalization and cumulative summation
+together, then transfers two summary scalars once. Adaptive weight normalization
+transfers three summary scalars. Moment fitting compiles the weighted mean and
+covariance together; Cholesky reads one success flag. The fitted factor and
+proposal history remain on-device.
+
+The extension compiles the batch gradient with supported Reactant options that
+preserve nonlinear transform derivatives. It does not modify Reactant. A
+gradient batch reads one status scalar on the host. Round summaries copy only
+bounded diagnostics; samples and gradient arrays remain on-device.
+
+Reactant's CPU backend supports plain IS and the compiled gradient calculation,
+but cannot compile GRAMIS's cooperative kernels. Device transfer rejects that
+combination before the compiler can abort Julia. Use `CPUDevice()` for CPU
+GRAMIS. Factor-proposal AMIS and NPMC also remain rejected during Reactant CPU
+preflight. Their new factorization support applies to GPU execution; it does
+not enable the unvalidated cooperative CPU paths. Other Reactant CPU adaptive
+methods and non-NVIDIA accelerators remain unvalidated. Metal GRAMIS still
+requires an explicit gradient.
 
 ## Backend documentation and reproducer
 

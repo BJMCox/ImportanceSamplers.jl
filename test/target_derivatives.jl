@@ -3,6 +3,7 @@ import DensityInterface
 import LogDensityProblems
 import MLDataDevices
 import Random
+import LinearAlgebra
 
 const ISD = ImportanceSamplers
 
@@ -503,7 +504,7 @@ end
             push!(thread_calls[worker], Threads.threadid())
             push!(
                 preparation_calls[worker],
-                ISD._di_preparation(bound.preparation),
+                ISD._gradient_workspace(bound.preparation),
             )
             ISD._gradient!(destinations[worker], bound, sample)
         end
@@ -541,4 +542,61 @@ end
         first(preparation_calls[left]) !== first(preparation_calls[right])
         for left in 1:worker_count for right in 1:worker_count
     )
+end
+
+@testset "Named gradients preserve scalar and simplex change of variables" begin
+    layout = (weights=(1:2=>SimplexTransform(3)), positive=(3=>PositiveTransform()),
+        soft=(4=>SoftplusTransform()), bounded=(5=>IntervalTransform(-2.0,2.0)),
+        lower=(6=>IntervalTransform(-2.0,nothing)), upper=(7=>IntervalTransform(nothing,3.0)),
+        beta=(8:9=>IdentityTransform()))
+    a = inv(sqrt(3.0))
+    H = [1-(1+a)/2 -(1+a)/2; -(1+a)/2 1-(1+a)/2; a a]
+    function logical_reference(z)
+        logits = H*z[1:2]
+        weights = exp.(logits .- maximum(logits))
+        return (; weights=weights/sum(weights), positive=exp(z[3]), soft=log1p(exp(z[4])),
+            bounded=-2+4/(1+exp(-z[5])), lower=-2+exp(z[6]), upper=3-exp(z[7]), beta=z[8:9])
+    end
+    function logtarget(theta)
+        return sum(log,theta.weights) - (theta.positive^2+theta.soft^2+theta.bounded^2+
+            theta.lower^2+theta.upper^2+sum(abs2,theta.beta))/2
+    end
+    function named_gradient!(g,theta)
+        g.weights .= inv.(theta.weights)
+        g.positive[] = -theta.positive
+        g.soft[] = -theta.soft
+        g.bounded[] = -theta.bounded
+        g.lower[] = -theta.lower
+        g.upper[] = -theta.upper
+        g.beta .= .-theta.beta
+        return nothing
+    end
+    function flat_logtarget(z)
+        theta = logical_reference(z)
+        jac = log(3)/2+sum(log,theta.weights)+z[3]+z[4]-log1p(exp(z[4]))+
+            log(4)-log1p(exp(-z[5]))-log1p(exp(z[5]))+z[6]+z[7]
+        return logtarget(theta)+jac
+    end
+    flat_gradient!(g,z) = ForwardDiff.gradient!(g,flat_logtarget,z)
+    factor = 0.4*Matrix{Float64}(LinearAlgebra.I,9,9)
+    bank = ProposalBank([FactorGaussian(zeros(9),factor),FactorGaussian(fill(0.1,9),factor)])
+    algorithm = FirstOrderGRAMIS(bank; rounds=2,round_size=256,repulsion_strength=0.0)
+    explicit = prepare_sampler(Random.Xoshiro(73),LogTarget(logtarget;grad=named_gradient!),
+        algorithm;transform=layout,threaded=true)
+    automatic = prepare_sampler(Random.Xoshiro(73),LogTarget(logtarget,ADTypes.AutoForwardDiff()),
+        algorithm;transform=layout,threaded=false)
+    flat = prepare_sampler(Random.Xoshiro(73),LogTarget(flat_logtarget;grad=flat_gradient!),
+        algorithm;threaded=false)
+    for _ in 1:2
+        expected = importance_sample!(flat)
+        logical = map(logical_reference,eachcol(expected.samples))
+        for sampler in (explicit,automatic)
+            actual = importance_sample!(sampler)
+            for key in keys(layout)
+                reference = reduce(hcat,getproperty.(logical,key))
+                @test vec(getproperty(actual.samples,key)) ≈ vec(reference) rtol=1e-8 atol=1e-10
+            end
+            @test actual.logweights ≈ expected.logweights rtol=1e-8 atol=1e-10
+        end
+    end
 end

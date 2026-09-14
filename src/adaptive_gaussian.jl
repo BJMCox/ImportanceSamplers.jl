@@ -249,7 +249,7 @@ function _allocate_random_buffers(
     normal = similar(prototype, T, dimension * maximum_round_size)
     failure_scratch = _allocate_native_failure_scratch(
         normal,
-        maximum_round_size,
+        maximum_round_size; capacity=sample_budget,
     )
     return _RandomBuffers(uniform, normal, failure_scratch,
         _allocate_radial_buffers(prototype, method_state.history.family, maximum_round_size))

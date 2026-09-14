@@ -18,14 +18,20 @@ Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 
 [weakdeps]
+Reactant = "3c362404-f566-11ee-1572-e11a4b42c853"
+Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 
 [extensions]
+ImportanceSamplersReactantExt = "Reactant"
+ImportanceSamplersMetalExt = "Metal"
 ImportanceSamplersCUDAExt = "CUDA"
 ImportanceSamplersDistributionsExt = "Distributions"
 
 [compat]
+Reactant = "0.2.285"
+Metal = "1.10"
 ADTypes = "1.24.0"
 AcceleratedKernels = "0.4.3"
 Adapt = "4.7.0"

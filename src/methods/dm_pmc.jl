@@ -585,7 +585,7 @@ function _allocate_random_buffers(
     )
     failure_scratch = _allocate_native_failure_scratch(
         normals,
-        maximum_round_size,
+        maximum_round_size; capacity=max(sample_budget, _active_proposal_count(bank)),
     )
     return _DMPMCRandomBuffers(
         normals,

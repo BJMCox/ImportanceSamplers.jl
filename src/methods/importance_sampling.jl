@@ -151,6 +151,9 @@ function Base.showerror(io::IO, error::SamplerDeviceError)
     elseif error.reason === :kernel_argument_unsupported
         "the target or context does not have a supported accelerator kernel " *
         "argument representation"
+    elseif error.reason === :reactant_cpu_cooperative_kernels
+        "Reactant's CPU backend cannot compile GRAMIS cooperative kernels; " *
+        "use CPUDevice() or Reactant on a supported GPU"
     elseif error.reason === :prepared_migration_unsupported
         "accelerator-resident prepared samplers cannot be transferred"
     elseif error.reason === :rng_not_cloneable
@@ -250,12 +253,19 @@ end
 
 """
     prepare_sampler(rng, logtarget, algorithm;
-                    factor_execution=nothing, threaded=true)
+                    transform=nothing, factor_execution=nothing, threaded=true)
     prepare_sampler(rng, logtarget, p, algorithm;
-                    factor_execution=nothing, threaded=true)
+                    transform=nothing, factor_execution=nothing, threaded=true)
 
 Bind a target, optional context `p`, algorithm, CPU execution policy, and RNG
 into a reusable prepared sampler.
+
+An optional named `transform` uses complete, disjoint flat selectors such as
+`(weights=(1:2=>SimplexTransform(3)), scale=(3=>PositiveTransform()))`.
+The target receives named logical parameters. The sampler keeps numerical
+coordinates internally and includes the forward log Jacobian in raw weights.
+Returned named arrays retain the original weights and provenance. Names do not
+impose proposal independence. Existing behavior is unchanged when omitted.
 
 Known target interfaces and known LogDensityProblems dimensions are resolved
 during preparation. Callable applicability and scalar log-density types are
@@ -292,6 +302,7 @@ function prepare_sampler(
     logtarget,
     algorithm::AbstractImportanceSampler;
     factor_execution=nothing,
+    transform=nothing,
     threaded=true,
 )
     target = _PreparedLogTarget(
@@ -305,6 +316,7 @@ function prepare_sampler(
         target,
         algorithm,
         factor_execution,
+        transform,
         threaded,
     )
 end
@@ -315,6 +327,7 @@ function prepare_sampler(
     context,
     algorithm::AbstractImportanceSampler;
     factor_execution=nothing,
+    transform=nothing,
     threaded=true,
 )
     target = _PreparedLogTarget(
@@ -328,6 +341,7 @@ function prepare_sampler(
         target,
         algorithm,
         factor_execution,
+        transform,
         threaded,
     )
 end
@@ -337,13 +351,14 @@ function _prepare_importance_sampler(
     target,
     algorithm,
     factor_execution,
+    transform,
     threaded,
 )
     threaded isa Bool || throw(ArgumentError("threaded must be Bool"))
     factor_execution = _validate_factor_execution(factor_execution)
     proposal = _algorithm_proposal(algorithm)
     sample_budget = _algorithm_sample_budget(algorithm)
-    prepared_target = _resolve_prepared_target(target, proposal)
+    prepared_target = _resolve_prepared_target(target, proposal, transform)
     method_state = _prepare_method_state(algorithm, prepared_target)
     device = MLDataDevices.CPUDevice()
     random_buffers = _allocate_random_buffers(
@@ -657,6 +672,7 @@ function _retarget_sampler(rng, sampler, target)
         target,
         _retarget_algorithm(sampler),
         sampler.factor_execution,
+        _prepared_target_layout(sampler.target),
         sampler.threaded,
     )
     return _restore_retarget_device(sampler, prepared)
@@ -731,9 +747,9 @@ end
 
 """
     importance_sample(rng, logtarget, algorithm;
-                      factor_execution=nothing, threaded=true)
+                      transform=nothing, factor_execution=nothing, threaded=true)
     importance_sample(rng, logtarget, p, algorithm;
-                      factor_execution=nothing, threaded=true)
+                      transform=nothing, factor_execution=nothing, threaded=true)
 
 Run one complete importance-sampling estimator.
 
@@ -741,6 +757,8 @@ This is the one-shot form of [`prepare_sampler`](@ref) followed by
 [`importance_sample!`](@ref). `logtarget` returns a log density, not a linear
 density. The contextual overload calls `logtarget(sample, p)`. The one-shot
 form executes on CPU; apply a device to a prepared sampler for CUDA execution.
+The optional named `transform` follows [`prepare_sampler`](@ref), including
+the forward Jacobian and named returned samples.
 
 The result stores the algorithm's canonical raw log weights. Use
 [`normalized_weights`](@ref) for weights that sum to one and [`lognormalizer`](@ref)
@@ -751,6 +769,7 @@ function importance_sample(
     logtarget,
     algorithm::AbstractImportanceSampler;
     factor_execution=nothing,
+    transform=nothing,
     threaded=true,
 )
     sampler = prepare_sampler(
@@ -758,6 +777,7 @@ function importance_sample(
         logtarget,
         algorithm;
         factor_execution=factor_execution,
+        transform=transform,
         threaded=threaded,
     )
     return importance_sample!(sampler)
@@ -769,6 +789,7 @@ function importance_sample(
     context,
     algorithm::AbstractImportanceSampler;
     factor_execution=nothing,
+    transform=nothing,
     threaded=true,
 )
     sampler = prepare_sampler(
@@ -777,6 +798,7 @@ function importance_sample(
         context,
         algorithm;
         factor_execution=factor_execution,
+        transform=transform,
         threaded=threaded,
     )
     return importance_sample!(sampler)
@@ -827,6 +849,14 @@ end
 function _importance_sample_cpu!(sampler, ::_SingleProposalMethodState, threaded)
     execution = _sampling_execution(sampler.algorithm.proposal, threaded)
     samples, logweights, transfers = _importance_sample!(sampler, execution)
+    transfers = _ResultTransferCounter(transfers.count, transfers.bytes)
+    samples = _map_result_samples(
+        sampler.target,
+        samples,
+        _native_failure_scratch(sampler.random_buffers),
+        transfers,
+        sampler.threaded,
+    )
     diagnostics = (
         method=:importance_sampling,
         execution=_execution_name(execution),
@@ -1014,6 +1044,12 @@ end
 
 function _resolve_prepared_target(target::_PreparedLogTarget, proposal)
     return _prepare_target(target.logdensity, target.context, proposal)
+end
+
+function _resolve_prepared_target(target::_PreparedLogTarget, proposal, transform)
+    resolved = _resolve_prepared_target(target, proposal)
+    isnothing(transform) && return resolved
+    return _prepare_named_target(resolved, proposal, transform)
 end
 
 function _bind_resolved_target(

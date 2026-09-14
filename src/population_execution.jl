@@ -290,7 +290,7 @@ function _local_weighted_means!(
         )
     end
     KernelAbstractions.synchronize(backend)
-    valid = all(isfinite, proposal_maxima)
+    valid = _local_means_valid(proposal_maxima)
     _record_device_scalar_transfer!(
         transfers,
         proposal_maxima,
@@ -300,6 +300,8 @@ function _local_weighted_means!(
     valid || throw(AllZeroWeightsError())
     return nothing
 end
+
+_local_means_valid(proposal_maxima) = all(isfinite, proposal_maxima)
 
 function _capture_population_round(
     f,
@@ -532,8 +534,15 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
         plan.schedule[final_round],
         final_round,
     ) do
-        _adopt_validated_weighted_samples(
+        result_samples = _map_result_samples(
+            sampler.target,
             samples,
+            buffers.failure_scratch,
+            transfers,
+            sampler.threaded,
+        )
+        _adopt_validated_weighted_samples(
+            result_samples,
             logweights;
             provenance=(round=round_ids, proposal_id=proposal_ids),
             diagnostics=diagnostics,

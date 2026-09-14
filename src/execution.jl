@@ -101,10 +101,7 @@ function _logweight_summary(
 )
     if !_is_host_storage(logweights)
         T = eltype(logweights)
-        neutral = (T(-Inf), zero(T), zero(T))
-        moments = AcceleratedKernels.mapreduce(
-            _logweight_moments, _merge_logweight_moments, logweights;
-            init=neutral, neutral)
+        moments = _logweight_moments(logweights)
         _record_reported_transfer!(transfers, 1, sizeof(moments), Val(:logweight_moments))
         iszero(moments[2]) && return (ess=zero(T), lognormalizer=T(-Inf))
         return _logweight_summary(moments..., length(logweights))
@@ -155,6 +152,11 @@ end
 # A stable reduction state: maximum log weight, scaled mass, scaled squared mass.
 # Merge in the larger maximum's scale, keeping all intermediate values on-device.
 @inline _logweight_moments(x) = x == -Inf ? (x, zero(x), zero(x)) : (x, one(x), one(x))
+function _logweight_moments(logweights::AbstractArray{T}) where {T}
+    neutral = (T(-Inf), zero(T), zero(T))
+    return AcceleratedKernels.mapreduce(
+        _logweight_moments, _merge_logweight_moments, logweights; init=neutral, neutral)
+end
 @inline function _merge_logweight_moments(a, b)
     iszero(a[2]) && return b
     iszero(b[2]) && return a
@@ -589,28 +591,26 @@ function _allocate_native_samples(prototype, proposal::TransformedProposal, nsam
        base.location isa _NativeGaussianFloat
         return similar(prototype, T, nsamples)
     elseif transform isa _FlatTransformLayout
-        return map(transform.blocks) do block
-            if block.location isa Int
-                similar(prototype, T, nsamples)
-            else
-                output_dimension = block.transform isa SimplexTransform ?
-                                   block.transform.dimension : length(block.location)
-                similar(prototype, T, output_dimension, nsamples)
-            end
-        end
+        return _allocate_flat_samples(prototype, T, transform, nsamples)
     end
     output_dimension = transform isa SimplexTransform ?
                        transform.dimension : _gaussian_dimension(base.location)
     return similar(prototype, T, output_dimension, nsamples)
 end
 
-function _allocate_native_failure_scratch(normal_buffer, nsamples)
+function _allocate_native_failure_scratch(normal_buffer, nsamples; capacity=nsamples)
     backend = KernelAbstractions.get_backend(normal_buffer)
     target_failures = _allocate_native_target_failures(backend, nsamples)
-    storage = similar(normal_buffer, UInt64, 3)
+    storage = _allocate_failure_storage(backend, normal_buffer, capacity)
     record = _DeviceFailureRecord(storage)
     return _NativeFailureScratch(record, target_failures)
 end
+
+_allocate_failure_storage(backend, prototype, capacity) = similar(prototype, UInt64, 3)
+
+# Backends without 64-bit atomics retain one payload per logical index. The last
+# column holds a two-word count. Valid execution reads only that fixed-size count.
+_allocate_portable_failure_storage(prototype, capacity) = similar(prototype, UInt32, 2, capacity + 1)
 
 function _allocate_native_target_failures(::KernelAbstractions.CPU, nsamples)
     slots = Vector{Union{Nothing,SamplerExecutionError}}(nothing, nsamples)
@@ -638,21 +638,34 @@ function _reset_native_target_failures!(failures::_NativeCPUTargetFailures)
     return nothing
 end
 
-@inline function _record_native_failure!(
-    storage,
-    logical_index::Int,
-    block::Int,
-    reason_bits::UInt16,
-)
+@inline function _pack_native_failure(logical_index, block, reason_bits)
     inverse_index = typemax(UInt32) - UInt32(logical_index) + one(UInt32)
     inverse_block = typemax(UInt16) - UInt16(block) + one(UInt16)
-    packed = UInt64(inverse_index) << 32 |
+    return UInt64(inverse_index) << 32 |
              UInt64(inverse_block) << 16 |
              UInt64(reason_bits)
+end
+
+@inline function _record_native_failure!(storage, logical_index::Int, block::Int, reason_bits::UInt16)
+    packed = _pack_native_failure(logical_index, block, reason_bits)
     KernelAbstractions.@atomic storage[1] += UInt64(1)
     KernelAbstractions.@atomic storage[2] max packed
     if reason_bits & _NATIVE_PROPOSAL_DRAW_REASONS != 0
         KernelAbstractions.@atomic storage[3] max packed
+    end
+    return nothing
+end
+
+@inline function _record_native_failure!(storage::AbstractMatrix{UInt32}, logical_index::Int, block::Int, reason_bits::UInt16)
+    payload = UInt32(_pack_native_failure(logical_index, block, reason_bits) & 0xffffffff)
+    count_column = size(storage, 2)
+    count = KernelAbstractions.@atomic storage[1, count_column] += UInt32(1)
+    if iszero(count)
+        KernelAbstractions.@atomic storage[2, count_column] += UInt32(1)
+    end
+    KernelAbstractions.@atomic storage[1, logical_index] max payload
+    if reason_bits & _NATIVE_PROPOSAL_DRAW_REASONS != 0
+        KernelAbstractions.@atomic storage[2, logical_index] max payload
     end
     return nothing
 end
@@ -692,6 +705,28 @@ function _device_failure_snapshot(record::_DeviceFailureRecord)
     )
 end
 
+function _device_failure_snapshot(record::_DeviceFailureRecord{<:AbstractMatrix{UInt32}})
+    storage = record.storage
+    words = Array(view(storage, :, size(storage, 2):size(storage, 2)))
+    count = UInt64(words[1]) | UInt64(words[2]) << 32
+    transfers = _is_host_storage(storage) ? (count=0, bytes=0) : (count=1, bytes=sizeof(words))
+    packed = (UInt64(0), UInt64(0))
+    if !iszero(count)
+        payloads = Array(storage)
+        packed = ntuple(2) do row
+            index = findfirst(!iszero, view(payloads, row, 1:(size(payloads, 2) - 1)))
+            isnothing(index) ? UInt64(0) :
+                UInt64(typemax(UInt32) - UInt32(index) + UInt32(1)) << 32 | UInt64(payloads[row, index])
+        end
+        if !_is_host_storage(storage)
+            transfers = (count=transfers.count + 1, bytes=transfers.bytes + sizeof(payloads))
+        end
+    end
+    return (failure=_decode_native_failure(count, packed[1]),
+        draw_failure=_decode_native_failure(iszero(packed[2]) ? UInt64(0) : UInt64(1), packed[2]),
+        transfers=transfers)
+end
+
 const _NATIVE_TARGET_NAN = UInt16(0x0100)
 const _NATIVE_TARGET_POSITIVE_INFINITY = UInt16(0x0200)
 const _NATIVE_PROPOSAL_INVALID = UInt16(0x0400)
@@ -710,7 +745,11 @@ const _NATIVE_PROPOSAL_DRAW_REASONS =
 end
 
 @inline function (evaluator::_NativeDeviceTarget{L})(sample, slot) where {L}
-    value = convert(L, evaluator.target(sample))
+    return _native_device_target_result(evaluator.target, sample, L)
+end
+
+@inline function _native_device_target_result(target, sample, ::Type{L}) where {L}
+    value = convert(L, target(sample))
     reason = _native_target_reason(value)
     return value, reason, !iszero(reason)
 end

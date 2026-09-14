@@ -389,7 +389,17 @@ function _importance_sample_cpu!(
         ) ? :batched : :fused,
         nsamples=nsamples,
         failures=0,
-        transfers=snapshot.transfers,
+        transfers=_ResultTransferCounter(
+            snapshot.transfers.count,
+            snapshot.transfers.bytes,
+        ),
+    )
+    samples = _map_result_samples(
+        sampler.target,
+        samples,
+        failure_scratch,
+        diagnostics.transfers,
+        sampler.threaded,
     )
     return _adopt_validated_weighted_samples(
         samples,

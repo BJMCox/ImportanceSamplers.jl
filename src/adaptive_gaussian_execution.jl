@@ -264,6 +264,13 @@ end
     return valid
 end
 
+function _weighted_moments!(mean, covariance, centered, samples, weights)
+    LinearAlgebra.mul!(mean, samples, weights)
+    centered .= (samples .- reshape(mean, :, 1)) .* sqrt.(reshape(weights, 1, :))
+    LinearAlgebra.mul!(covariance, centered, transpose(centered))
+    return nothing
+end
+
 function _fit_moment_proposal!(
     workspace::_MomentWorkspace,
     history::_ScalarProposalHistory,
@@ -521,11 +528,8 @@ function _fit_moment_proposal!(
         sample_count,
         transfers,
     )
-    LinearAlgebra.mul!(workspace.candidate_mean, samples, weights)
-    centered .= (samples .- reshape(workspace.candidate_mean, 1, 1)) .*
-                sqrt.(reshape(weights, 1, :))
     covariance = reshape(workspace.covariance, 1, 1)
-    LinearAlgebra.mul!(covariance, centered, transpose(centered))
+    _weighted_moments!(workspace.candidate_mean, covariance, centered, samples, weights)
 
     ridge_kernel = _add_gaussian_scalar_ridge_kernel!(backend)
     ridge_kernel(
@@ -576,10 +580,7 @@ function _fit_moment_proposal!(
         sample_count,
         transfers,
     )
-    LinearAlgebra.mul!(workspace.candidate_mean, samples, weights)
-    centered .= (samples .- reshape(workspace.candidate_mean, :, 1)) .*
-                sqrt.(reshape(weights, 1, :))
-    LinearAlgebra.mul!(workspace.covariance, centered, transpose(centered))
+    _weighted_moments!(workspace.candidate_mean, workspace.covariance, centered, samples, weights)
 
     ridge_kernel = _add_gaussian_factor_ridge_kernel!(backend)
     ridge_kernel(
@@ -1045,8 +1046,15 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedMomentSample
     result = _capture_gaussian_round(
         algorithm, method_state, transfers, rounds, :result_construction, rounds,
     ) do
+        result_samples = _map_owned_result_samples(
+            sampler.target,
+            workspace.samples,
+            buffers.failure_scratch,
+            transfers,
+            sampler.threaded,
+        )
         _adopt_validated_weighted_samples(
-            copy(workspace.samples),
+            result_samples,
             copy(workspace.logweights);
             provenance=(round=round_ids,),
             diagnostics=diagnostics,

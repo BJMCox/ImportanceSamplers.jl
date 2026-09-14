@@ -28,7 +28,7 @@ function _gaussian_adaptation_workspace!(algorithm::NPMC, device, state, round)
     threshold_index = length(indices) - isqrt(length(indices)) + 1
     _sort_clipping_weights!(device, scratch, threshold_index)
     # A one-element device view keeps the order statistic on its device.
-    clipped .= min.(raw, view(scratch, threshold_index:threshold_index))
+    _clip_logweights!(clipped, raw, view(scratch, threshold_index:threshold_index))
     return _MomentWorkspace(
         _sample_view(workspace.samples, indices),
         clipped,
@@ -42,6 +42,8 @@ function _gaussian_adaptation_workspace!(algorithm::NPMC, device, state, round)
         workspace.candidate_lognormalizer,
     )
 end
+
+_clip_logweights!(clipped, raw, threshold) = (clipped .= min.(raw, threshold))
 
 struct _GeneratingGaussianDenominator end
 @inline _mis_term_bounds(history, ::_GeneratingGaussianDenominator, slot) = (slot, slot)
