@@ -823,6 +823,42 @@ function _gaussian_failure_snapshot!(transfers, failure_record)
     return snapshot
 end
 
+_reset_prepared_gaussian_history!(::Nothing, history, rounds, record) =
+    _reset_gaussian_history!(history, rounds)
+_store_prepared_gaussian_candidate!(::Nothing, history, slot, workspace) =
+    _store_gaussian_candidate!(history, slot, workspace)
+_fit_prepared_moment_proposal!(::Nothing, args...) = _fit_moment_proposal!(args...)
+_prepared_gaussian_adaptation_workspace!(::Nothing, args...) =
+    _gaussian_adaptation_workspace!(args...)
+_prepared_gaussian_summary(::Nothing, algorithm, state, round, fit, transfers) =
+    _logweight_summary(view(state.workspace.logweights,
+        _gaussian_summary_indices(algorithm, state, round)), transfers)
+_moment_result_samples(::Nothing, sampler, workspace, transfers) =
+    _map_owned_result_samples(sampler.target, workspace.samples,
+        sampler.random_buffers.failure_scratch, transfers, sampler.threaded)
+
+function _draw_moment_round!(sampler, ::Nothing, state, round_ids, target, round, execution)
+    buffers = sampler.random_buffers
+    Random.randn!(sampler.rng, buffers.normal)
+    _fill_radial_buffers!(sampler.rng, buffers.radial)
+    _launch_moment_round!(sampler.algorithm, state, buffers, target, round_ids,
+        round, execution, sampler.device, sampler.factor_execution)
+end
+
+function _launch_moment_round!(algorithm, state, buffers, target, round_ids,
+    round, execution, device, factor_execution)
+    _prepare_mis_normals!(buffers.normal, buffers.radial, state.history,
+        _FixedMISAssignments(round, state.schedule[round]),
+        buffers.failure_scratch.record.storage, execution)
+    workspace = state.workspace
+    _launch_adaptive_gaussian_round!(algorithm, workspace.samples, workspace.logtargets,
+        workspace.lognumerators, workspace.logweights, round_ids,
+        buffers.failure_scratch.record.storage, buffers.normal, target, state.history,
+        state.logcounts, state.offsets, round, workspace.centered_scaled, execution,
+        device, factor_execution)
+    return nothing
+end
+
 function _importance_sample_cpu!(sampler, committed_state::_PreparedMomentSampler, threaded)
     algorithm = sampler.algorithm
     execution = threaded ? _ThreadedCPUExecution() : _SerialCPUExecution()
@@ -839,12 +875,13 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedMomentSample
     round_lognormalizers = similar(round_ess)
     adaptation_ess = _allocate_gaussian_adaptation_ess(algorithm, round_ess)
     workspace_candidate = accelerator || history isa _FactorProposalHistory
-    _reset_gaussian_history!(history, rounds)
+    _reset_prepared_gaussian_history!(sampler.backend_execution, history, rounds,
+        buffers.failure_scratch.record)
     method_state = if committed_state.committed_in_workspace
         _capture_gaussian_round(
             algorithm, committed_state, transfers, 1, :result_construction, 0,
         ) do
-            _store_gaussian_candidate!(history, 1, workspace)
+            _store_prepared_gaussian_candidate!(sampler.backend_execution, history, 1, workspace)
             KernelAbstractions.synchronize(
                 KernelAbstractions.get_backend(history.means),
             )
@@ -876,32 +913,8 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedMomentSample
     for round in eachindex(schedule)
         deferred_accelerator_snapshot = accelerator
         _capture_gaussian_round(algorithm, method_state, transfers, round, :sampling, round - 1) do
-            Random.randn!(sampler.rng, buffers.normal)
-            _fill_radial_buffers!(sampler.rng, buffers.radial)
-        end
-        _capture_gaussian_round(algorithm, method_state, transfers, round, :sampling, round - 1) do
-            _prepare_mis_normals!(buffers.normal, buffers.radial, history,
-                _FixedMISAssignments(round, schedule[round]),
-                buffers.failure_scratch.record.storage, execution)
-            _launch_adaptive_gaussian_round!(
-                algorithm,
-                workspace.samples,
-                workspace.logtargets,
-                workspace.lognumerators,
-                workspace.logweights,
-                round_ids,
-                buffers.failure_scratch.record.storage,
-                buffers.normal,
-                target_evaluator,
-                history,
-                method_state.logcounts,
-                method_state.offsets,
-                round,
-                workspace.centered_scaled,
-                execution,
-                sampler.device,
-                sampler.factor_execution,
-            )
+            _draw_moment_round!(sampler, sampler.backend_execution, method_state,
+                round_ids, target_evaluator, round, execution)
             if !deferred_accelerator_snapshot
                 snapshot = _gaussian_failure_snapshot!(
                     transfers,
@@ -918,12 +931,14 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedMomentSample
         fit_workspace = _capture_gaussian_round(
             algorithm, method_state, transfers, round, :moment, round - 1,
         ) do
-            _gaussian_adaptation_workspace!(algorithm, sampler.device, method_state, round)
+            _prepared_gaussian_adaptation_workspace!(sampler.backend_execution,
+                algorithm, sampler.device, method_state, round)
         end
         fit_count = _gaussian_adaptation_count(algorithm, method_state, round)
         fit_result = if deferred_accelerator_snapshot
             try
-                _fit_moment_proposal!(
+                _fit_prepared_moment_proposal!(
+                    sampler.backend_execution,
                     sampler.device,
                     fit_workspace,
                     history,
@@ -997,13 +1012,8 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedMomentSample
                 round_ess[round] = fit_result.ess
                 round_lognormalizers[round] = fit_result.lognormalizer
             else
-                summary = _logweight_summary(
-                    view(
-                        workspace.logweights,
-                        _gaussian_summary_indices(algorithm, method_state, round),
-                    ),
-                    transfers,
-                )
+                summary = _prepared_gaussian_summary(sampler.backend_execution,
+                    algorithm, method_state, round, fit_result, transfers)
                 round_ess[round] = summary.ess
                 round_lognormalizers[round] = summary.lognormalizer
             end
@@ -1014,7 +1024,7 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedMomentSample
         end
         if round < rounds
             if workspace_candidate
-                _store_gaussian_candidate!(history, round + 1, workspace)
+                _store_prepared_gaussian_candidate!(sampler.backend_execution, history, round + 1, workspace)
             else
                 _store_gaussian_proposal!(history, round + 1, final_proposal)
             end
@@ -1046,13 +1056,7 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedMomentSample
     result = _capture_gaussian_round(
         algorithm, method_state, transfers, rounds, :result_construction, rounds,
     ) do
-        result_samples = _map_owned_result_samples(
-            sampler.target,
-            workspace.samples,
-            buffers.failure_scratch,
-            transfers,
-            sampler.threaded,
-        )
+        result_samples = _moment_result_samples(sampler.backend_execution, sampler, workspace, transfers)
         _adopt_validated_weighted_samples(
             result_samples,
             copy(workspace.logweights);

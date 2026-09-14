@@ -375,31 +375,31 @@ function _importance_sample_cpu!(
         target_failures,
         _NoSampleTransform(),
     )
+    transfers = _ResultTransferCounter(snapshot.transfers.count, snapshot.transfers.bytes)
+    samples = _map_result_samples(sampler.target, samples, failure_scratch,
+        transfers, sampler.threaded)
+    return _packed_static_mis_result(sampler, samples, logweights, proposal_ids,
+        cpu_execution, transfers)
+end
+
+function _packed_static_mis_result(sampler, samples, logweights, proposal_ids,
+    execution, transfers)
+    method_state = sampler.method_state
     diagnostics = (
         method=:importance_sampling,
         mis_scheme=_mis_scheme_name(
             method_state.design.assignment,
             method_state.design.denominator,
         ),
-        execution=_execution_name(cpu_execution),
+        execution=_execution_name(execution),
         threaded=sampler.threaded,
         factor_execution_policy=_use_factor_batch_mis_path(
             sampler.device, method_state.bank, method_state.design.denominator,
-            log_type, sampler.factor_execution,
+            eltype(logweights), sampler.factor_execution,
         ) ? :batched : :fused,
-        nsamples=nsamples,
+        nsamples=length(logweights),
         failures=0,
-        transfers=_ResultTransferCounter(
-            snapshot.transfers.count,
-            snapshot.transfers.bytes,
-        ),
-    )
-    samples = _map_result_samples(
-        sampler.target,
-        samples,
-        failure_scratch,
-        diagnostics.transfers,
-        sampler.threaded,
+        transfers=transfers,
     )
     return _adopt_validated_weighted_samples(
         samples,

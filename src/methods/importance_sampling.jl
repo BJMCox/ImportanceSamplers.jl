@@ -238,7 +238,7 @@ function _validate_factor_execution(factor_execution)
     return factor_execution
 end
 
-mutable struct _PreparedImportanceSampler{R,B,T,A,M,D,F}
+mutable struct _PreparedImportanceSampler{R,B,T,A,M,D,F,E}
     rng::R
     random_buffers::B
     target::T
@@ -249,7 +249,14 @@ mutable struct _PreparedImportanceSampler{R,B,T,A,M,D,F}
     threaded::Bool
     running::Bool
     executed::Bool
+    backend_execution::E
 end
+
+_PreparedImportanceSampler(rng, buffers, target, algorithm, state, device, factor_execution,
+    threaded, running, executed) = _PreparedImportanceSampler(rng, buffers, target,
+    algorithm, state, device, factor_execution, threaded, running, executed, nothing)
+
+_prepare_backend_execution(sampler) = sampler
 
 """
     prepare_sampler(rng, logtarget, algorithm;
@@ -608,6 +615,7 @@ function _transfer_prepared_sampler(
             false,
             false,
         )
+        destination = _prepare_backend_execution(destination)
         sampler.rng = source_rng
         return destination
     end
@@ -829,17 +837,19 @@ function importance_sample!(sampler::_PreparedImportanceSampler)
                 sampler.device,
                 _prepared_backend_state(sampler, sampler.method_state),
             )
-            _reset_native_failure_scratch!(
-                _native_failure_scratch(sampler.random_buffers),
-            )
             threaded =
                 sampler.device isa MLDataDevices.AbstractAcceleratorDevice ||
                 sampler.threaded && Threads.nthreads(:default) > 1
-            return _importance_sample_cpu!(sampler, threaded)
+            return _execute_prepared_sampler!(sampler, sampler.backend_execution, threaded)
         end
     finally
         sampler.running = false
     end
+end
+
+function _execute_prepared_sampler!(sampler, ::Nothing, threaded)
+    _reset_native_failure_scratch!(_native_failure_scratch(sampler.random_buffers))
+    return _importance_sample_cpu!(sampler, threaded)
 end
 
 function _importance_sample_cpu!(sampler, threaded)
@@ -857,6 +867,10 @@ function _importance_sample_cpu!(sampler, ::_SingleProposalMethodState, threaded
         transfers,
         sampler.threaded,
     )
+    return _single_proposal_result(sampler, execution, samples, logweights, transfers)
+end
+
+function _single_proposal_result(sampler, execution, samples, logweights, transfers)
     diagnostics = (
         method=:importance_sampling,
         execution=_execution_name(execution),

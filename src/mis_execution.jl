@@ -259,12 +259,12 @@ function _launch_factor_batch_logmixture!(
     valid_samples=nothing,
     adaptation=nothing,
 )
-    _factor_batch_solve!(solve_scratch, samples, factor_source, proposal_slot)
+    solved = _factor_batch_solve!(solve_scratch, samples, factor_source, proposal_slot)
     backend = KernelAbstractions.get_backend(lognumerators)
     kernel = _append_factor_batch_logmixture_kernel!(backend)
     kernel(
         lognumerators,
-        solve_scratch,
+        solved,
         _factor_batch_lognormalizers(factor_source),
         factor_source.family,
         logcoefficients,

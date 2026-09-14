@@ -29,6 +29,330 @@ function Random.randn!(rng::_ReactantRNG, values::AbstractArray)
     return values
 end
 
+struct _NativePhase{D,F,E}
+    device::D
+    factor_execution::F
+    execution::E
+end
+
+_copy_native_samples(samples::AbstractArray) = copy(samples)
+_copy_native_samples(samples::NamedTuple) = map(_copy_native_samples, samples)
+
+function (phase::_NativePhase)(rng, buffers, samples, logweights, target, proposal)
+    IS._fill_random_buffers!(rng, buffers)
+    record = buffers.failure_scratch.record
+    fill!(record.storage, zero(UInt64))
+    base, transform = IS._native_fused_components(proposal)
+    IS._launch_native_batch!(samples, logweights, record, buffers, target, base,
+        transform, phase.execution, phase.device, phase.factor_execution)
+    return _copy_native_samples(samples), copy(logweights)
+end
+
+function _map_samples!(samples, layout, record)
+    count = IS._sample_count(samples)
+    mapped = IS._allocate_flat_samples(samples, eltype(samples), layout, count)
+    fill!(record.storage, zero(UInt64))
+    IS._map_named_result_kernel!(KA.get_backend(samples))(
+        values(mapped), samples, layout, record.storage; ndrange=count)
+    return mapped
+end
+
+_prepare_result_map(target, samples, record) = nothing
+_prepare_result_map(target::IS._NamedPreparedTarget, samples, record) =
+    Reactant.@compile _map_samples!(samples, target.layout, record)
+
+struct _CompiledNativeExecution{F,A,M}
+    compiled::F
+    arguments::A
+    map_result::M
+end
+
+function (phase::_NativePhase)(rng, buffers, samples, logweights, proposal_ids, target,
+    state::IS._PreparedStaticMIS)
+    IS._fill_random_buffers!(rng, buffers)
+    fill!(buffers.failure_scratch.record.storage, zero(UInt64))
+    IS._launch_packed_static_mis!(samples, logweights, proposal_ids, buffers, target,
+        state, phase.execution, phase.device, phase.factor_execution)
+    return copy(samples), copy(logweights), copy(proposal_ids)
+end
+
+function _prepare_execution(sampler, state::IS._PreparedStaticMIS)
+    buffers, count = sampler.random_buffers, sampler.algorithm.nsamples
+    samples = IS._allocate_packed_static_mis_samples(buffers.normal, state.bank, count)
+    binding = IS._native_binding_sample(samples)
+    bound = IS._bind_resolved_target(sampler.target, binding)
+    L = IS._resolve_packed_static_mis_logweight_type(bound, state.bank, typeof(binding))
+    logweights = similar(buffers.normal, L, count)
+    proposal_ids = similar(buffers.assignments, Int, count)
+    target, _ = IS._native_target_evaluator(KA.get_backend(buffers.normal), bound, L,
+        buffers.failure_scratch.target_failures)
+    phase = _NativePhase(sampler.device, sampler.factor_execution, IS._ThreadedCPUExecution())
+    arguments = (sampler.rng.rng, buffers, samples, logweights, proposal_ids, target, state)
+    compiled = Reactant.@compile phase(arguments...)
+    mapper = _prepare_result_map(sampler.target, samples, buffers.failure_scratch.record)
+    return _CompiledNativeExecution(compiled, arguments, mapper)
+end
+
+struct _MomentDrawPhase{A,D,F,E}
+    algorithm::A
+    device::D
+    factor_execution::F
+    execution::E
+    schedule::Vector{Int}
+    offsets::Vector{Int}
+    round::Int
+end
+
+function (phase::_MomentDrawPhase)(rng, workspace, history, logcounts, buffers, target, round_ids)
+    Random.randn!(rng, buffers.normal)
+    IS._fill_radial_buffers!(rng, buffers.radial)
+    state = (; workspace, history, logcounts, phase.schedule, phase.offsets)
+    IS._launch_moment_round!(phase.algorithm, state, buffers, target, round_ids,
+        phase.round, phase.execution, phase.device, phase.factor_execution)
+    return nothing
+end
+
+struct _MomentFitPhase
+    round::Int
+    count::Int
+end
+
+function (phase::_MomentFitPhase)(workspace, history::IS._FactorProposalHistory, failure_storage)
+    count = phase.count
+    moments = _normalize_weights!(workspace.normalized_weights, workspace.logweights, count)
+    IS._weighted_moments!(workspace.candidate_mean, workspace.covariance,
+        view(workspace.centered_scaled, :, 1:count), view(workspace.samples, :, 1:count),
+        view(workspace.normalized_weights, 1:count))
+    backend = KA.get_backend(workspace.covariance)
+    IS._add_gaussian_factor_ridge_kernel!(backend)(workspace.covariance, history.factors,
+        history.family, phase.round; ndrange=1)
+    copyto!(workspace.candidate_scale, workspace.covariance)
+    success = _factor!(workspace.candidate_scale)
+    IS._scale_covariance_factor!(workspace.candidate_scale, history.family)
+    IS._finish_gaussian_factor_candidate_kernel!(backend)(workspace.candidate_mean,
+        workspace.candidate_scale, workspace.candidate_lognormalizer, failure_storage,
+        count + 1, history.family; ndrange=length(workspace.candidate_scale))
+    return moments, success
+end
+
+function (phase::_MomentFitPhase)(workspace, history::IS._ScalarProposalHistory, failure_storage)
+    count = phase.count
+    moments = _normalize_weights!(workspace.normalized_weights, workspace.logweights, count)
+    samples = view(workspace.samples, 1:count)
+    weights = view(workspace.normalized_weights, 1:count)
+    workspace.candidate_mean .= sum(samples .* weights; dims=1)
+    # Avoid a reshape of a view: Julia's broadcast alias check requests host pointers.
+    centered = similar(samples)
+    centered .= (samples .- workspace.candidate_mean) .* sqrt.(weights)
+    workspace.covariance .= sum(abs2, centered; dims=1)
+    backend = KA.get_backend(workspace.covariance)
+    IS._add_gaussian_scalar_ridge_kernel!(backend)(workspace.covariance, history.scales,
+        history.family, phase.round; ndrange=1)
+    IS._finish_gaussian_scalar_candidate_kernel!(backend)(workspace.candidate_scale,
+        workspace.candidate_lognormalizer, workspace.covariance, failure_storage,
+        count + 1, history.family; ndrange=1)
+    return moments, true
+end
+
+struct _PublishMomentPhase
+    slot::Int
+end
+
+struct _NPMCFitPhase{A,D}
+    algorithm::A
+    device::D
+    offsets::Vector{Int}
+    fit::_MomentFitPhase
+end
+
+function (phase::_NPMCFitPhase)(workspace, history, failure_storage)
+    state = (; workspace, phase.offsets)
+    fit_workspace = IS._gaussian_adaptation_workspace!(phase.algorithm, phase.device,
+        state, phase.fit.round)
+    moments, success = phase.fit(fit_workspace, history, failure_storage)
+    indices = IS._gaussian_summary_indices(phase.algorithm, state, phase.fit.round)
+    raw = _logweight_moments(view(workspace.logweights, indices))
+    return moments, success, raw
+end
+
+function IS._sort_clipping_weights!(::MLDataDevices.ReactantDevice,
+    scratch::AbstractArray{<:Reactant.TracedRNumber}, threshold_index)
+    copyto!(scratch, sort(Reactant.TracedUtils.materialize_traced_array(scratch)))
+    return nothing
+end
+(phase::_PublishMomentPhase)(history, workspace) =
+    _store_moment_candidate!(history, phase.slot, workspace)
+
+function _reset_moment_history!(history, record)
+    IS._reset_gaussian_history!(history, length(history.lognormalizers))
+    fill!(record.storage, zero(UInt64))
+    return nothing
+end
+
+function _reset_moment_history!(history::IS._ScalarProposalHistory, record)
+    history.means[2:end] = zero.(history.means[2:end])
+    history.scales[2:end] = zero.(history.scales[2:end])
+    history.lognormalizers[2:end] = zero.(history.lognormalizers[2:end])
+    fill!(record.storage, zero(UInt64))
+    return nothing
+end
+
+struct _CompiledMomentExecution{D,F,P,R,M}
+    draws::D
+    fits::F
+    publish::P
+    reset::R
+    map_result::M
+end
+
+function _prepare_execution(sampler, state::IS._PreparedMomentSampler)
+    sampler.algorithm isa Union{IS.AMIS,IS.NPMC} || return nothing
+    workspace, history, buffers = state.workspace, state.history, sampler.random_buffers
+    binding = IS._native_binding_sample(workspace.samples)
+    bound = IS._bind_resolved_target(sampler.target, binding)
+    target, _ = IS._native_target_evaluator(KA.get_backend(workspace.samples), bound,
+        eltype(workspace.logweights), buffers.failure_scratch.target_failures)
+    round_ids = similar(workspace.logweights, Int, length(workspace.logweights))
+    rng = sampler.rng.rng
+    schedule, offsets = collect(state.schedule), collect(state.offsets)
+    draws = map(eachindex(state.schedule)) do round
+        phase = _MomentDrawPhase(sampler.algorithm, sampler.device,
+            sampler.factor_execution, IS._ThreadedCPUExecution(),
+            schedule, offsets, round)
+        logcounts = state.logcounts
+        Reactant.@compile phase(rng, workspace, history, logcounts, buffers, target, round_ids)
+    end
+    fits = map(eachindex(state.schedule)) do round
+        phase = _MomentFitPhase(round, IS._gaussian_adaptation_count(sampler.algorithm, state, round))
+        if sampler.algorithm isa IS.NPMC
+            phase = _NPMCFitPhase(sampler.algorithm, sampler.device, offsets, phase)
+        end
+        storage = buffers.failure_scratch.record.storage
+        Reactant.@compile phase(workspace, history, storage)
+    end
+    publish = map(eachindex(state.schedule)) do slot
+        phase = _PublishMomentPhase(slot)
+        Reactant.@compile phase(history, workspace)
+    end
+    record = buffers.failure_scratch.record
+    reset = Reactant.@compile _reset_moment_history!(history, record)
+    mapper = _prepare_result_map(sampler.target, workspace.samples, record)
+    return _CompiledMomentExecution(draws, fits, publish, reset, mapper)
+end
+
+IS._execute_prepared_sampler!(sampler, ::_CompiledMomentExecution, threaded) =
+    IS._importance_sample_cpu!(sampler, threaded)
+IS._reset_prepared_gaussian_history!(plan::_CompiledMomentExecution, history, rounds, record) =
+    plan.reset(history, record)
+IS._store_prepared_gaussian_candidate!(plan::_CompiledMomentExecution, history, slot, workspace) =
+    plan.publish[slot](history, workspace)
+IS._prepared_gaussian_adaptation_workspace!(::_CompiledMomentExecution, algorithm, device, state, round) =
+    state.workspace
+IS._prepared_gaussian_summary(::_CompiledMomentExecution, algorithm, state, round, fit, transfers) =
+    fit.raw_summary
+IS._draw_moment_round!(sampler, plan::_CompiledMomentExecution, state, round_ids, target, round, execution) =
+    plan.draws[round](sampler.rng.rng, state.workspace, state.history, state.logcounts,
+        sampler.random_buffers, target, round_ids)
+
+function IS._fit_prepared_moment_proposal!(plan::_CompiledMomentExecution, device,
+    workspace, history, round, count, transfers, failure_storage)
+    phase = :moment
+    try
+        fit = plan.fits[round](workspace, history, failure_storage)
+        values = Array(fit[1])
+        IS._record_reported_transfer!(transfers, 1, sizeof(values), Val(:logweight_moments))
+        isfinite(values[2]) && values[2] > 0 || throw(IS.AllZeroWeightsError())
+        phase = :factorization
+        Bool(fit[2]) || throw(LA.PosDefException(0))
+        summary = IS._logweight_summary(values..., count)
+        if length(fit) == 3
+            raw = Array(fit[3])
+            IS._record_reported_transfer!(transfers, 1, sizeof(raw), Val(:logweight_moments))
+            return (; summary..., raw_summary=IS._logweight_summary(raw..., count))
+        end
+        return summary
+    catch cause
+        IS._throw_gaussian_stage(phase, cause)
+    end
+end
+
+function IS._moment_result_samples(plan::_CompiledMomentExecution, sampler, workspace, transfers)
+    isnothing(plan.map_result) && return copy(workspace.samples)
+    return _map_compiled_result(plan.map_result, sampler, workspace.samples, transfers)
+end
+
+function IS._prepare_backend_execution(sampler::IS._PreparedImportanceSampler{<:_ReactantRNG})
+    plan = _prepare_execution(sampler, sampler.method_state)
+    return IS._PreparedImportanceSampler(sampler.rng, sampler.random_buffers,
+        sampler.target, sampler.algorithm, sampler.method_state, sampler.device,
+        sampler.factor_execution, sampler.threaded, sampler.running, sampler.executed, plan)
+end
+
+_prepare_execution(sampler, state) = nothing
+
+function _prepare_execution(sampler, ::IS._SingleProposalMethodState)
+    buffers = sampler.random_buffers
+    proposal = sampler.algorithm.proposal
+    samples = IS._allocate_native_samples(buffers.normal, proposal, sampler.algorithm.nsamples)
+    binding = IS._native_binding_sample(samples)
+    bound = IS._bind_resolved_target(sampler.target, binding)
+    base, _ = IS._native_fused_components(proposal)
+    L = IS._resolve_native_logweight_type(bound, base, typeof(binding))
+    logweights = similar(buffers.normal, L, sampler.algorithm.nsamples)
+    target, _ = IS._native_target_evaluator(KA.get_backend(buffers.normal), bound, L,
+        buffers.failure_scratch.target_failures)
+    execution = IS._sampling_execution(proposal, true)
+    phase = _NativePhase(sampler.device, sampler.factor_execution, execution)
+    arguments = (sampler.rng.rng, buffers, samples, logweights, target, proposal)
+    compiled = Reactant.@compile phase(arguments...)
+    mapper = _prepare_result_map(sampler.target, samples, buffers.failure_scratch.record)
+    return _CompiledNativeExecution(compiled, arguments, mapper)
+end
+
+_map_compiled_result(::Nothing, sampler, samples, transfers) = samples
+function _map_compiled_result(compiled, sampler, samples, transfers)
+    record = sampler.random_buffers.failure_scratch.record
+    mapped = compiled(samples, sampler.target.layout, record)
+    snapshot = IS._device_failure_snapshot(record)
+    failure = snapshot.failure
+    iszero(failure.count) || IS._throw_named_result_failure(sampler.target.layout,
+        failure.reason_bits, failure.first_logical_index, failure.first_block)
+    IS._record_reported_transfer!(transfers, snapshot.transfers.count,
+        snapshot.transfers.bytes, Val(:failure_snapshot))
+    return mapped
+end
+
+function IS._execute_prepared_sampler!(sampler, plan::_CompiledNativeExecution, threaded)
+    output = plan.compiled(plan.arguments...)
+    return _compiled_native_result(sampler, plan, sampler.method_state, output, threaded)
+end
+
+function _compiled_native_transfers(sampler, transform)
+    scratch = sampler.random_buffers.failure_scratch
+    snapshot = IS._device_failure_snapshot(scratch.record)
+    IS._throw_native_failures(snapshot.failure, snapshot.draw_failure,
+        scratch.target_failures, transform)
+    return IS._ResultTransferCounter(snapshot.transfers.count, snapshot.transfers.bytes)
+end
+
+function _compiled_native_result(sampler, plan, ::IS._SingleProposalMethodState, output, threaded)
+    samples, logweights = output
+    _, transform = IS._native_fused_components(sampler.algorithm.proposal)
+    transfers = _compiled_native_transfers(sampler, transform)
+    samples = _map_compiled_result(plan.map_result, sampler, samples, transfers)
+    execution = IS._sampling_execution(sampler.algorithm.proposal, threaded)
+    return IS._single_proposal_result(sampler, execution, samples, logweights, transfers)
+end
+
+function _compiled_native_result(sampler, plan, ::IS._PreparedStaticMIS, output, threaded)
+    samples, logweights, proposal_ids = output
+    transfers = _compiled_native_transfers(sampler, IS._NoSampleTransform())
+    samples = _map_compiled_result(plan.map_result, sampler, samples, transfers)
+    execution = threaded ? IS._ThreadedCPUExecution() : IS._SerialCPUExecution()
+    return IS._packed_static_mis_result(sampler, samples, logweights, proposal_ids,
+        execution, transfers)
+end
+
 # Reactant arguments remain managed arrays, not isbits kernel pointers. Its live
 # preflight compiles the target and gradients before sampling consumes the RNG.
 function IS._preflight_kernel_argument(device::MLDataDevices.ReactantDevice, kernel, argument)
@@ -56,6 +380,19 @@ end
 # Preserve the existing solve workspace. Reactant cannot trace the coalesced
 # PermutedDimsArray/reshape view used by the native CUDA kernel.
 IS._fused_mis_solve_scratch(scratch::Reactant.AnyConcreteRArray, backend) = scratch
+IS._fused_mis_solve_scratch(scratch::AbstractArray{<:Reactant.TracedRNumber}, backend) =
+    Reactant.TracedUtils.materialize_traced_array(scratch)
+
+function IS._factor_batch_solve!(
+    scratch::AbstractMatrix{<:Reactant.TracedRNumber}, samples, source, slot,
+)
+    factor = Reactant.TracedUtils.materialize_traced_array(IS._factor_batch_factor(source, slot))
+    centered = samples .- reshape(IS._factor_batch_location(source, slot), :, 1)
+    scratch .= Reactant.Ops.triangular_solve(factor, centered;
+        left_side=true, lower=true, unit_diagonal=false, transpose_a='N')
+    # Pass a traced tensor, not a Julia reshape wrapper, to the following kernel.
+    return Reactant.TracedUtils.materialize_traced_array(scratch)
+end
 
 function _pooled_covariance!(covariance, factors)
     packed = reshape(factors, size(factors, 1), :)
@@ -103,9 +440,16 @@ function IS._weighted_moments!(mean::Reactant.AnyConcreteRArray, covariance, cen
     return nothing
 end
 
-function _store_factor_candidate!(history, slot, workspace)
+function _store_moment_candidate!(history::IS._FactorProposalHistory, slot, workspace)
     history.means[:, slot] = workspace.candidate_mean
     history.factors[:, :, slot] = workspace.candidate_scale
+    history.lognormalizers[slot:slot] = workspace.candidate_lognormalizer
+    return nothing
+end
+
+function _store_moment_candidate!(history::IS._ScalarProposalHistory, slot, workspace)
+    history.means[slot:slot] = workspace.candidate_mean
+    history.scales[slot:slot] = workspace.candidate_scale
     history.lognormalizers[slot:slot] = workspace.candidate_lognormalizer
     return nothing
 end
@@ -113,7 +457,7 @@ end
 function IS._store_gaussian_candidate!(
     history::IS._FactorProposalHistory{<:Reactant.AnyConcreteRArray}, slot, workspace::IS._MomentWorkspace,
 )
-    Reactant.@jit _store_factor_candidate!(history, slot, workspace)
+    Reactant.@jit _store_moment_candidate!(history, slot, workspace)
     return nothing
 end
 

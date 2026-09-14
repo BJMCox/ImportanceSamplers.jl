@@ -200,6 +200,12 @@ MIS, AMIS, NPMC, DM-PMC, APIS, CAIS, LAIS and first-order GRAMIS.
 GRAMIS requires a supplied gradient on Metal. Automatic Enzyme gradients are
 not supported by the tested Metal backend.
 
+Float32 factor Student-t proposals have also passed plain IS, static MIS,
+DM-PMC, APIS and LAIS with random-walk Metropolis, including owned-result reuse
+and resident resampling. Student-t covariance adaptation in AMIS, NPMC, CAIS
+and GRAMIS is not supported on Metal: its normalizer currently requires Float64
+inside the device kernel. Gaussian covariance adaptation does not use that path.
+
 Metal uses 32-bit atomic failure records. This fallback needs eight bytes per
 logical sample slot plus eight bytes for its count. Successful runs read only
 the count. An error also copies the diagnostic payload to report the first
@@ -212,9 +218,15 @@ Load `Reactant` and `CUDA`, then apply
 prepared sampler. CUDA must be loaded for Reactant's KernelAbstractions
 integration even when Reactant runs on CPU.
 
-Native Gaussian Base IS supports named fields and result/RNG reuse. The owned
-RNG fills use cached compiled functions. On the tested NVIDIA A100, GRAMIS also
-supports `LogTarget(logtarget, AutoEnzyme())` with resident array context,
+Native Base IS, static MIS, and scalar/vector AMIS/NPMC retain compiled numerical
+phases in the prepared sampler. Device preparation compiles the required shapes once. Later
+runs reuse those executables with live RNG state, resident context arrays and
+adapted proposal arrays. AMIS/NPMC prepare phases for their fixed round schedules.
+Preparation can therefore take seconds even when warmed sampling is fast.
+Other samplers and standalone result operations still use eager compile-and-run
+calls. Their compatibility checks do not establish competitive Reactant throughput.
+On the tested NVIDIA A100, GRAMIS also supports
+`LogTarget(logtarget, AutoEnzyme())` with resident array context,
 simplex/positive/identity fields, adaptation, reuse and `retarget`.
 
 The A100 checks also cover static MIS, AMIS, NPMC, DM-PMC, APIS, CAIS and LAIS
@@ -223,6 +235,10 @@ SampleMetropolisHastings transitions. These checks use a shifted correlated
 Gaussian target, named fields and resident array context, including prepared
 sampler reuse, adaptive retargeting and resident resampling. They establish
 correctness for these cases, not throughput or other proposal families.
+
+Float32 factor Student-t checks also cover static MIS, AMIS, NPMC, DM-PMC,
+APIS, CAIS and all three LAIS transitions, with reuse, adaptive retargeting and
+resident resampling. This does not establish Student-t GRAMIS support on Reactant.
 
 `normalized_weights`, `lognormalizer` and `resample` support Reactant results
 and their applicable view operations. Result normalization transfers two

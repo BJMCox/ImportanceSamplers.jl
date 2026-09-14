@@ -411,17 +411,31 @@ function _importance_sample!(sampler, execution::_KernelExecution)
         log_type,
         target_failures,
     )
+    _launch_native_batch!(samples, logweights, failure_record, buffers, target_evaluator,
+        base, transform, execution, sampler.device, sampler.factor_execution)
+    snapshot = _device_failure_snapshot(failure_record)
+    _throw_native_failures(
+        snapshot.failure,
+        snapshot.draw_failure,
+        target_failures,
+        transform,
+    )
+    return samples, logweights, snapshot.transfers
+end
+
+function _launch_native_batch!(samples, logweights, failure_record, buffers, target_evaluator,
+    base, transform, execution, device, factor_execution)
     if _use_native_factor_batch_path(
-        sampler.device,
+        device,
         base,
         transform,
-        sampler.factor_execution,
+        factor_execution,
     )
         _launch_native_factor_batch!(
             samples,
             logweights,
             failure_record,
-            normal_buffer,
+            buffers.normal,
             target_evaluator,
             base,
             execution.cpu_execution,
@@ -432,21 +446,14 @@ function _importance_sample!(sampler, execution::_KernelExecution)
             logweights,
             failure_record,
             buffers.uniform,
-            normal_buffer,
+            buffers.normal,
             target_evaluator,
             base,
             transform,
             execution.cpu_execution,
         )
     end
-    snapshot = _device_failure_snapshot(failure_record)
-    _throw_native_failures(
-        snapshot.failure,
-        snapshot.draw_failure,
-        target_failures,
-        transform,
-    )
-    return samples, logweights, snapshot.transfers
+    return nothing
 end
 
 function _native_target_evaluator(
