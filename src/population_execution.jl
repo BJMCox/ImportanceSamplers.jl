@@ -26,6 +26,7 @@ end
     return nothing
 end
 
+# Keep shared-memory bounds checks. Unchecked CPU workgroups can segfault.
 @kernel function _local_logweight_maxima_kernel!(
     proposal_maxima,
     logtargets,
@@ -41,31 +42,31 @@ end
     group = @localmem Int (3,)
 
     if lane == 1
-        @inbounds group[3] = proposal_group + proposal_offset - 1
+        group[3] = proposal_group + proposal_offset - 1
         first_sample = 1
-        for prior_proposal in 1:(@inbounds(group[3]) - 1)
-            first_sample += @inbounds counts[prior_proposal, round]
+        for prior_proposal in 1:(group[3] - 1)
+            first_sample += counts[prior_proposal, round]
         end
-        @inbounds group[1] = first_sample
-        @inbounds group[2] = first_sample + counts[group[3], round] - 1
+        group[1] = first_sample
+        group[2] = first_sample + counts[group[3], round] - 1
     end
     @synchronize()
 
     lane_maximum = eltype(logtargets)(-Inf)
-    for sample in (@inbounds(group[1]) + lane - 1):lane_count:(@inbounds(group[2]))
+    for sample in (group[1] + lane - 1):lane_count:group[2]
         local_logweight = @inbounds(logtargets[sample]) -
                           @inbounds(generating_logdensities[sample])
         lane_maximum = max(lane_maximum, local_logweight)
     end
-    @inbounds maxima[lane] = lane_maximum
+    maxima[lane] = lane_maximum
     @synchronize()
     for offset in _LOCAL_REDUCTION_OFFSETS
         if lane <= offset
-            @inbounds maxima[lane] = max(maxima[lane], maxima[lane + offset])
+            maxima[lane] = max(maxima[lane], maxima[lane + offset])
         end
         @synchronize()
     end
-    lane == 1 && (@inbounds proposal_maxima[group[3]] = maxima[1])
+    lane == 1 && (proposal_maxima[group[3]] = maxima[1])
 end
 
 @kernel function _scaled_local_weights_kernel!(

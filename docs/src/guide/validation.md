@@ -123,5 +123,84 @@ load. Use BenchmarkTools and synchronize GPU work inside the timed boundary.
 Report repeated ranges. A single-seed concentration ESS is not a general claim
 about estimator accuracy or cross-device ESS per second.
 
+## Compare complete-run cost and accuracy
+
+`benchmark/time_to_accuracy.jl` compares all shipped samplers against independent
+normalizer, mean and second-moment references. Its four two-dimensional targets
+are a correlated Gaussian, a Student-t, an unequal separated Gaussian mixture,
+and two independent logistic/Bernoulli groups. The first three use analytic
+references. The logistic reference uses one-dimensional quadrature per group.
+
+The harness includes plain IS, four static MIS pairs, AMIS, NPMC, global/local
+DM-PMC, APIS, CAIS, first-order GRAMIS, and LAIS with random-walk, RAM and sample-MH
+transitions. It matches total lower-sample budgets and uses four adaptive rounds.
+Initial single and bank proposals match mean and covariance, not density shape.
+The heavy-tailed target uses Student-t proposals with heavier tails.
+
+Start a Julia process with the desired thread count and benchmark environment:
+
+```sh
+julia --threads=32 --project=benchmark
+```
+
+Then measure one case:
+
+```julia
+using ImportanceSamplers, MLDataDevices, LinearAlgebra
+include("benchmark/time_to_accuracy.jl")
+BLAS.set_num_threads(1) # Avoid nested BLAS threading in this benchmark process.
+
+device = CPUDevice()
+# For CUDA, load CUDA and select a precision-preserving device explicitly:
+# using CUDA
+# CUDA.allowscalar(false)
+# device = MLDataDevices.with_eltype(CUDADevice(), nothing)
+
+T = Float64 # An explicit benchmark choice, not a package precision requirement.
+case = TimeToAccuracy.cases(T).mixture
+methods = TimeToAccuracy.algorithms(case, 1_048_576; T)
+rows = TimeToAccuracy.measure(device, case, methods.cais; seeds=1:20, threaded=true)
+TimeToAccuracy.summarize(rows)
+```
+
+Iterate over `TimeToAccuracy.cases(T)`, both total budgets `262_144` and
+`1_048_576`, and `pairs(TimeToAccuracy.algorithms(case, total; T))` for the full
+comparison. Run each backend separately. Record Julia/BLAS threads and host load.
+Use `threaded=false` for an explicit serial control.
+
+Each measured seed creates a fresh prepared sampler, transfers it to the device,
+samples, and synchronizes completion. CPU runs retain the already-CPU preparation
+instead of rebuilding it through a redundant device transfer.
+BenchmarkTools performs an unmeasured fresh
+warmup first. The timed boundary includes preparation and adaptation, but excludes
+initial JIT compilation, oracle evaluation and result postprocessing. It never
+inherits an earlier run's adapted proposal. Host bytes and allocation counts are
+cumulative allocations, not peak memory or device allocations.
+Forced per-seed garbage-collection sweeps are disabled. Natural collection stays
+inside timing and each row records its `gc_seconds`. The full audit collects
+between cells, not before every seed.
+
+The reported errors are relative normalizer error, coordinate-standardized mean
+error, and full raw second-moment error scaled by marginal standard deviations.
+The latter includes cross moments. Seed-bootstrap intervals summarize RMSE
+uncertainty. They do not establish correctness or tail-error bounds.
+`mse_seconds` multiplies empirical MSE by mean runtime, including natural GC costs.
+Both mean and median latency remain available. Smaller scores indicate
+better error-cost trade-offs in that measured cell, not a predicted runtime to
+arbitrary accuracy. Compare the observed error/time pairs at both budgets.
+
+ESS measures weight concentration. It does not replace estimator error, and
+equal lower-sample counts do not imply equal target/gradient work. Each row records
+those logical sampling evaluation counts, not preparation probes or proposal
+density evaluations. Defaults are held fixed rather than tuned per target, so
+this small workload set cannot establish a universal sampler ranking.
+
+For example, the million-sample logistic case on an A100 gave AMIS normalizer
+RMSE `3.0e-4`, versus `2.9e-3` for partial deterministic-mixture IS. Their mean
+fresh-run times were 211 ms and 4.7 ms. AMIS had the lower normalizer error-cost
+score, but partial MIS had lower mean and second-moment error-cost scores.
+Choose the estimand before choosing a sampler. These are 20-seed observations
+from this benchmark, not general speed or accuracy guarantees.
+
 BAT/Wren adapters are deferred until registration and will live in those host packages.
 No BAT, Wren, Enzyme, or Reactant integration claim follows from these checks.
