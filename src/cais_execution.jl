@@ -217,8 +217,17 @@ function _advance_population!(
     transfers,
 )
     workspace = method_state.workspace
-    candidate = method_state.candidate_bank
+    _cais_weights!(method_state, views, round, execution)
+    _throw_cais_weight_failure(sampler.device, workspace.factor_status, transfers)
+    _cais_fit!(method_state, views, round, execution)
+    _throw_cais_factor_failure(sampler.device, workspace.factor_info, transfers)
+    _cais_install!(method_state, round, execution)
+    return nothing
+end
 
+function _cais_weights!(method_state, views, round, execution)
+    workspace = method_state.workspace
+    candidate = method_state.candidate_bank
     _population_local_weights!(
         workspace.normalized_weights,
         workspace.local_ess,
@@ -238,7 +247,11 @@ function _advance_population!(
     KernelAbstractions.synchronize(
         KernelAbstractions.get_backend(workspace.normalized_weights),
     )
-    _throw_cais_weight_failure(sampler.device, workspace.factor_status, transfers)
+    return nothing
+end
+
+function _cais_fit!(method_state, views, round, execution)
+    workspace = method_state.workspace
     _fit_population_covariances!(
         workspace.covariances,
         workspace.covariance_centres,
@@ -260,7 +273,12 @@ function _advance_population!(
         workspace.factor_status,
         execution,
     )
-    _throw_cais_factor_failure(sampler.device, workspace.factor_info, transfers)
+    return nothing
+end
+
+function _cais_install!(method_state, round, execution)
+    workspace = method_state.workspace
+    candidate = method_state.candidate_bank
     _scale_population_factors!(workspace.fitted_factors, candidate.family, nothing, execution)
     _install_cais_factors!(candidate, workspace.fitted_factors, execution)
     _update_cais_lognormalizers!(candidate, workspace.fitted_factors, execution)

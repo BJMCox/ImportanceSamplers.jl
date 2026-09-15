@@ -353,6 +353,206 @@ function _compiled_native_result(sampler, plan, ::IS._PreparedStaticMIS, output,
         execution, transfers)
 end
 
+struct _CompiledPopulationExecution{N,D,A,R,C,P,M}
+    normals::N
+    draws::D
+    adaptation::A
+    reset::R
+    commit::C
+    publish::P
+    map_result::M
+end
+
+# Borrow the fixed host tuples. Reactant cannot trace the unsized Vararg field
+# in _HostIntSequence. All numerical arrays, including swapped banks, stay live.
+_population_trace_plan(plan) = IS._DeterministicAllocationPlan(plan.schedule.values,
+    plan.counts, plan.assignments, plan.logcoefficients, plan.offsets.values)
+_population_trace_state(state::IS._PreparedAPIS) = IS._PreparedAPIS(state.bank,
+    state.run_bank, _population_trace_plan(state.plan), state.workspace)
+_population_trace_state(state::IS._PreparedDMPMC) = IS._PreparedDMPMC(state.bank,
+    state.run_bank, _population_trace_plan(state.plan), state.workspace)
+_population_trace_state(state::IS._PreparedCAIS) = IS._PreparedCAIS(state.bank,
+    state.run_bank, state.candidate_bank, _population_trace_plan(state.plan),
+    state.covariance_ess_threshold, state.tempering_tolerance,
+    state.tempering_max_iterations, state.workspace)
+
+_reset_population_arrays!(state) = IS._reset_population_run!(state, state.run_bank, state.bank)
+_population_draw_state(state) = state
+
+_prepare_execution(sampler, state::Union{IS._PreparedAPIS,IS._PreparedDMPMC,IS._PreparedCAIS}) =
+    _prepare_population_execution(sampler, state)
+
+function _prepare_population_execution(sampler, state)
+    state = _population_trace_state(state)
+    buffers = sampler.random_buffers
+    rng = sampler.rng.rng
+    bound = IS._bind_resolved_target(sampler.target, IS._population_binding_sample(state.bank))
+    target, _ = IS._native_target_evaluator(KA.get_backend(buffers.normals), bound,
+        eltype(state.workspace.round_logweights), buffers.failure_scratch.target_failures)
+    execution = IS._population_execution(sampler, true, state)
+    device, factor_execution = sampler.device, sampler.factor_execution
+    normals = Reactant.@compile IS._fill_population_normals!(rng, buffers)
+    draws = map(eachindex(state.plan.schedule)) do round
+        phase = (state, buffers, target) -> IS._launch_population_round!(
+            _population_draw_state(state), buffers, target, round, execution, device, factor_execution)
+        Reactant.@compile phase(state, buffers, target)
+    end
+    adaptation = _prepare_population_adaptation(sampler, state)
+    record = buffers.failure_scratch.record
+    reset_phase = function (state, record)
+        _reset_population_arrays!(state)
+        fill!(record.storage, zero(UInt64))
+        return nothing
+    end
+    reset = Reactant.@compile reset_phase(state, record)
+    commit_phase = state -> IS._commit_population_round!(state, state.run_bank)
+    commit = Reactant.@compile commit_phase(state)
+    count = last(state.plan.offsets) - 1
+    samples = IS._allocate_packed_static_mis_samples(buffers.normals, state.bank, count)
+    logweights = similar(state.workspace.round_logweights, count)
+    round_ids = similar(state.workspace.round_proposal_ids, count)
+    proposal_ids = similar(round_ids)
+    publish = map(eachindex(state.plan.schedule)) do round
+        phase = (state, samples, logweights, round_ids, proposal_ids) ->
+            IS._publish_population_round!(nothing, state, round, samples, logweights, round_ids, proposal_ids)
+        Reactant.@compile phase(state, samples, logweights, round_ids, proposal_ids)
+    end
+    mapper = _prepare_result_map(sampler.target, samples, record)
+    return _CompiledPopulationExecution(normals, draws, adaptation, reset, commit, publish, mapper)
+end
+
+function _prepare_population_adaptation(sampler, state::IS._PreparedAPIS)
+    return map(eachindex(state.plan.schedule)) do round
+        phase = function (state)
+            workspace = state.workspace
+            views = IS._population_round_views(state, round)
+            IS._launch_local_weighted_means!(workspace.candidate_locations,
+                workspace.proposal_maxima, views.samples, views.scaled_local_weights,
+                views.logtargets, views.generating_logdensities, views.assignments,
+                state.plan.counts, round, IS._ThreadedCPUExecution())
+            return _allfinite(workspace.proposal_maxima), _logweight_moments(views.logweights)
+        end
+        Reactant.@compile phase(state)
+    end
+end
+
+function _prepare_population_adaptation(sampler, state::IS._PreparedDMPMC)
+    rng, buffers = sampler.rng.rng, sampler.random_buffers
+    return map(eachindex(state.plan.schedule)) do round
+        if sampler.algorithm.resampling isa IS.LocalResampling
+            phase = function (rng, state, buffers)
+                workspace = state.workspace
+                views = IS._population_round_views(state, round)
+                IS._launch_local_resample!(rng, views.cdf, buffers.resampling_uniforms,
+                    workspace.ancestors, views.samples, workspace.candidate_locations,
+                    views.logweights, views.assignments, workspace.resampling_maxima,
+                    state.plan.counts, round, IS._ThreadedCPUExecution())
+                return minimum(workspace.ancestors), _logweight_moments(views.logweights)
+            end
+            return (; local_phase=Reactant.@compile phase(rng, state, buffers))
+        end
+        cdf_phase = function (state)
+            views = IS._population_round_views(state, round)
+            moments = _normalize_weights!(views.cdf, views.logweights, views.round_size)
+            views.cdf .= cumsum(views.cdf)
+            return moments
+        end
+        select_phase = function (rng, state, buffers)
+            views = IS._population_round_views(state, round)
+            Random.rand!(rng, buffers.resampling_uniforms)
+            IS._resample_and_gather!(views.cdf, buffers.resampling_uniforms,
+                state.workspace.ancestors, views.samples, state.workspace.candidate_locations,
+                IS._ThreadedCPUExecution())
+            return nothing
+        end
+        cdf = Reactant.@compile cdf_phase(state)
+        select = Reactant.@compile select_phase(rng, state, buffers)
+        return (; cdf, select)
+    end
+end
+
+function _prepare_population_adaptation(sampler, state::IS._PreparedCAIS)
+    execution = IS._population_execution(sampler, true, state)
+    return map(eachindex(state.plan.schedule)) do round
+        weight_phase = state -> IS._cais_weights!(state, IS._population_round_views(state, round), round, execution)
+        fit_phase = state -> IS._cais_fit!(state, IS._population_round_views(state, round), round, execution)
+        install_phase = function (state)
+            IS._cais_install!(state, round, execution)
+            return _logweight_moments(IS._population_round_views(state, round).logweights)
+        end
+        weights = Reactant.@compile weight_phase(state)
+        fit = Reactant.@compile fit_phase(state)
+        install = Reactant.@compile install_phase(state)
+        return (; weights, fit, install)
+    end
+end
+
+IS._execute_prepared_sampler!(sampler, ::_CompiledPopulationExecution, threaded) =
+    IS._importance_sample_cpu!(sampler, threaded)
+IS._reset_prepared_population!(plan::_CompiledPopulationExecution, state, record) =
+    plan.reset(_population_trace_state(state), record)
+
+IS._fill_population_normals!(plan::_CompiledPopulationExecution, sampler) =
+    plan.normals(sampler.rng.rng, sampler.random_buffers)
+IS._draw_population_round!(plan::_CompiledPopulationExecution, sampler, state, target, round, execution) =
+    plan.draws[round](_population_trace_state(state), sampler.random_buffers, target)
+IS._publish_population_round!(plan::_CompiledPopulationExecution, state, round, samples, weights, rounds, proposals) =
+    plan.publish[round](_population_trace_state(state), samples, weights, rounds, proposals)
+IS._commit_prepared_population!(plan::_CompiledPopulationExecution, state) =
+    plan.commit(_population_trace_state(state))
+IS._population_result_samples(plan::_CompiledPopulationExecution, sampler, samples, transfers) =
+    _map_compiled_result(plan.map_result, sampler, samples, transfers)
+
+function IS._advance_prepared_population!(plan::_CompiledPopulationExecution, sampler,
+    state::IS._PreparedAPIS, views, round, execution, transfers)
+    valid, moments = plan.adaptation[round](_population_trace_state(state))
+    success = Bool(valid)
+    IS._record_device_scalar_transfer!(transfers, state.workspace.proposal_maxima,
+        Bool, Val(:local_mean_validity))
+    success || throw(IS.AllZeroWeightsError())
+    values = Array(moments)
+    IS._record_reported_transfer!(transfers, 1, sizeof(values), Val(:logweight_moments))
+    return IS._logweight_summary(values..., views.round_size)
+end
+
+function IS._advance_prepared_population!(plan::_CompiledPopulationExecution, sampler,
+    state::IS._PreparedDMPMC, views, round, execution, transfers)
+    state = _population_trace_state(state)
+    phase = plan.adaptation[round]
+    if sampler.algorithm.resampling isa IS.LocalResampling
+        ancestor, moments = phase.local_phase(sampler.rng.rng, state, sampler.random_buffers)
+        valid = Int(ancestor) > 0
+        IS._record_device_scalar_transfer!(transfers, state.workspace.ancestors,
+            Int, Val(:local_resampling_validity))
+        valid || throw(IS.AllZeroWeightsError())
+        values = Array(moments)
+    else
+        values = Array(phase.cdf(state))
+        IS._record_reported_transfer!(transfers, 1, sizeof(values), Val(:cdf_sum))
+        isfinite(values[2]) && values[2] > 0 || throw(IS.AllZeroWeightsError())
+        phase.select(sampler.rng.rng, state, sampler.random_buffers)
+        return IS._logweight_summary(values..., views.round_size)
+    end
+    IS._record_reported_transfer!(transfers, 1, sizeof(values), Val(:logweight_moments))
+    return IS._logweight_summary(values..., views.round_size)
+end
+
+function IS._advance_prepared_population!(plan::_CompiledPopulationExecution, sampler,
+    state::IS._PreparedCAIS, views, round, execution, transfers)
+    state = _population_trace_state(state)
+    phase = plan.adaptation[round]
+    phase.weights(state)
+    IS._throw_cais_weight_failure(sampler.device, state.workspace.factor_status, transfers)
+    phase.fit(state)
+    IS._throw_cais_factor_failure(sampler.device, state.workspace.factor_info, transfers)
+    values = Array(phase.install(state))
+    IS._record_reported_transfer!(transfers, 1, sizeof(values), Val(:logweight_moments))
+    return IS._logweight_summary(values..., views.round_size)
+end
+
+include("reactant_lais.jl")
+include("reactant_gramis.jl")
+
 # Reactant arguments remain managed arrays, not isbits kernel pointers. Its live
 # preflight compiles the target and gradients before sampling consumes the RNG.
 function IS._preflight_kernel_argument(device::MLDataDevices.ReactantDevice, kernel, argument)
@@ -404,6 +604,9 @@ function IS._pooled_covariance!(covariance::Reactant.AnyConcreteRArray, factors,
     Reactant.@jit _pooled_covariance!(covariance, factors)
     return nothing
 end
+
+IS._pooled_covariance!(covariance::AbstractArray{<:Reactant.TracedRNumber}, factors, ::IS._KernelExecution) =
+    _pooled_covariance!(covariance, factors)
 
 function _factor!(factor)
     decomposition = LA.cholesky(LA.Hermitian(factor, :L); check=false)
@@ -496,6 +699,9 @@ function IS._whiten_means!(output::Reactant.AnyConcreteRArray, factor, means)
     Reactant.@jit _whiten_means!(output, factor, means)
     return nothing
 end
+
+IS._whiten_means!(output::AbstractArray{<:Reactant.TracedRNumber}, factor, means) =
+    _whiten_means!(output, factor, means)
 
 function _logweight_moments(values)
     maximum_logweight = maximum(values; dims=1)

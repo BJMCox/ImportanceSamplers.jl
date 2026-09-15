@@ -39,6 +39,7 @@ end
 
 _advance_population!(sampler, state::_PreparedLAIS, views, round, execution, transfers) = nothing
 _commit_population_round!(::_PreparedLAIS, bank) = nothing
+_population_transition_diagnostics(::Nothing, state, transfers) = transition_diagnostics(state, transfers)
 
 function _commit_population_run!(state::_PreparedLAIS)
     state.bank, state.run_bank = state.run_bank, state.bank
@@ -50,8 +51,8 @@ function _population_diagnostics(sampler, state::_PreparedLAIS, execution, sched
     round_ess, round_lognormalizers, transfers)
     names = (:initial_target_evaluations, :warmup_target_evaluations,
         :production_target_evaluations, :warmup_proposals, :production_proposals, :accepted)
-    after = transition_diagnostics(state.run_transition, transfers)
-    before = transition_diagnostics(state.transition, transfers)
+    after = _population_transition_diagnostics(sampler.backend_execution, state.run_transition, transfers)
+    before = _population_transition_diagnostics(sampler.backend_execution, state.transition, transfers)
     transition = NamedTuple{names}(map(name -> getproperty(after, name) - getproperty(before, name), names))
     lower_count = sum(schedule)
     return (

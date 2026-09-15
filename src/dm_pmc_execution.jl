@@ -309,6 +309,16 @@ function _resample_dm_pmc_population!(
     transfers,
     ::LocalResampling,
 )
+    _launch_local_resample!(rng, scaled_weights, uniforms, ancestors, source, destination,
+        logweights, assignments, proposal_maxima, counts, round, execution)
+    valid = minimum(ancestors) > 0
+    _record_device_scalar_transfer!(transfers, ancestors, Int, Val(:local_resampling_validity))
+    valid || throw(AllZeroWeightsError())
+    return nothing
+end
+
+function _launch_local_resample!(rng, scaled_weights, uniforms, ancestors, source, destination,
+    logweights, assignments, proposal_maxima, counts, round, execution)
     backend = KernelAbstractions.get_backend(logweights)
     if backend isa KernelAbstractions.CPU
         Random.rand!(rng, uniforms)
@@ -359,14 +369,6 @@ function _resample_dm_pmc_population!(
         )
     end
     KernelAbstractions.synchronize(backend)
-    valid = minimum(ancestors) > 0
-    _record_device_scalar_transfer!(
-        transfers,
-        ancestors,
-        Int,
-        Val(:local_resampling_validity),
-    )
-    valid || throw(AllZeroWeightsError())
     return nothing
 end
 

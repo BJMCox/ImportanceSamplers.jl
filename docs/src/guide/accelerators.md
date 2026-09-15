@@ -218,13 +218,16 @@ Load `Reactant` and `CUDA`, then apply
 prepared sampler. CUDA must be loaded for Reactant's KernelAbstractions
 integration even when Reactant runs on CPU.
 
-Native Base IS, static MIS, and scalar/vector AMIS/NPMC retain compiled numerical
-phases in the prepared sampler. Device preparation compiles the required shapes once. Later
-runs reuse those executables with live RNG state, resident context arrays and
-adapted proposal arrays. AMIS/NPMC prepare phases for their fixed round schedules.
-Preparation can therefore take seconds even when warmed sampling is fast.
-Other samplers and standalone result operations still use eager compile-and-run
-calls. Their compatibility checks do not establish competitive Reactant throughput.
+Native Base IS, static MIS, scalar/vector AMIS/NPMC, DM-PMC, APIS, CAIS, LAIS
+and first-order GRAMIS retain compiled numerical phases in the prepared sampler.
+Device preparation compiles the required phases once. Later runs reuse those
+executables with live RNG state, resident context arrays and adapted proposal
+arrays. Adaptive methods prepare phases for their fixed round schedules.
+Preparation can therefore take seconds or minutes even when warmed sampling is fast.
+LAIS retains execution for `RandomWalkMetropolis`, `RAM` and
+`SampleMetropolisHastings`. Custom LAIS transitions and standalone result
+operations still use eager compile-and-run calls. Their compatibility checks
+do not establish competitive Reactant throughput.
 On the tested NVIDIA A100, GRAMIS also supports
 `LogTarget(logtarget, AutoEnzyme())` with resident array context,
 simplex/positive/identity fields, adaptation, reuse and `retarget`.

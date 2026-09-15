@@ -2,6 +2,11 @@ module ReactantExecutionValidation
 using ImportanceSamplers, Reactant, CUDA, Random, Test
 
 logtarget(x, p) = -((x[1] - p[1])^2 + (x[2] - p[2])^2) / 2
+function gradient!(g, x, p)
+    g[1] = p[1] - x[1]
+    g[2] = p[2] - x[2]
+    return nothing
+end
 
 function run()
     CUDA.allowscalar(false)
@@ -18,15 +23,21 @@ function run()
     @testset "Reactant retained execution preserves live state and owned results" begin
         for algorithm in (ImportanceSampling(proposal; nsamples=32768),
             AMIS(proposal; rounds=3, round_size=16384),
-            NPMC(proposal; rounds=3, round_size=16384), static...)
+            NPMC(proposal; rounds=3, round_size=16384), static...,
+            APIS(bank; rounds=3, round_size=16384),
+            DeterministicMixturePMC(bank; rounds=3, round_size=16384),
+            DeterministicMixturePMC(bank; rounds=3, round_size=16384, resampling=LocalResampling()),
+            CAIS(bank; rounds=3, round_size=16384),
+            LAIS(bank; transition=RandomWalkMetropolis(0.1f0), rounds=3, round_size=16384),
+            FirstOrderGRAMIS(bank; rounds=3, round_size=16384, repulsion_strength=0.1f0))
             p = Float32[0.25, -0.15]
-            sampler = device(prepare_sampler(Xoshiro(41), logtarget, p, algorithm))
+            sampler = device(prepare_sampler(Xoshiro(41), LogTarget(logtarget; grad=gradient!), p, algorithm))
             first = importance_sample!(sampler)
             saved = Array(first.samples)
             saved_weights = Array(first.logweights)
             @test maximum(abs.(saved * Array(normalized_weights(first)) - p)) < 0.06
             @test abs(lognormalizer(first) - log(2f0 * Float32(pi))) < 0.04
-            if algorithm.proposal isa ProposalBank
+            if algorithm isa ImportanceSampling && algorithm.proposal isa ProposalBank
                 ids = Array(first.provenance.proposal_id)
                 logdensity = ImportanceSamplers.DensityInterface.logdensityof
                 full = algorithm.mis_scheme isa Union{StratifiedMixture,RandomMixture}
@@ -50,7 +61,9 @@ function run()
 
             # A failed run must not poison the next use of the prepared state.
             copyto!(sampler.target.context, fill(Float32(NaN), 2))
-            @test_throws Union{SamplerExecutionError, AMISRoundError, NPMCRoundError} importance_sample!(sampler)
+            @test_throws Union{SamplerExecutionError, AMISRoundError, NPMCRoundError,
+                APISRoundError, DMPMCRoundError, CAISRoundError, LAISRoundError,
+                FirstOrderGRAMISRoundError} importance_sample!(sampler)
             copyto!(sampler.target.context, moved)
             recovered = importance_sample!(sampler)
             @test abs(lognormalizer(recovered) - log(2f0 * Float32(pi))) < 0.04

@@ -171,11 +171,16 @@ function _initialize_transition_batch!(backend, state, target, transfers)
 end
 
 function _enqueue_transition_move!(backend, state, evaluator, rng, update)
+    _launch_transition_move!(backend, state, evaluator, rng, update)
+    state.steps += 1
+    return nothing
+end
+
+function _launch_transition_move!(backend, state, evaluator, rng, update)
     Random.randn!(rng, state.normals)
     Random.rand!(rng, state.uniforms)
     _transition_step_kernel!(backend)(_transition_arrays(state), evaluator, update,
         state.failure_scratch.record.storage; ndrange=length(state.logtargets))
-    state.steps += 1
     return nothing
 end
 
@@ -192,22 +197,12 @@ function _warmup_transition!(backend, state, target, rng, execution, transfers)
     evaluator = _initialize_transition_batch!(backend, walk, target, transfers)
     remaining = state.tuning.steps - state.n_tuned
     if remaining > 0
-        # Bound scratch to 1 MiB (or one move) and sequential kernel work to 256
-        # moves. These are memory/work limits, not device-speed crossover rules.
-        bytes_per_move = sizeof(eltype(walk.normals)) * (length(walk.normals) + length(walk.uniforms))
-        capacity = min(remaining, 256, max(1, (1 << 20) ÷ bytes_per_move))
-        normals = similar(walk.normals, size(walk.normals)..., capacity)
-        uniforms = similar(walk.uniforms, length(walk.uniforms), capacity)
-        kernel = _cooperative_transition_warmup_kernel!(backend)
-        lanes = min(_TRANSITION_WORKGROUP_SIZE, size(walk.normals, 1))
+        normals, uniforms = _transition_warmup_buffers(walk, remaining)
+        capacity = size(normals, 3)
         while state.n_tuned < state.tuning.steps
             steps = min(capacity, state.tuning.steps - state.n_tuned)
-            Random.randn!(rng, view(normals, :, :, 1:steps))
-            Random.rand!(rng, view(uniforms, :, 1:steps))
-            kernel(_transition_arrays(walk), evaluator, state.direction, normals,
-                uniforms, state.n_tuned, steps, state.target_acceptance, state.decay,
-                walk.failure_scratch.record.storage;
-                ndrange=lanes*length(walk.logtargets), workgroupsize=lanes)
+            _launch_transition_warmup!(backend, state, evaluator, rng,
+                normals, uniforms, state.n_tuned, steps)
             state.n_tuned += steps
             walk.steps += steps
         end
@@ -215,6 +210,27 @@ function _warmup_transition!(backend, state, target, rng, execution, transfers)
     _enqueue_transition_move!(backend, walk, evaluator, rng, nothing)
     KernelAbstractions.synchronize(backend)
     _check_transition_failure!(walk, transfers)
+    return nothing
+end
+
+function _transition_warmup_buffers(walk, remaining)
+    # Bound scratch to 1 MiB (or one move) and sequential work to 256 moves.
+    bytes_per_move = sizeof(eltype(walk.normals)) * (length(walk.normals) + length(walk.uniforms))
+    capacity = min(remaining, 256, max(1, (1 << 20) ÷ bytes_per_move))
+    return similar(walk.normals, size(walk.normals)..., capacity),
+        similar(walk.uniforms, length(walk.uniforms), capacity)
+end
+
+function _launch_transition_warmup!(backend, state, evaluator, rng, normals, uniforms, first_step, steps)
+    walk = state.walk
+    Random.randn!(rng, view(normals, :, :, 1:steps))
+    Random.rand!(rng, view(uniforms, :, 1:steps))
+    lanes = min(_TRANSITION_WORKGROUP_SIZE, size(walk.normals, 1))
+    _cooperative_transition_warmup_kernel!(backend)(
+        _transition_arrays(walk), evaluator, state.direction, normals,
+        uniforms, first_step, steps, state.target_acceptance, state.decay,
+        walk.failure_scratch.record.storage;
+        ndrange=lanes*length(walk.logtargets), workgroupsize=lanes)
     return nothing
 end
 

@@ -112,9 +112,21 @@ transition_centres(state::_SampleMetropolisHastingsState) = state.centres
 
 function Base.copyto!(destination::_SampleMetropolisHastingsState,
     source::_SampleMetropolisHastingsState)
+    _copy_transition_arrays!(destination, source)
+    _copy_transition_counters!(destination, source)
+    return destination
+end
+
+function _copy_transition_arrays!(destination::_SampleMetropolisHastingsState,
+    source::_SampleMetropolisHastingsState)
     copyto!(destination.centres, source.centres)
     copyto!(destination.logratios, source.logratios)
     copyto!(destination.accepted, source.accepted)
+    return destination
+end
+
+function _copy_transition_counters!(destination::_SampleMetropolisHastingsState,
+    source::_SampleMetropolisHastingsState)
     destination.cache_valid = source.cache_valid
     destination.initial_evaluations = source.initial_evaluations
     destination.production_evaluations = source.production_evaluations
@@ -128,13 +140,17 @@ function retarget_transition(::SampleMetropolisHastings,
 end
 
 function transition_diagnostics(state::_SampleMetropolisHastingsState)
+    return _smh_diagnostics(state, sum(state.accepted))
+end
+
+function _smh_diagnostics(state, accepted)
     return (
         initial_target_evaluations=state.initial_evaluations,
         warmup_target_evaluations=0,
         production_target_evaluations=state.production_evaluations,
         warmup_proposals=0,
         production_proposals=state.production_evaluations,
-        accepted=sum(state.accepted),
+        accepted=accepted,
     )
 end
 
@@ -405,20 +421,26 @@ function _initialize_smh_cache!(state, target, execution, transfers)
     evaluator, _ = _native_target_evaluator(
         backend, target, eltype(state.logratios),
         state.failure_scratch.target_failures)
+    _launch_smh_cache!(state, evaluator, execution)
+    KernelAbstractions.synchronize(backend)
+    _check_smh_failures!(state, transfers)
+    state.cache_valid = true
+    state.initial_evaluations += length(state.logratios)
+    return nothing
+end
+
+function _launch_smh_cache!(state, evaluator, execution)
+    backend = KernelAbstractions.get_backend(state.normals)
     _reset_native_failure_scratch!(state.failure_scratch)
     kernel = _smh_cache_kernel!(backend)
     count = length(state.logratios)
     kernel(state.centres, state.logratios, state.density_scratch, evaluator,
         state.proposal, state.failure_scratch.record.storage;
         ndrange=count, workgroupsize=_native_workgroupsize(execution, count))
-    KernelAbstractions.synchronize(backend)
-    _check_smh_failures!(state, transfers)
-    state.cache_valid = true
-    state.initial_evaluations += count
     return nothing
 end
 
-function _smh_candidate_batch!(state, target, rng, execution, steps)
+function _smh_candidate_batch!(state, target, rng, execution, steps, ::Type{L}=eltype(state.candidate_logweights)) where {L}
     normal_count = _native_normal_count(state.proposal, steps)
     uniform_count = _native_uniform_count(state.proposal, steps)
     normal_count > 0 && Random.randn!(rng, view(state.normals, 1:normal_count))
@@ -427,7 +449,7 @@ function _smh_candidate_batch!(state, target, rng, execution, steps)
     Random.rand!(rng, view(state.decision_uniforms, :, 1:steps))
     backend = KernelAbstractions.get_backend(state.normals)
     evaluator, _ = _native_target_evaluator(
-        backend, target, eltype(state.candidate_logweights),
+        backend, target, L,
         state.failure_scratch.target_failures)
     _reset_native_failure_scratch!(state.failure_scratch)
     _launch_native_fused!(state.candidates,
@@ -444,6 +466,13 @@ function _smh_ordered_batch!(::KernelAbstractions.CPU, state, steps, transfers)
 end
 
 function _smh_ordered_batch!(backend, state, steps, transfers)
+    _launch_smh_ordered!(backend, state, steps)
+    KernelAbstractions.synchronize(backend)
+    _check_smh_failures!(state, transfers)
+    return nothing
+end
+
+function _launch_smh_ordered!(backend, state, steps)
     kernel = _smh_ordered_kernel!(backend)
     workload = max(length(state.logratios), _transition_dimension(state.centres))
     lanes = min(_LOCAL_REDUCTION_WORKGROUP_SIZE, nextpow(2, workload))
@@ -451,8 +480,6 @@ function _smh_ordered_batch!(backend, state, steps, transfers)
         state.candidate_logweights, state.decision_uniforms, state.accepted,
         state.failure_scratch.record.storage, steps;
         ndrange=lanes, workgroupsize=lanes)
-    KernelAbstractions.synchronize(backend)
-    _check_smh_failures!(state, transfers)
     return nothing
 end
 

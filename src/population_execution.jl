@@ -221,6 +221,17 @@ function _local_weighted_means!(
     execution,
     transfers,
 )
+    _launch_local_weighted_means!(candidate_locations, proposal_maxima, samples,
+        scaled_weights, logtargets, generating_logdensities, assignments, counts,
+        round, execution)
+    valid = _local_means_valid(proposal_maxima)
+    _record_device_scalar_transfer!(transfers, proposal_maxima, Bool, Val(:local_mean_validity))
+    valid || throw(AllZeroWeightsError())
+    return nothing
+end
+
+function _launch_local_weighted_means!(candidate_locations, proposal_maxima, samples,
+    scaled_weights, logtargets, generating_logdensities, assignments, counts, round, execution)
     backend = KernelAbstractions.get_backend(logtargets)
     proposal_count = size(counts, 1)
     maxima_kernel = _local_logweight_maxima_kernel!(backend)
@@ -290,14 +301,6 @@ function _local_weighted_means!(
         )
     end
     KernelAbstractions.synchronize(backend)
-    valid = _local_means_valid(proposal_maxima)
-    _record_device_scalar_transfer!(
-        transfers,
-        proposal_maxima,
-        Bool,
-        Val(:local_mean_validity),
-    )
-    valid || throw(AllZeroWeightsError())
     return nothing
 end
 
@@ -344,18 +347,67 @@ function _commit_population_round!(method_state, run)
 end
 
 _before_population_round!(sampler, method_state, target, round, execution, transfers) = nothing
+_before_prepared_population_round!(plan, sampler, state, target, round, execution, transfers) =
+    _before_population_round!(sampler, state, target, round, execution, transfers)
 
 function _commit_population_run!(method_state)
     method_state.bank, method_state.run_bank = method_state.run_bank, method_state.bank
     return nothing
 end
 
+_reset_prepared_population!(::Nothing, state, record) =
+    _reset_population_run!(state, state.run_bank, state.bank)
+_fill_population_normals!(::Nothing, sampler) = _fill_population_normals!(sampler.rng, sampler.random_buffers)
+function _fill_population_normals!(rng, buffers)
+    Random.randn!(rng, buffers.normals)
+    _fill_radial_buffers!(rng, buffers.radial)
+    return nothing
+end
+_draw_population_round!(::Nothing, sampler, state, target, round, execution) =
+    _launch_population_round!(state, sampler.random_buffers, target, round, execution,
+        sampler.device, sampler.factor_execution)
+
+function _launch_population_round!(state, buffers, target, round, execution, device, factor_execution)
+    views = _population_round_views(state, round)
+    denominator = _population_denominator(state, round)
+    bank = state.run_bank
+    _prepare_mis_normals!(buffers.normals, buffers.radial, bank,
+        views.assignments, buffers.failure_scratch.record.storage, execution)
+    launch = _use_factor_batch_mis_path(device, bank, denominator,
+        eltype(views.logweights), factor_execution) ? _launch_factor_batch_mis_round! : _launch_mis_round!
+    launch(views.samples, _MISRoundOutput(views.logweights, views.proposal_ids,
+        _population_mis_adaptation(state, views)), buffers.failure_scratch.record.storage,
+        buffers.normals, target, bank, views.assignments, denominator,
+        state.workspace.solve_scratch, execution)
+    return nothing
+end
+
+function _advance_prepared_population!(::Nothing, sampler, state, views, round, execution, transfers)
+    _advance_population!(sampler, state, views, round, execution, transfers)
+    return _logweight_summary(views.logweights, transfers)
+end
+
+function _publish_population_round!(::Nothing, state, round, samples, logweights, round_ids, proposal_ids)
+    views = _population_round_views(state, round)
+    indices = state.plan.offsets[round]:(state.plan.offsets[round + 1] - 1)
+    copyto!(_sample_view(samples, indices), views.samples)
+    copyto!(view(logweights, indices), views.logweights)
+    fill!(view(round_ids, indices), round)
+    copyto!(view(proposal_ids, indices), views.proposal_ids)
+    return nothing
+end
+
+_commit_prepared_population!(::Nothing, state) = _commit_population_round!(state, state.run_bank)
+_population_result_samples(::Nothing, sampler, samples, transfers) =
+    _map_result_samples(sampler.target, samples, sampler.random_buffers.failure_scratch,
+        transfers, sampler.threaded)
+
 function _importance_sample_fixed_population!(sampler, method_state, threaded)
     algorithm = sampler.algorithm
     execution = _population_execution(sampler, threaded, method_state)
-    committed_bank = method_state.bank
     bank = method_state.run_bank
-    _reset_population_run!(method_state, bank, committed_bank)
+    _reset_prepared_population!(sampler.backend_execution, method_state,
+        sampler.random_buffers.failure_scratch.record)
     plan = method_state.plan
     workspace = method_state.workspace
     buffers = sampler.random_buffers
@@ -403,7 +455,8 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
         round_views = _population_round_views(method_state, round)
         round_size = round_views.round_size
         _capture_population_round(algorithm, round, :transition, round_size, round - 1) do
-            _before_population_round!(sampler, method_state, target, round, execution, transfers)
+            _before_prepared_population_round!(sampler.backend_execution, sampler,
+                method_state, target, round, execution, transfers)
         end
         _capture_population_round(
             algorithm,
@@ -412,8 +465,7 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
             round_size,
             round - 1,
         ) do
-            Random.randn!(sampler.rng, buffers.normals)
-            _fill_radial_buffers!(sampler.rng, buffers.radial)
+            _fill_population_normals!(sampler.backend_execution, sampler)
         end
         _capture_population_round(
             algorithm,
@@ -422,32 +474,8 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
             round_size,
             round - 1,
         ) do
-            denominator = _population_denominator(method_state, round)
-            _prepare_mis_normals!(buffers.normals, buffers.radial, bank,
-                round_views.assignments, buffers.failure_scratch.record.storage, execution)
-            launch = _use_factor_batch_mis_path(
-                sampler.device,
-                bank,
-                denominator,
-                eltype(round_views.logweights),
-                sampler.factor_execution,
-            ) ? _launch_factor_batch_mis_round! : _launch_mis_round!
-            launch(
-                round_views.samples,
-                _MISRoundOutput(
-                    round_views.logweights,
-                    round_views.proposal_ids,
-                    _population_mis_adaptation(method_state, round_views),
-                ),
-                buffers.failure_scratch.record.storage,
-                buffers.normals,
-                target_evaluator,
-                bank,
-                round_views.assignments,
-                denominator,
-                workspace.solve_scratch,
-                execution,
-            )
+            _draw_population_round!(sampler.backend_execution, sampler, method_state,
+                target_evaluator, round, execution)
             snapshot = _device_failure_snapshot(buffers.failure_scratch.record)
             _record_reported_transfer!(
                 transfers,
@@ -469,17 +497,9 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
             round_size,
             round - 1,
         ) do
-            _advance_population!(
-                sampler,
-                method_state,
-                round_views,
-                round,
-                execution,
-                transfers,
-            )
-            _logweight_summary(round_views.logweights, transfers)
+            _advance_prepared_population!(sampler.backend_execution, sampler,
+                method_state, round_views, round, execution, transfers)
         end
-        output_indices = plan.offsets[round]:(plan.offsets[round + 1] - 1)
         _capture_population_round(
             algorithm,
             round,
@@ -487,11 +507,8 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
             round_size,
             round - 1,
         ) do
-            destination = _sample_view(samples, output_indices)
-            copyto!(destination, round_views.samples)
-            copyto!(view(logweights, output_indices), round_views.logweights)
-            fill!(view(round_ids, output_indices), round)
-            copyto!(view(proposal_ids, output_indices), round_views.proposal_ids)
+            _publish_population_round!(sampler.backend_execution, method_state, round,
+                samples, logweights, round_ids, proposal_ids)
         end
         _capture_population_round(
             algorithm,
@@ -500,7 +517,7 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
             round_size,
             round - 1,
         ) do
-            _commit_population_round!(method_state, bank)
+            _commit_prepared_population!(sampler.backend_execution, method_state)
             KernelAbstractions.synchronize(
                 KernelAbstractions.get_backend(bank.locations),
             )
@@ -534,13 +551,7 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
         plan.schedule[final_round],
         final_round,
     ) do
-        result_samples = _map_result_samples(
-            sampler.target,
-            samples,
-            buffers.failure_scratch,
-            transfers,
-            sampler.threaded,
-        )
+        result_samples = _population_result_samples(sampler.backend_execution, sampler, samples, transfers)
         _adopt_validated_weighted_samples(
             result_samples,
             logweights;

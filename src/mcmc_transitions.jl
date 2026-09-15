@@ -149,7 +149,15 @@ function prepare_transition(transition::RAM, centres, target, ::Type{L}) where {
 end
 
 function Base.copyto!(destination::_RAMState, source::_RAMState)
-    copyto!(destination.walk, source.walk)
+    _copy_transition_arrays!(destination, source)
+    _copy_transition_counters!(destination, source)
+    return destination
+end
+
+_copy_transition_arrays!(destination::_RAMState, source::_RAMState) =
+    _copy_transition_arrays!(destination.walk, source.walk)
+function _copy_transition_counters!(destination::_RAMState, source::_RAMState)
+    _copy_transition_counters!(destination.walk, source.walk)
     destination.n_tuned = source.n_tuned
     return destination
 end
@@ -170,10 +178,20 @@ function retarget_transition(::RAM, state::_RAMState, destination)
 end
 
 function Base.copyto!(destination::_RandomWalkState, source::_RandomWalkState)
+    _copy_transition_arrays!(destination, source)
+    _copy_transition_counters!(destination, source)
+    return destination
+end
+
+function _copy_transition_arrays!(destination::_RandomWalkState, source::_RandomWalkState)
     copyto!(destination.centres, source.centres)
     copyto!(destination.factors, source.factors)
     copyto!(destination.logtargets, source.logtargets)
     copyto!(destination.accepted, source.accepted)
+    return destination
+end
+
+function _copy_transition_counters!(destination::_RandomWalkState, source::_RandomWalkState)
     destination.cache_valid = source.cache_valid
     destination.initial_evaluations = source.initial_evaluations
     destination.steps = source.steps
@@ -181,13 +199,14 @@ function Base.copyto!(destination::_RandomWalkState, source::_RandomWalkState)
 end
 
 """Return transition work and acceptance counts without exposing implementation state."""
-transition_diagnostics(state::_RandomWalkState) = (
+transition_diagnostics(state::_RandomWalkState) = _walk_diagnostics(state, sum(state.accepted))
+_walk_diagnostics(state, accepted) = (
     initial_target_evaluations=state.initial_evaluations,
     warmup_target_evaluations=0,
     production_target_evaluations=state.steps * length(state.logtargets),
     warmup_proposals=0,
     production_proposals=state.steps * length(state.logtargets),
-    accepted=sum(state.accepted),
+    accepted=accepted,
 )
 
 _transition_warmup(state::_RAMState{W,<:WarmupTuning}) where {W} = state.n_tuned
