@@ -75,6 +75,13 @@ the covariance is `nu / (nu - 2) * Sigma`. Every multivariate draw uses one
 shared radial scale, including diagonal proposals. Setting `nu = 1` gives a
 Cauchy proposal.
 
+Proposal construction, storage and arithmetic preserve the supplied `Float32`
+or `Float64` type. Construction computes the fixed dimension/degrees-of-freedom
+normalization term once, without wider intermediates. A gamma recurrence avoids
+subtracting large log-gamma values. Covariance adaptation then updates only the
+scale determinant in the working array type. Precision changes require an
+explicit conversion, such as a device configured with another element type.
+
 CUDA uses the same constructors and keeps draws and density evaluation on the
 device. General degrees of freedom use eight independent gamma candidates per
 sample. The first accepted candidate has the exact gamma law. If all candidates

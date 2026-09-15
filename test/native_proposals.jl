@@ -224,6 +224,17 @@ end
     factor = FactorStudentT(2.0, Float64[0, 0], Float64[2 0; 0.5 1.5])
     @test DensityInterface.logdensityof(factor, Float64[2, 2]) ≈
           -log(2pi) - log(3.0) - 2log1p(2 / 2)
+
+    for T in (Float32, Float64)
+        location = zeros(T, 3)
+        gaussian_limit = SphericalStudentT(inv(eps(T)), location, one(T))
+        @test DensityInterface.logdensityof(gaussian_limit, location) ≈
+              -T(3) * log(T(2) * T(pi)) / T(2) rtol=8eps(T)
+        dof = nextfloat(zero(T))
+        small_dof = SphericalStudentT(dof, location, one(T))
+        @test DensityInterface.logdensityof(small_dof, location) ≈
+              -log(T(4) * T(pi)) - log(dof) / T(2) rtol=8eps(T)
+    end
 end
 
 @testset "native Student-t validation and draws" begin

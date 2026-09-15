@@ -16,6 +16,7 @@ struct GaussianFamily <: AbstractRadialProposalFamily end
 
 struct StudentTFamily{T} <: AbstractRadialProposalFamily
     dof::T
+    logconstant::T
 end
 
 @inline _radial_logdensity(::GaussianFamily, lognormalizer, squared_radius, dimension) =
@@ -44,7 +45,10 @@ end
 _radial_lognormalizer(::GaussianFamily, ::Type{T}, dimension, logabsdet) where {T} =
     _gaussian_lognormalizer(T, dimension, logabsdet)
 _radial_lognormalizer(family::StudentTFamily, ::Type{T}, dimension, logabsdet) where {T} =
-    _student_t_lognormalizer(T, family.dof, dimension, logabsdet)
+    T(family.logconstant) - logabsdet
+_convert_radial_family(::Type{T}, family::GaussianFamily) where {T} = family
+_convert_radial_family(::Type{T}, family::StudentTFamily) where {T} =
+    StudentTFamily(T(family.dof), T(family.logconstant))
 _radial_proposal(::GaussianFamily, location, scale, lognormalizer) =
     _GaussianProposal(GaussianFamily(), location, scale, lognormalizer)
 _radial_proposal(family::StudentTFamily, location, scale, lognormalizer) =
@@ -339,54 +343,42 @@ function _validated_student_t_dof(dof, ::Type{T}) where {T}
     )
 end
 
-@inline function _positive_loggamma(value::Float64)
-    shifted = value < 1.0 ? value + 1.0 : value
-    z = shifted - 1.0
-    series = 0.99999999999980993
-    coefficients = (
-        676.5203681218851,
-        -1259.1392167224028,
-        771.32342877765313,
-        -176.61502916214059,
-        12.507343278686905,
-        -0.13857109526572012,
-        9.9843695780195716e-6,
-        1.5056327351493116e-7,
-    )
-    for index in eachindex(coefficients)
-        series += coefficients[index] / (z + Float64(index))
+# Gamma recurrence avoids subtracting large log-gammas in the supplied precision.
+# Only odd dimensions need the univariate gamma ratio. Shift it to nu >= 32,
+# then use six Stirling terms (DLMF 5.11.1), with truncation error below 3e-18.
+function _student_t_logconstant(dof::T, dimension) where {T}
+    value = -T(dimension) * log(T(2) * T(pi)) / T(2)
+    if isodd(dimension)
+        shifted = dof
+        correction = zero(T)
+        while shifted < T(32)
+            correction += shifted < one(T) ?
+                (log(shifted) + log(shifted + T(2))) / T(2) - log1p(shifted) :
+                log1p(-abs2(inv(shifted + one(T)))) / T(2)
+            shifted += T(2)
+        end
+        r = inv(shifted)
+        correction += r * evalpoly(r * r, (
+            T(-1) / T(4), T(1) / T(24), T(-1) / T(20),
+            T(17) / T(112), T(-31) / T(36), T(691) / T(88),
+        ))
+        value += correction
     end
-    shifted_sum = z + 7.5
-    result = 0.9189385332046727 +
-             (z + 0.5) * log(shifted_sum) - shifted_sum + log(series)
-    return value < 1.0 ? result - log(value) : result
-end
-
-function _student_t_lognormalizer(
-    ::Type{T},
-    dof::T,
-    dimension,
-    logabsdet::T,
-) where {T<:_NativeGaussianFloat}
-    work_dof = Float64(dof)
-    half_dimension = 0.5 * Float64(dimension)
-    value = _positive_loggamma(0.5 * (work_dof + Float64(dimension))) -
-            _positive_loggamma(0.5 * work_dof) -
-            half_dimension * log(work_dof * pi) - Float64(logabsdet)
-    return T(value)
+    offsets = (isodd(dimension) ? 1 : 0):2:(dimension - 2)
+    value += sum(offsets; init=zero(T)) do offset
+        x = T(offset)
+        x <= dof ? log1p(x / dof) : log(x) + log1p(dof / x) - log(dof)
+    end
+    return value
 end
 
 function _student_t_proposal(dof, location, scale, logabsdet)
     T = _gaussian_float_type(location)
     stored_dof = _validated_student_t_dof(dof, T)
-    lognormalizer = _student_t_lognormalizer(
-        T,
-        stored_dof,
-        _gaussian_dimension(location),
-        logabsdet,
-    )
+    logconstant = _student_t_logconstant(stored_dof, _gaussian_dimension(location))
+    lognormalizer = logconstant - logabsdet
     return _StudentTProposal(
-        StudentTFamily(stored_dof),
+        StudentTFamily(stored_dof, logconstant),
         location,
         scale,
         lognormalizer,

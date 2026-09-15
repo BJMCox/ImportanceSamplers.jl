@@ -201,10 +201,10 @@ GRAMIS requires a supplied gradient on Metal. Automatic Enzyme gradients are
 not supported by the tested Metal backend.
 
 Float32 factor Student-t proposals have also passed plain IS, static MIS,
-DM-PMC, APIS and LAIS with random-walk Metropolis, including owned-result reuse
-and resident resampling. Student-t covariance adaptation in AMIS, NPMC, CAIS
-and GRAMIS is not supported on Metal: its normalizer currently requires Float64
-inside the device kernel. Gaussian covariance adaptation does not use that path.
+DM-PMC, APIS, LAIS with random-walk Metropolis, AMIS, NPMC, CAIS and GRAMIS,
+including owned-result reuse and resident resampling. Covariance adaptation
+uses the Student-t family's fixed normalization term prepared on the CPU,
+then updates only the scale determinant on device.
 
 Metal uses 32-bit atomic failure records. This fallback needs eight bytes per
 logical sample slot plus eight bytes for its count. Successful runs read only

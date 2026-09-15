@@ -61,6 +61,13 @@ adaptation. The older Gaussian capability matrices below remain Gaussian
 reference checks; they do not imply every Student-t shape/type combination was
 hardware-tested. See [Native proposals](@ref) for the adaptation requirements.
 
+`validation/reproducers/metal_student_t.jl` checks AMIS, NPMC, CAIS and
+FirstOrderGRAMIS covariance adaptation with correlated factor Student-t proposals.
+It checks known Gaussian means and normalizers, repeated sampling and owned
+results. The NPMC case also checks explicit Float64-to-Float32 device conversion.
+Run it in an environment containing ImportanceSamplers and Metal, with Metal
+scalar indexing disabled as in the script.
+
 ## Run and record validation
 
 The release audit on 2026-09-08 checked the production source incorporated in

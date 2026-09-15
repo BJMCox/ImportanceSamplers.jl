@@ -264,20 +264,22 @@ function _copy_accelerator_algorithm(
 end
 
 function _copy_gaussian_history(device, history::_ScalarProposalHistory)
+    means = _copy_to_device(device, history.means)
     return _ScalarProposalHistory(
-        _copy_to_device(device, history.means),
+        means,
         _copy_to_device(device, history.scales),
         _copy_to_device(device, history.lognormalizers),
-        history.family,
+        _convert_radial_family(eltype(means), history.family),
     )
 end
 
 function _copy_gaussian_history(device, history::_FactorProposalHistory)
+    means = _copy_to_device(device, history.means)
     return _FactorProposalHistory(
-        _copy_to_device(device, history.means),
+        means,
         _copy_to_device(device, history.factors),
         _copy_to_device(device, history.lognormalizers),
-        history.family,
+        _convert_radial_family(eltype(means), history.family),
     )
 end
 

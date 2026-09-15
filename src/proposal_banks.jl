@@ -131,6 +131,7 @@ end
 
 struct _PackedStudentTFamily{D}
     dofs::D
+    logconstants::D
     normal_stride::Int
     uniform_stride::Int
 end
@@ -149,13 +150,15 @@ _packed_family(proposals) = _packed_family(first(proposals), proposals)
 _packed_family(::_GaussianProposal, proposals) = GaussianFamily()
 function _packed_family(::_StudentTProposal, proposals)
     dofs = [proposal.family.dof for proposal in proposals]
-    return _PackedStudentTFamily(dofs,
+    logconstants = [proposal.family.logconstant for proposal in proposals]
+    return _PackedStudentTFamily(dofs, logconstants,
         maximum(_native_normal_stride(p) - _gaussian_dimension(p.location) for p in proposals),
         maximum(_native_uniform_stride, proposals))
 end
 
 @inline _radial_family_at(family::AbstractRadialProposalFamily, slot) = family
-@inline _radial_family_at(family::_PackedStudentTFamily, slot) = StudentTFamily(family.dofs[slot])
+@inline _radial_family_at(family::_PackedStudentTFamily, slot) =
+    StudentTFamily(family.dofs[slot], family.logconstants[slot])
 
 _allocate_radial_buffers(prototype, ::GaussianFamily, count) = nothing
 _radial_normal_stride(family::_PackedStudentTFamily) = family.normal_stride
