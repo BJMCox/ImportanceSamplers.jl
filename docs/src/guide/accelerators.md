@@ -265,6 +265,52 @@ not enable the unvalidated cooperative CPU paths. Other Reactant CPU adaptive
 methods and non-NVIDIA accelerators remain unvalidated. Metal GRAMIS still
 requires an explicit gradient.
 
+## Profile data-heavy GRAMIS targets
+
+`benchmark/logistic_gramis.jl` profiles the logistic-regression example with
+Float64 proposals, resident data and a supplied gradient. It reports preparation,
+the first sampling call, warmed BenchmarkTools timings, CUDA/CUPTI device
+activities and a separate Julia host profile. Warm runs retain adaptation;
+they are not fresh-run accuracy comparisons.
+
+Instantiate the `benchmark` environment, then run this from the repository root:
+
+```julia
+using CUDA, MLDataDevices, Reactant
+include("benchmark/logistic_gramis.jl")
+
+device = MLDataDevices.with_eltype(MLDataDevices.CUDADevice(), nothing)
+
+# For Reactant, use these two lines instead in a fresh Julia process:
+# Reactant.set_default_backend("gpu")
+# device = MLDataDevices.with_eltype(MLDataDevices.ReactantDevice(), nothing)
+report = LogisticGRAMISBenchmark.measure(device; observations=1000, round_size=65536)
+```
+
+Repeat with 50 observations and 262144 samples per round. The profile uses eight
+proposals and four rounds. It disables scalar CUDA indexing. No target or gradient
+evaluation copies the observations to the host. Keep instrumented device times
+separate from uninstrumented wall times when interpreting the results.
+
+An A100 PCIe 40GB run on Julia 1.13.0, CUDA 6.2.2 and Reactant 0.2.285 gave
+these warm medians, using 20 trials and each backend's default factor policy:
+
+| Observations | Samples/round | Native CUDA (ms) | Reactant (ms) |
+| --- | --- | --- | --- |
+| 50 | 65536 | 12.98 | 29.98 |
+| 50 | 262144 | 21.88 | 34.79 |
+| 1000 | 65536 | 75.00 | 67.50 |
+| 1000 | 262144 | 95.27 | 78.06 |
+
+The shared host was under load. Reactant preparation took 39–251 seconds across
+these cases, including first-use compilation. No Reactant compiler frames were
+sampled during the warm host profiles. This is not a universal backend ranking.
+
+For 1000 observations, the four backtracking kernels took about 55.4 ms on
+native CUDA and 28.3–29.8 ms through Reactant. Each proposal's GPU thread still
+evaluates the scalar target's observation loop and backtracking trials serially.
+Increasing sample count amortizes that work but does not parallelize it.
+
 ## Backend documentation and reproducer
 
 - [KernelAbstractions quickstart](https://juliagpu.github.io/KernelAbstractions.jl/stable/quickstart/)
