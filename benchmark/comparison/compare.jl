@@ -174,25 +174,32 @@ function print_table(report; io=stdout, accuracy=false)
     labels = filter(report["method_order"]) do label
         accuracy || all(name->haskey(first(report["models"][name]["runs"][label]),"ess"),names)
     end
-    headers = ["$(replace(name,'_'=>' ')) ($(report["models"][name]["dimension"]))" for name in names]
+    scores = map(Iterators.product(labels,names)) do (label,name)
+        rows = report["models"][name]["runs"][label]
+        accuracy ? rate(rows,report["models"][name]["reference"]) :
+            mean(r["ess"] for r in rows)/mean(r["seconds"] for r in rows)
+    end
+    best = maximum(scores; dims=1)
+    headers = ["$(uppercasefirst(replace(name,'_'=>' '))) ($(report["models"][name]["dimension"]))" for name in names]
     println(io,"| Sampler / device | ",join(headers," | ")," |")
     println(io,"|:--|",join(fill("--:",length(names)),"|"),"|")
-    for label in labels
-        cells = map(names) do name
+    for (i,label) in enumerate(labels)
+        cells = map(eachindex(names)) do j
+            name = names[j]
             rows = report["models"][name]["runs"][label]
-            value = accuracy ? rate(rows,report["models"][name]["reference"]) :
-                    mean(r["ess"] for r in rows)/mean(r["seconds"] for r in rows)
             mark = (any(r->r["divergences"]>0,rows) ? "†" : "") *
                    (any(r->get(r,"max_rhat",0.0)>1.01,rows) ? "‡" : "")
             if haskey(first(rows),"ess") && !haskey(first(rows),"max_rhat")
                 maximum(r["ess"] for r in rows) > 10minimum(r["ess"] for r in rows) && (mark *= "§")
             end
-            @sprintf("%.2g%s",value,mark)
+            value = @sprintf("%.2g",scores[i,j])
+            (scores[i,j] == best[j] ? "**$value**" : value) * mark
         end
         println(io,"| ",label," | ",join(cells," | ")," |")
     end
     println(io,accuracy ? "\nAccuracy-based ESS/s estimates posterior-mean precision per unit time." :
         "\n\\* ESS denotes weight ESS for importance sampling and minimum bulk ESS across parameters for MCMC. These diagnostics do not define an equal-accuracy comparison.")
+    println(io,"\nBold denotes the highest measured rate in each model column.")
     println(io,"\n† At least one retained NUTS transition diverged. ‡ At least one run had maximum R-hat above 1.01. § Weight ESS varied by more than a factor of ten across seeds.")
     println(io,"\nElapsed time includes initialization, warmup or adaptation, sampling, and posterior-mean estimation. Compilation and post-run diagnostics are excluded.")
     println(io,"\nJulia ",report["metadata"]["julia"],". ",report["metadata"]["cpu"],
@@ -202,7 +209,7 @@ function print_table(report; io=stdout, accuracy=false)
         ". MCMC samples: ",report["mcmc_samples"],". MCMC chains: ",get(report,"mcmc_chains",report["metadata"]["threads"]),
         ". MCMC warmup: 1024 per chain. Ensemble warmup: ",get(report,"ensemble_warmup",256)," sweeps. Adaptive IS: four rounds.")
     println(io,"\n| Model | Sampler / device | Mean seconds | ",
-        accuracy ? "Accuracy ESS/s, 95% bootstrap interval" : "ESS/s range across seeds | Max R-hat | Max mean error / posterior SD",
+        accuracy ? "Accuracy ESS/s, 95% bootstrap interval" : "ESS/s range across seeds | Max R-hat | Max pooled-mean error / posterior SD",
         " |\n|:--|:--|--:|--:|",accuracy ? "" : "--:|--:|")
     for name in names, label in labels
         rows = report["models"][name]["runs"][label]

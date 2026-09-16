@@ -4,7 +4,7 @@ From the repository root, use Julia 1.13 and the committed manifest:
 
 ```sh
 julia --project=benchmark/comparison -e 'using Pkg; Pkg.instantiate()'
-julia --threads=8 --project=benchmark/comparison benchmark/comparison/compare.jl --cuda
+julia --threads=16 --project=benchmark/comparison benchmark/comparison/compare.jl --cuda
 ```
 
 Omit `--cuda` for CPU only. CUDA is a benchmark dependency, not a requirement
@@ -15,7 +15,7 @@ an existing result unless `--resume` is given. Resume requires the same package
 revision, manifest, hardware, thread count, and sample budgets:
 
 ```sh
-julia --threads=8 --project=benchmark/comparison benchmark/comparison/compare.jl --cuda --resume
+julia --threads=16 --project=benchmark/comparison benchmark/comparison/compare.jl --cuda --resume
 ```
 
 Print a saved result without sampling again:
@@ -24,19 +24,25 @@ Print a saved result without sampling again:
 julia --project=benchmark/comparison benchmark/comparison/compare.jl --report benchmark/comparison/results.toml
 ```
 
-The default uses five timed seeds per method and model. Accuracy checks use
-the analytic linear-regression posterior and 8,192 reference draws per CPU
-chain for the other models. Reference runs are untimed and use different seeds.
+The default uses three timed seeds per method and model. Each MCMC run retains
+16,384 draws from each of 16 independent chains. Each importance-sampling run
+returns 262,144 weighted draws. Accuracy checks use the analytic linear-regression
+posterior and eight reference chains of 8,192 draws for the other models.
+Reference runs are untimed and use different seeds.
 Use a quiet machine. BLAS and FFTW use one thread. Julia uses the thread count
-given at launch. CPU MCMC runs one independent chain per Julia thread.
+given at launch. The 16 CPU MCMC chains use Julia's default thread pool.
 
-The headline is weight ESS/s for IS and AMIS, and minimum bulk ESS/s across
-parameters for NUTS, MH, and slice sampling. These are different diagnostics.
+The headline is weight ESS/s for IS, AMIS, DM-PMC, CAIS, and LAIS-RAM, and
+minimum bulk ESS/s across parameters for NUTS, MH, and slice sampling.
+These are different diagnostics.
 The report also prints R-hat, divergences, posterior-mean error, and timing ranges.
 EnsembleMCMC's coupled walkers appear in accuracy checks, not the chain-ESS table.
 
-The [published report](results-2026-09-16.md) comes from `results-2026-09-16.toml`. The earlier,
-larger accuracy run is retained in `accuracy-2026-09-16.toml`. Print its separate
+The [published report](results-2026-09-16-long.md) comes from `results-2026-09-16-long.toml`.
+Bold denotes the highest measured rate per model. The measured benchmark source
+is retained at commit `11dbb99`. Later table-formatting changes do not alter sampling.
+The earlier short-chain results remain in `results-2026-09-16.toml`.
+The earlier, larger accuracy run is retained in `accuracy-2026-09-16.toml`. Print its separate
 accuracy-based comparison with:
 
 ```sh

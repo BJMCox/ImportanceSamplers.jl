@@ -1,16 +1,16 @@
 # Sampler benchmarks
 
 The [reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/README.md)
-compares plain IS and AMIS with AdvancedHMC NUTS, AdvancedMH random-walk MH,
-SliceSampling, and EnsembleMCMC differential evolution. It also measures IS
-and AMIS on CUDA. The environment is separate from the package and docs
-dependencies. Its committed manifest pins package versions, including the
+compares plain IS, AMIS, DM-PMC, CAIS, and LAIS-RAM with AdvancedHMC NUTS,
+AdvancedMH random-walk MH, SliceSampling, and EnsembleMCMC differential evolution.
+It measures all five importance samplers on CPU and CUDA. The environment is
+separate from the package and docs dependencies. Its committed manifest pins package versions, including the
 EnsembleMCMC source revision.
 
-The [recorded report](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/results-2026-09-16.md)
+The [recorded report](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/results-2026-09-16-long.md)
 contains the ESS/s table, per-seed ranges, timings, R-hat, and mean errors.
-MH has R-hat above 1.01 at this budget. Plain IS has unstable weights on eight
-schools. Neither result is filtered out of the comparison.
+Symbol footnotes identify divergences, R-hat warnings, and large variation in
+weight ESS. The report retains all measured configurations.
 
 ## Models
 
@@ -43,34 +43,38 @@ half-Cauchy-prior variant of that model.
 
 The README reports conventional ESS divided by elapsed time:
 
-- IS and AMIS use weight ESS, ``1/\sum_i \bar w_i^2``, from final normalized weights.
+- Importance samplers use weight ESS, ``1/\sum_i \bar w_i^2``, from final normalized weights.
 - NUTS, MH, and slice sampling use the smallest rank-normalized bulk ESS across
   parameters, computed by MCMCDiagnosticTools from independent CPU chains.
 
-Each cell is mean ESS divided by mean elapsed time across five seeds. The full
+Each cell is mean ESS divided by mean elapsed time across three seeds. The full
 report includes the per-seed ESS/s range and maximum R-hat. R-hat above 1.01
-warns of incomplete mixing. NUTS runs with divergences are labelled in the
-headline table. ESS and R-hat calculations run outside the timing interval.
+warns of incomplete mixing. Daggers mark NUTS divergences and double daggers mark
+R-hat above 1.01. Section signs mark a weight-ESS range exceeding a factor of ten.
+ESS and R-hat calculations run outside the timing interval.
+Bold denotes the highest measured rate per model, selected before rounding.
 
 These ESS definitions are **different diagnostics, not a common accuracy score**.
 Weight ESS measures weight concentration. It does not detect missed modes or
-estimator bias, and it ignores dependence from AMIS adaptation. Bulk ESS measures
-chain mixing for each parameter. Neither guarantees accuracy for an arbitrary
+estimator bias, and it ignores dependence from proposal adaptation. Bulk ESS
+measures chain mixing for each parameter. Neither guarantees accuracy for an arbitrary
 functional. EnsembleMCMC's coupled walkers are not independent chains, so it
 appears in the accuracy comparison rather than the chain-ESS table.
+Bulk ESS can exceed the retained draw count when correlations are antithetic.
 
 ## Accuracy checks
 
 The default run uses the analytic linear-regression posterior and independent
 NUTS reference runs for the other models. Each reference has 8,192 retained draws
-per CPU chain, 2,048 warmup steps, and target acceptance 0.95. References must
-have no divergences and maximum rank-normalized R-hat below 1.01. The report
-saves reference ESS and mean standard errors. Its detailed table gives the
-largest posterior-mean error, in posterior standard deviations, across parameters.
+in each of eight CPU chains, 2,048 warmup steps, and target acceptance 0.95.
+References must have no divergences and maximum rank-normalized R-hat below 1.01. The report
+saves reference ESS and mean standard errors. Its detailed table averages
+posterior-mean estimates across timed seeds, then reports the largest absolute
+error across parameters, in posterior standard deviations.
 This checks central location, not tails, modes, variances, or evidence.
 
 An earlier 20-seed accuracy run is also retained with the reproducer. Its
-references used 131,072 draws per chain. The five-seed ESS run reuses these
+references used 131,072 draws per chain. The published ESS runs reuse these
 already-computed moments. New runs use the smaller reference budget above.
 The earlier run reports a separate, common posterior-mean accuracy score:
 
@@ -96,11 +100,11 @@ The accuracy report gives 95% bootstrap intervals from 1,000 resamples of whole
 benchmark runs. It also resamples reference-chain means to account for
 reference uncertainty. The estimates remain noisy, especially with only
 20 runs. A close ranking is not evidence of a speed difference. Timed NUTS
-runs with divergences are labelled instead of receiving a headline rate.
+runs with divergences retain their measured rates and receive a dagger.
 
 ## Cost and configuration
 
-Each method runs with five independent seeds. Each timed call includes a fresh
+Each method runs with three independent seeds. Each timed call includes a fresh
 Laplace fit, sampler preparation, warmup or adaptation, sampling, and its
 posterior mean calculation. Data generation, compilation, and reference
 calculations stay outside timing. BenchmarkTools measures the calls.
@@ -111,17 +115,29 @@ and a Cholesky scale factor 1.2 times the Laplace factor. MCMC runs in the
 corresponding whitened coordinates. This is a comparison with informed
 initialisation, not prior proposals or default PPL initialisation.
 
+DM-PMC, CAIS, and LAIS-RAM use 16 equal-mass Student-t proposals with the same
+degrees of freedom and scale factors. Their centres have independent Gaussian
+offsets with scale 0.25 in Laplace-whitened coordinates. DM-PMC uses global
+resampling. CAIS uses its default covariance-ESS threshold. LAIS uses RAM upper
+transitions, initialized with covariance ``2.38^2\Sigma/d`` and 1,024 upper-only
+warmup moves. Its lower proposal scales remain fixed.
+
+This fixed-scale configuration gives low ESS for DM-PMC and LAIS-RAM on the
+32-parameter linear model. Their CPU runs average approximately 27 and 45
+effective samples from 262,144 weighted draws. Their pooled-mean errors reach
+0.19 and 0.18 posterior standard deviations. The report retains these results.
+
 | Method | Retained sample budget | Warmup or adaptation |
 |:--|--:|:--|
-| Plain IS | 65,536 | No adaptation |
-| AMIS | 65,536 | Four rounds of 16,384 samples, all retained |
-| NUTS | 8,192 across CPU chains | 1,024 warmup steps per chain, target acceptance 0.8 |
-| Random-walk MH | 8,192 across CPU chains | 1,024 discarded steps per chain, proposal covariance ``2.38^2 I/d`` |
-| Slice sampling | 8,192 across CPU chains | 1,024 discarded steps per chain, random-permutation Gibbs with stepping-out width 2 |
-| Ensemble differential evolution | At least 8,192 | ``4d`` walkers, 256 warmup sweeps, whole retained sweeps |
+| Plain IS | 262,144 | No adaptation |
+| AMIS, DM-PMC, CAIS, LAIS-RAM | 262,144 | Four rounds of 65,536 samples, all retained |
+| NUTS | 16,384 per chain, 16 chains | 1,024 warmup steps per chain, target acceptance 0.8 |
+| Random-walk MH | 16,384 per chain, 16 chains | 1,024 discarded steps per chain, proposal covariance ``2.38^2 I/d`` |
+| Slice sampling | 16,384 per chain, 16 chains | 1,024 discarded steps per chain, random-permutation Gibbs with stepping-out width 2 |
+| Ensemble differential evolution | At least 262,144 | ``4d`` walkers, 1,024 warmup sweeps, whole retained sweeps |
 
-The budgets differ deliberately. IS uses a large batch while MCMC pays for
-correlated transitions and warmup. These settings are not a search for each
+The retained sample budgets match. IS uses batches while MCMC uses correlated
+transitions and warmup. These settings are not a search for each
 method's best possible configuration. Do not interpret a large ESS/s ratio
 between these different diagnostics as an equal-accuracy speedup.
 
@@ -138,7 +154,7 @@ end-to-end timings, not isolated kernel throughput.
 
 ```sh
 julia --project=benchmark/comparison -e 'using Pkg; Pkg.instantiate()'
-julia --threads=8 --project=benchmark/comparison benchmark/comparison/compare.jl --cuda
+julia --threads=16 --project=benchmark/comparison benchmark/comparison/compare.jl --cuda
 ```
 
 Use Julia 1.13 for this pinned benchmark environment. Omit `--cuda` for CPU
@@ -151,7 +167,7 @@ Do not run timing comparisons on a busy host or accelerator.
 To print a saved table without rerunning the samplers:
 
 ```sh
-julia --project=benchmark/comparison benchmark/comparison/compare.jl --report benchmark/comparison/results-2026-09-16.toml
+julia --project=benchmark/comparison benchmark/comparison/compare.jl --report benchmark/comparison/results-2026-09-16-long.toml
 ```
 
 Use `--accuracy-report benchmark/comparison/accuracy-2026-09-16.toml` for the
@@ -160,7 +176,9 @@ runs, including ten NUTS divergences on eight schools. The reference chains
 have no divergences. Their minimum bulk ESS exceeds 677,000 and their maximum
 R-hat is below 1.00003.
 
-Measurements use an AMD EPYC 7702P with eight Julia threads and one A100-PCIE-40GB.
+Measurements use an AMD EPYC 7702P with 16 Julia threads and one A100-PCIE-40GB.
 The recorded sampler source is `ec5aeec3c59b48a2e6237a312b5bd9c909b4c107`.
 The later Julia 1.10 compatibility commit does not change these vector-model
 sampling paths. Raw files retain the exact package versions and manifest hash.
+The measured benchmark source is retained at commit `11dbb99`. Later changes
+to table formatting do not alter the sampling code.
