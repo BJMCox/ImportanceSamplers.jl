@@ -465,17 +465,27 @@ end
 
 const POPULATION_CAPABILITY_TABLE = checked_population_capability_table()
 
+# Validate repository links against this checkout. Repeated HTTP requests for
+# GitHub source pages hit rate limits even when every linked file exists.
+for (directory, _, files) in walkdir(joinpath(@__DIR__, "src")), file in files
+    endswith(file, ".md") || continue
+    for link in eachmatch(r"https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/([^\s#)]+)",
+                          read(joinpath(directory, file), String))
+        isfile(joinpath(@__DIR__, "..", link.captures[1])) ||
+            error("Missing repository link: $(link.match)")
+    end
+end
+
 makedocs(
     modules=[ImportanceSamplers],
     sitename="ImportanceSamplers.jl",
     format=Documenter.HTML(
-        prettyurls=false,
-        canonical=nothing,
-        edit_link=nothing,
-        repolink=nothing,
+        prettyurls=get(ENV, "CI", "false") == "true",
+        canonical="https://bjmcox.github.io/ImportanceSamplers.jl/",
+        edit_link="main",
+        repolink="https://github.com/BJMCox/ImportanceSamplers.jl",
     ),
     build=joinpath(@__DIR__, "build"),
-    remotes=nothing,
     pages=[
         "Home" => "index.md",
         "Methods" => [
@@ -501,13 +511,7 @@ makedocs(
     checkdocs=:exports,
     linkcheck=true,
     linkcheck_ignore=[
-        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(examples/(lais|adaptive_student_t)|test/lais|validation/reproducers/cuda_lais)\.jl$",
-        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/validation/reproducers/((cuda_)?static_mis|cuda_student_t)\.jl$",
-        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/dm_pmc|examples/(dm_pmc|numerical_integration)|validation/reproducers/(cuda_dm_pmc|dm_pmc_global))\.jl$",
-        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/amis|examples/amis|validation/reproducers/(cuda_)?amis)\.jl$",
-        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(examples/first_order_gramis|validation/reproducers/(cuda_)?first_order_gramis)\.jl$",
-        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/apis|examples/apis|validation/reproducers/cuda_apis)\.jl$",
-        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/(benchmark/cais|examples/cais|validation/reproducers/cuda_cais)\.jl$",
+        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/",
     ],
     warnonly=false,
 )

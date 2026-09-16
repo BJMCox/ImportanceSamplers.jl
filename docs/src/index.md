@@ -5,6 +5,19 @@ on CPU and documented native CUDA paths. Supply a normalized proposal, an RNG, a
 that returns an unnormalized **log density**. Results retain samples and the
 canonical raw log weights.
 
+## Installation
+
+Requires Julia 1.12 or later. Until registration, install the public repository:
+
+```julia
+using Pkg
+Pkg.add(url="https://github.com/BJMCox/ImportanceSamplers.jl.git")
+```
+
+For a local checkout, use `Pkg.develop(path="/path/to/ImportanceSamplers.jl")`.
+Accelerator packages are optional. Install and load the backend you intend to
+use. See [Accelerators](@ref) for device transfer and supported paths.
+
 ## Minimal CPU example
 
 ```jldoctest quickstart
@@ -103,3 +116,25 @@ For mathematical background, see Elvira and Martino's open-access
 [“Advances in Importance Sampling”](https://arxiv.org/abs/2102.05407) and
 Agapiou et al.'s
 [“Importance Sampling: Intrinsic Dimension and Computational Cost”](https://arxiv.org/abs/1511.06196).
+
+## Examples and local documentation
+
+The [logistic regression example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/logistic_regression.jl)
+fits an intercept and two slopes. It uses a prior pilot to fit an inflated
+Gaussian proposal, then draws independent final samples. The
+[CUDA version](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/cuda_logistic_regression.jl)
+transfers results to CPU only between the two stages and for the final summary.
+The [adaptive Student-t example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/adaptive_student_t.jl)
+explains scale versus covariance, weighted functionals, and optional CUDA transfer.
+
+Build this manual from a checkout with:
+
+```sh
+julia --project=docs -e 'using Pkg; Pkg.instantiate()'
+julia --project=docs docs/make.jl
+```
+
+Open `docs/build/index.html`. Documenter checks doctests, exported docstrings,
+and links. CI runs the CPU tests on Linux, macOS, and Windows, and publishes
+this manual from `main`. Accelerator checks remain explicit real-hardware
+validators listed in [Validation and support](@ref).
