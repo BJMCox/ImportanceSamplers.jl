@@ -70,6 +70,9 @@ The refreshed measurements record host load and CPU affinity. On Linux,
 `taskset --cpu-list` can select a fixed set of cores. No cores are reserved.
 
 CPU and GPU tables are separate. Only the highest CPU rate per model is bold.
+The separate [fitted-LAIS study](lais.md) includes full AMIS pilot costs,
+matched static controls, and the longer-run degradation case. Its named README
+rows use two fresh seeds and do not replace the main LAIS-RAM measurements.
 First-order GRAMIS-CAIS uses the same 16-proposal Student-t bank and four-round
 budget, repulsion strength 0.1, and the models' checked analytic gradients.
 The [earlier report](results-2026-09-16-long.md) remains archived. Its benchmark
@@ -111,7 +114,7 @@ not rank-normalized bulk ESS. Short ensemble histories can give noisy estimates.
 
 ## Independent width pilot
 
-The optional pilot tunes one common multiplier for the Student-t bank's existing
+The optional pilot tunes one common multiplier for the Gaussian or Student-t bank's existing
 scale factors. It preserves centres, correlation shapes, degrees of freedom,
 proposal count, and masses. Its own draw budget does not change the main
 sampler's budget or round schedule. A separate random stream supplies pilot
@@ -138,6 +141,36 @@ weight-variance criterion discussed by
 [Akyildiz and Miguez](https://arxiv.org/abs/1903.12044).
 Their exponential-family convergence results do not establish a guarantee for
 this finite Student-t mixture pilot.
+
+## Fixed Gaussian covariances
+
+[Elvira et al., section 5.3](https://victorelvira.github.io/assets/papers/elvira2017improving_pre.pdf)
+use Gaussian proposals with fixed covariances `sigma^2 * I`. Resampling changes
+their centres, not their covariances. The paper tests several widths. It does
+not prescribe an automatic covariance update or a universal bandwidth.
+
+Select this family explicitly in the comparison:
+
+```julia
+include("benchmark/comparison/compare.jl")
+settings = Dict("linear" => Dict("DM-PMC / CPU" => Dict(
+    "family" => "gaussian", "scale" => 1.0, "count" => 256, "rounds" => 4,
+)))
+SamplerComparison.compare(; selected=[1], only_methods=[:dmpmc], settings,
+    output="gaussian-dmpmc.toml")
+```
+
+Here the covariance is `scale^2 * L * L'`, where `L` is the timed Laplace factor.
+This preserves correlations and applies the isotropic bandwidth in whitened
+coordinates. It adapts the paper's setup to regression, rather than copying
+its absolute widths into coefficient units. The value above is an example,
+not a recommended bandwidth. The optional width pilot also supports this family.
+
+Omitting `family` retains Student-t proposals with eight degrees of freedom.
+Their covariance is `8/6 * scale^2 * L * L'`. Archived settings and result
+tables retain that interpretation. Family and width changes require new runs.
+The pilot fits the initial bank only. It does not prevent later centre
+adaptation from degrading the mixture approximation.
 
 ## Archived offline configuration search
 

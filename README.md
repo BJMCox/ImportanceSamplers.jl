@@ -44,6 +44,7 @@ accelerator execution.
 Effective sample size per second (ESS/s)\* for five posterior models. Parentheses
 give the number of parameters. Measurements use Float64 and include initialization,
 warmup or adaptation, sampling, and posterior-mean estimation.
+Each table lists importance samplers first, followed by other measured methods.
 
 ### CPU
 
@@ -54,15 +55,17 @@ warmup or adaptation, sampling, and posterior-mean estimation.
 | DM-PMC | 49¶ | 7.7e+03 | 1.6e+04 | 1.4e+04 | 4.8e+04 |
 | CAIS | 2e+04 | 6.7e+04 | 1.5e+05 | 1.4e+05 | 1.8e+05§ |
 | LAIS-RAM | 12¶ | 4.9e+03 | 1.2e+04 | 8.3e+03 | 7e+04 |
+| First-order GRAMIS-CAIS | 4.4e+04 | 8.3e+04 | **1.9e+05** | 1.6e+05 | 1.9e+04 |
 | AdvancedHMC NUTS | 1.5e+04 | 9e+03 | 2.1e+04 | 5e+04 | 1.3e+05† |
 | AdvancedMH RWMH | 8.5e+02‡ | 2.6e+03 | 5.2e+03 | 4.5e+03 | 1.8e+04 |
 | SliceSampling | 7.7e+02 | 1.9e+03 | 5.6e+03 | 4.4e+03 | 1.6e+05 |
 | EnsembleMCMC DE | 67‡ | 8.5e+02‡ | 1.3e+03‡ | 1.2e+03‡ | 5e+03‡ |
-| First-order GRAMIS-CAIS | 4.4e+04 | 8.3e+04 | **1.9e+05** | 1.6e+05 | 1.9e+04 |
 | EnsembleMCMC Stretch | 23‡ | 2.1e+02‡ | 4.7e+02‡ | 2.8e+02‡ | 8.6e+02‡ |
 | EnsembleMCMC snooker | 29‡ | 1.2e+02‡ | 1.5e+02‡ | 2.3e+02‡ | 4.2e+02‡ |
 
-### CUDA
+### GPU (CUDA)
+
+Only importance samplers have GPU measurements in this comparison.
 
 | Sampler | Linear (32) | Logistic (12) | Poisson (12) | Robust (13) | Eight schools (10) |
 |:--|--:|--:|--:|--:|--:|
@@ -72,6 +75,8 @@ warmup or adaptation, sampling, and posterior-mean estimation.
 | CAIS | 1.9e+05 | 2.1e+06 | 2.4e+06 | 2.9e+06 | 3.5e+05 |
 | LAIS-RAM | 4.8¶ | 7.5e+03 | 1.2e+04 | 1.4e+04 | 2.3e+05 |
 | First-order GRAMIS-CAIS | 3.6e+05 | 1.4e+06 | 2e+06 | 2.1e+06 | 1.5e+05 |
+| IS, AMIS-fitted‖ | 3.5e+05 | — | — | 1.6e+06 | — |
+| LAIS-RWM, AMIS-fitted‖ | 2.7e+05 | — | — | 1.1e+06 | — |
 
 Bold denotes the highest measured CPU ESS/s per model. GPU results appear separately.
 
@@ -89,12 +94,24 @@ sweep-average time series, not the walkers.
 ¶ At least one run exceeded a mean error of 0.2 posterior standard deviations
 or a marginal variance error of 30%. Archived rows lack variance checks.
 
-Measurements use three seeds, 16 threads on a 128-thread EPYC CPU, and one A100.
+‖ Independent 262,144-draw AMIS pilot, then 262,144 production draws, with both
+costs included. Gaussian LAIS-RWM uses 16 proposals, four rounds, and no extra
+MCMC warmup. Two seeds per model, 128 host threads, and the shared A100.
+Dashes denote unmeasured cases. [Protocol, results, and reproducer](benchmark/comparison/lais.md).
+
+The main comparison uses three seeds, 16 threads on a 128-thread EPYC CPU, and one A100.
 Independent-chain MCMC retains 16,384 draws per chain in 16 chains. Importance
 samplers retain 262,144 draws. Ensemble methods retain at least that count in
 whole sweeps. DM-PMC and LAIS include an independent 4,096-draw width pilot.
 Compilation and post-run diagnostics are excluded. Unchanged rows reuse archived
 measurements. The report records each row's source and timing protocol.
+
+The linear posterior is Gaussian, so a fitted Gaussian proposal leaves little
+room for adaptation to improve weight ESS. Follow-up CUDA runs used an independent
+AMIS fit and short Gaussian LAIS-RWM runs without extra MCMC warmup. Throughput
+improved, but matched static IS remained faster on linear and robust regression.
+Longer LAIS runs degraded the fitted proposal. These findings concern a different
+configuration from the LAIS-RAM rows above, which remain for comparison.
 
 [Reproducer and pinned versions](benchmark/comparison/README.md) ·
 [Timings, ranges, and accuracy checks](benchmark/comparison/results-2026-09-16-comparison.md) ·

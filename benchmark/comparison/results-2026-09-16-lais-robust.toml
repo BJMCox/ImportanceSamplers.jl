@@ -1,0 +1,521 @@
+model = "robust"
+draws = 262144
+pilot_draws = 262144
+transition_sha256 = "f284d8b338cbc396b026589ce58602b2d79a75557bd50dd139410af0586a134d"
+pilot_rounds = 8
+probe_sha256 = "ec13fe024c175ff2e490af342fba6b277d93c1b4b43f95d6c9fae67088fb47f8"
+
+[[runs]]
+max_weight = 3.6207824565080035e-5
+variance = [0.0012360284361364045, 0.003476487139973854, 0.004777225940689312, 0.00564206309569894, 0.005965850320529094, 0.004771020991567453, 0.0054178024138532435, 0.005273306117645171, 0.004926996344406626, 0.005041296682197902, 0.004979636379267123, 0.003212997942243538, 0.0017238158961140771]
+ess_per_second = 1.699568607359225e6
+round_ess = []
+estimate = [0.05759435579056041, -0.020317626032969275, -0.07851201285018872, -0.15176419183198386, 0.10436625281551985, 0.0764777414150794, 0.11965353603396311, -0.04162044781601038, -0.17522124611658646, -0.08992086619713689, 0.02815005158085558, 0.10863132394453508, -0.4133002653835928]
+total_seconds = 0.15092467699999998
+variance_error = 0.0075615785381861755
+mean_error = 0.0033074136539066913
+draws = 262144
+accurate = true
+ess = 256506.8431050308
+seed = 12201
+
+    [runs.main_timing]
+    times = [0.015946142, 0.043767223, 0.015979092]
+    seconds = 0.015979092
+    host_allocations = 915
+    host_bytes = 29459984
+
+    [runs.configuration]
+    family = "gaussian"
+    rounds = 1
+    warmup = 0
+    upper = "static"
+    count = 1
+[[runs]]
+max_weight = 0.00020828478703834486
+variance = [0.0012385715615247303, 0.003494477856925357, 0.004801886917686865, 0.0056119212081620785, 0.005921279416795861, 0.004804422281075336, 0.005422239204786363, 0.005301567365991096, 0.004929059623086161, 0.0050333616240219575, 0.004937058401924466, 0.0031928309983429194, 0.0017305182808166448]
+ess_per_second = 33536.512304695934
+round_ess = [10130.01313082303, 10397.30147415691, 9855.006210418658, 9542.502347932768]
+estimate = [0.05736669196087054, -0.020532192719541677, -0.07817971082675797, -0.1518007388083956, 0.10420158361201179, 0.0762326143362077, 0.11982437725603286, -0.04115072370131532, -0.17520573312815638, -0.09041892898738922, 0.028445227895610877, 0.10865372157082757, -0.4132679293075203]
+variance_error = 0.008533504227779876
+draws = 262144
+accurate = true
+ess = 39895.45062212676
+target_evaluations = 525568
+seed = 12201
+centre_mean_square = 0.9948268250053354
+centre_variance = 0.9906968036999232
+total_seconds = 1.189612392
+mean_error = 0.008123255174499907
+acceptance = 0.2534540673638132
+
+    [runs.main_timing]
+    times = [1.063643571, 1.037355159, 1.054666807]
+    seconds = 1.054666807
+    host_allocations = 177474
+    host_bytes = 61535840
+
+    [runs.configuration]
+    family = "student_t"
+    rounds = 4
+    warmup = 1024
+    upper = "ram"
+    count = 256
+
+    [runs.transition]
+    initial_target_evaluations = 256
+    warmup_proposals = 262144
+    production_target_evaluations = 1024
+    production_proposals = 1024
+    accepted = 66701
+    warmup_target_evaluations = 262144
+[[runs]]
+max_weight = 2.066133954877108e-5
+variance = [0.0012361933568657976, 0.003466163142357021, 0.004789605765848367, 0.005659155081372936, 0.00594532198537427, 0.004786256939055067, 0.005464135889353759, 0.005311295896930282, 0.004925255448810102, 0.005044638345239713, 0.004945629048302242, 0.0032001511599246304, 0.0017268458016752072]
+ess_per_second = 1.1364369268168851e6
+round_ess = [64131.34957963717, 62966.358867886425, 58310.2004951178, 56589.40153299908]
+estimate = [0.05774356584162736, -0.020212024846814117, -0.07875802462488903, -0.1516384615554888, 0.10437101903082702, 0.07637382909142583, 0.11967113635156255, -0.04126164749442365, -0.17549734270241213, -0.08979259310846531, 0.028165372737766887, 0.10837027404375954, -0.41339268602299906]
+variance_error = 0.007560084838429626
+draws = 262144
+accurate = true
+ess = 241319.4869047129
+target_evaluations = 262224
+seed = 12201
+centre_mean_square = 0.0926854544405315
+centre_variance = 0.0853283831858041
+total_seconds = 0.21234745299999996
+mean_error = 0.0038069346342415175
+acceptance = 0.078125
+
+    [runs.main_timing]
+    times = [0.077401868, 0.050001441, 0.097968188]
+    seconds = 0.077401868
+    host_allocations = 13306
+    host_bytes = 41815880
+
+    [runs.configuration]
+    family = "gaussian"
+    rounds = 4
+    warmup = 0
+    upper = "rwm"
+    count = 16
+
+    [runs.transition]
+    initial_target_evaluations = 16
+    warmup_proposals = 0
+    production_target_evaluations = 64
+    production_proposals = 64
+    accepted = 5
+    warmup_target_evaluations = 0
+[[runs]]
+max_weight = 1.5342072482306852e-5
+variance = [0.0012343002842932136, 0.003468283308324236, 0.0047726806080947235, 0.005673404151155987, 0.005978224474351608, 0.004800263626023981, 0.005445493631320942, 0.005316440420540482, 0.004908819606423684, 0.005036586547266086, 0.004918993470363051, 0.0031992539637511475, 0.0017338224335449197]
+ess_per_second = 586731.4359479675
+round_ess = [47110.221577686985, 43431.89248756545, 42482.5942643879, 42266.81410357237]
+estimate = [0.057707866462809926, -0.020088487921633515, -0.07868682647897822, -0.15162511939359655, 0.10444298267248484, 0.07648133849642184, 0.11934414075366001, -0.04140194304001891, -0.17532303289112405, -0.08990353415385904, 0.028457543158075967, 0.1082159496826448, -0.41343836775460946]
+variance_error = 0.009857114656365296
+draws = 262144
+accurate = true
+ess = 174994.79762180542
+target_evaluations = 262224
+seed = 12201
+centre_mean_square = 0.10846386912777166
+centre_variance = 0.10480792623118282
+total_seconds = 0.298253659
+mean_error = 0.005290553093095578
+acceptance = 0.109375
+
+    [runs.main_timing]
+    times = [0.163308074, 0.067360061, 0.213135664]
+    seconds = 0.163308074
+    host_allocations = 14211
+    host_bytes = 50277576
+
+    [runs.configuration]
+    family = "student_t"
+    rounds = 4
+    warmup = 0
+    upper = "rwm"
+    count = 16
+
+    [runs.transition]
+    initial_target_evaluations = 16
+    warmup_proposals = 0
+    production_target_evaluations = 64
+    production_proposals = 64
+    accepted = 7
+    warmup_target_evaluations = 0
+[[runs]]
+max_weight = 2.9504156148499323e-5
+variance = [0.0012378623847514227, 0.0034773302395070455, 0.004785149456434729, 0.00567076551032078, 0.00597824930371957, 0.004783231725044739, 0.005448485986526459, 0.005357238934520555, 0.004942508008552055, 0.005049001239654074, 0.004982225531746402, 0.003213031181989859, 0.0017326875529022903]
+ess_per_second = 1.6001112509899181e6
+round_ess = []
+estimate = [0.057654733719152806, -0.020334495378903333, -0.07855202223648652, -0.1516471542996351, 0.10443976818268724, 0.07639870759327454, 0.11957264206663241, -0.041554630037031484, -0.17507090919305052, -0.09019739257137863, 0.02822815096528244, 0.1086796658995791, -0.413296896727895]
+total_seconds = 0.16028417599999997
+variance_error = 0.011405440768275321
+mean_error = 0.0029211428365466634
+draws = 262144
+accurate = true
+ess = 256472.51337324816
+seed = 12202
+
+    [runs.main_timing]
+    times = [0.037505724, 0.014010107, 0.013207727]
+    seconds = 0.014010107
+    host_allocations = 915
+    host_bytes = 29459984
+
+    [runs.configuration]
+    family = "gaussian"
+    rounds = 1
+    warmup = 0
+    upper = "static"
+    count = 1
+[[runs]]
+max_weight = 0.0002534930215905701
+variance = [0.001236945226304456, 0.00345162446204781, 0.004769491629094177, 0.005642582983371456, 0.005980357402586741, 0.004763621929604092, 0.005450833800854148, 0.005314451273026983, 0.004936223207440412, 0.005029920161162435, 0.004909056516124288, 0.0031797310205979885, 0.0017177723082946324]
+ess_per_second = 34551.90812960255
+round_ess = [10480.05343131177, 9947.776445039464, 10615.948068726042, 10278.401937129733]
+estimate = [0.057692556874909456, -0.020162899865295028, -0.07905812899951054, -0.1513286145751013, 0.1042867719640144, 0.07669368804729604, 0.11950492819709826, -0.04135932984849993, -0.17560022591360716, -0.08929963277728908, 0.027555729718036135, 0.10852545820329224, -0.41345562815474496]
+variance_error = 0.011857321528111808
+draws = 262144
+accurate = true
+ess = 41291.65146017085
+target_evaluations = 525568
+seed = 12202
+centre_mean_square = 1.0060917281534492
+centre_variance = 1.0046398579578335
+total_seconds = 1.195061393
+mean_error = 0.011142019822503112
+acceptance = 0.2566269455252918
+
+    [runs.main_timing]
+    times = [1.048787324, 1.024134222, 1.05952617]
+    seconds = 1.048787324
+    host_allocations = 177474
+    host_bytes = 61539600
+
+    [runs.configuration]
+    family = "student_t"
+    rounds = 4
+    warmup = 1024
+    upper = "ram"
+    count = 256
+
+    [runs.transition]
+    initial_target_evaluations = 256
+    warmup_proposals = 262144
+    production_target_evaluations = 1024
+    production_proposals = 1024
+    accepted = 67536
+    warmup_target_evaluations = 262144
+[[runs]]
+max_weight = 2.268024877769484e-5
+variance = [0.0012325403506023014, 0.003469773699244649, 0.004731106784856812, 0.00561947686803349, 0.00598009353480688, 0.004832960603467193, 0.005430001673857958, 0.005291011735116167, 0.004919661192149911, 0.005015536158615124, 0.004940075427543292, 0.0032035228232583004, 0.0017352522573489358]
+ess_per_second = 1.1348596470952255e6
+round_ess = [61305.68861770697, 57323.32562632663, 55410.46817667577, 51955.31372182761]
+estimate = [0.057752658137951884, -0.020159926948186156, -0.07865549572333869, -0.15162765626965208, 0.10415555858332665, 0.076706784606003, 0.11939576611218544, -0.04116287232157772, -0.1754458191422995, -0.09005115817822355, 0.0284730862644921, 0.10849157642659761, -0.41357166517280725]
+variance_error = 0.01050986412479471
+draws = 262144
+accurate = true
+ess = 225201.63688862897
+target_evaluations = 262224
+seed = 12202
+centre_mean_square = 0.1424083261551774
+centre_variance = 0.1324190212199197
+total_seconds = 0.19844007799999996
+mean_error = 0.005080347770353348
+acceptance = 0.109375
+
+    [runs.main_timing]
+    times = [0.052166009, 0.030807969, 0.055264799]
+    seconds = 0.052166009
+    host_allocations = 13306
+    host_bytes = 41815704
+
+    [runs.configuration]
+    family = "gaussian"
+    rounds = 4
+    warmup = 0
+    upper = "rwm"
+    count = 16
+
+    [runs.transition]
+    initial_target_evaluations = 16
+    warmup_proposals = 0
+    production_target_evaluations = 64
+    production_proposals = 64
+    accepted = 7
+    warmup_target_evaluations = 0
+[[runs]]
+max_weight = 1.4226763511834876e-5
+variance = [0.0012351435000000726, 0.0034445060408637373, 0.004759559580176794, 0.005625971295410174, 0.005966086220517035, 0.004788608864922217, 0.005481129335911902, 0.0053484340000273176, 0.004921873947535372, 0.005026709343863424, 0.00496244439710293, 0.003218346842739342, 0.0017352860272399784]
+ess_per_second = 897774.5735705125
+round_ess = [45472.55106633938, 45490.17576141645, 45464.93569027467, 44408.524076518115]
+estimate = [0.05774352642067724, -0.020111393160472207, -0.0788490766228725, -0.15153985902694553, 0.10422369743527717, 0.07653009133455164, 0.11970470799722571, -0.04153977454378159, -0.17536765159646117, -0.09001708035571108, 0.028369964599101388, 0.10835573777320441, -0.4134784517056436]
+variance_error = 0.010693593741306628
+draws = 262144
+accurate = true
+ess = 180814.21861957695
+target_evaluations = 262224
+seed = 12202
+centre_mean_square = 0.06626343958057304
+centre_variance = 0.06308805975843589
+total_seconds = 0.20140269499999996
+mean_error = 0.0029564546746156718
+acceptance = 0.0625
+
+    [runs.main_timing]
+    times = [0.053378994, 0.055128626, 0.206039764]
+    seconds = 0.055128626
+    host_allocations = 14211
+    host_bytes = 50277576
+
+    [runs.configuration]
+    family = "student_t"
+    rounds = 4
+    warmup = 0
+    upper = "rwm"
+    count = 16
+
+    [runs.transition]
+    initial_target_evaluations = 16
+    warmup_proposals = 0
+    production_target_evaluations = 64
+    production_proposals = 64
+    accepted = 4
+    warmup_target_evaluations = 0
+
+[metadata]
+manifest_sha256 = "e48da7e1ce3825329d34ee837e045c7e262c5a6116c082b56e3143d6870fc663"
+julia = "1.13.0"
+device = "NVIDIA A100-PCIE-40GB"
+cpu = "AMD EPYC 7702P 64-Core Processor"
+threads = 128
+blas_threads = 1
+
+    [metadata.source_sha256]
+    "src/methods/amis.jl" = "65fe57b5ddb12db6631e4ea789451f4d0926dff54d10ace222a786af4b8ed68d"
+    "WARMUP_POPULATION_PROBE.jl" = "3c7a629b87d44a961d4e6af4a07a32b77e5590a51c222e6838a235ac9630074e"
+    "src/methods/dm_pmc.jl" = "462716beddbc0919ee6e074eb42ad62bc14a6c9862324f1e48f5b5d9fb6c3858"
+    "src/methods/lais.jl" = "ce32cefffc50760e845cb71ad60109b8cda4f492053eaaada0b4205b8d47b814"
+    "benchmark/comparison/models.jl" = "809a03c3ca3f8658de7ac6987c153fd21649a3c46956861cbb1c59d7f2ae2573"
+
+    [metadata.versions]
+    StatsAPI = "1.8.0"
+    cuRAND = "6.4.0"
+    DataStructures = "0.19.6"
+    CUDA_Driver_jll = "13.3.4+0"
+    LoggingExtras = "1.2.0"
+    Atomix = "1.2.1"
+    LibCURL = "1.0.0"
+    ArgTools = "1.1.2"
+    ProgressMeter = "1.11.0"
+    CommonSolve = "0.2.14"
+    HashArrayMappedTries = "0.2.0"
+    Requires = "1.3.1"
+    DifferentiationInterface = "0.7.21"
+    GPUArrays = "11.5.14"
+    NLSolversBase = "8.0.1"
+    Future = "1.11.0"
+    LibGit2 = "1.11.0"
+    CUDACore = "6.4.0"
+    JSON = "1.8.0"
+    InverseFunctions = "0.1.17"
+    TOML = "1.0.3"
+    FiniteDiff = "2.33.0"
+    oneTBB_jll = "2022.3.0+0"
+    Base64 = "1.11.0"
+    NVTX_jll = "3.2.2+0"
+    Reexport = "1.2.2"
+    StaticArraysCore = "1.4.4"
+    TerminalLoggers = "0.1.8"
+    Functors = "0.5.3"
+    Printf = "1.11.0"
+    ArrayInterface = "7.30.2"
+    Tar = "1.10.0"
+    Adapt = "4.7.1"
+    NVTX = "1.0.3"
+    Roots = "3.0.8"
+    ScientificTypesBase = "3.1.0"
+    UnsafeAtomics = "0.3.2"
+    MLJModelInterface = "1.12.1"
+    PtrArrays = "1.4.0"
+    LibTracyClient_jll = "0.13.1+0"
+    ADTypes = "1.24.0"
+    JLLWrappers = "1.8.0"
+    LLVM = "9.13.1"
+    AcceleratedKernels = "0.4.3"
+    LogDensityProblems = "2.2.0"
+    BFloat16s = "0.6.2"
+    MozillaCACerts_jll = "2026.8.13"
+    SpecialFunctions = "2.9.0"
+    StatsFuns = "2.2.1"
+    FileWatching = "1.11.0"
+    ForwardDiff = "1.4.6"
+    Parsers = "3.0.0"
+    Rmath_jll = "0.5.2+0"
+    RandomNumbers = "1.6.0"
+    CUDA_Runtime_Discovery = "2.1.1"
+    LibCURL_jll = "8.18.0+1"
+    JuliaSyntaxHighlighting = "1.12.0"
+    LeftChildRightSiblingTrees = "0.3.0"
+    Sockets = "1.11.0"
+    Random = "1.11.0"
+    StatisticalTraits = "3.5.0"
+    Preferences = "1.6.0"
+    AdvancedHMC = "0.8.7"
+    OpenLibm_jll = "0.8.7+0"
+    Optim = "2.3.2"
+    Scratch = "1.3.0"
+    Setfield = "1.1.2"
+    InitialValues = "0.3.1"
+    Unicode = "1.11.0"
+    AbstractFFTs = "1.5.0"
+    SciMLPublic = "1.3.0"
+    GPUArraysCore = "0.2.0"
+    PrecompileTools = "1.3.4"
+    tree_sitter_gcn_jll = "0.1.0+0"
+    OpenBLAS_jll = "0.3.30+0"
+    CUDATools = "6.4.0"
+    JuliaNVTXCallbacks_jll = "0.2.1+0"
+    StatsBase = "0.34.13"
+    nghttp2_jll = "1.67.1+0"
+    TableTraits = "1.0.1"
+    LMDB_jll = "1.0.0+0"
+    DensityInterface = "0.4.0"
+    Logging = "1.11.0"
+    SHA = "1.0.0"
+    QuadGK = "2.11.3"
+    LLVMExtra_jll = "0.0.47+0"
+    IteratorInterfaceExtensions = "1.0.0"
+    FFTW = "1.10.0"
+    PositiveFactorizations = "0.2.4"
+    DiffRules = "1.16.0"
+    StaticArrays = "1.9.20"
+    tree_sitter_ptx_jll = "0.1.0+0"
+    Crayons = "4.2.0"
+    InteractiveUtils = "1.11.0"
+    AbstractTrees = "0.4.5"
+    LibSSH2_jll = "1.11.103+0"
+    Profile = "1.11.0"
+    SuiteSparse_jll = "7.10.1+0"
+    Compat = "4.18.1"
+    OpenSSL_jll = "3.5.6+0"
+    Missings = "1.2.0"
+    CUDA = "6.4.0"
+    ImportanceSamplers = "0.0.1"
+    Statistics = "1.11.5"
+    SortingAlgorithms = "1.2.3"
+    MacroTools = "0.5.16"
+    SliceSampling = "0.7.12"
+    Pkg = "1.13.0"
+    ArgCheck = "2.5.0"
+    Libdl = "1.11.0"
+    demumble_jll = "1.3.0+0"
+    Zlib_jll = "1.3.1+2"
+    libblastrampoline_jll = "5.15.0+0"
+    tree_sitter_llvm_jll = "1.1.0+0"
+    Markdown = "1.11.0"
+    LinearAlgebra = "1.13.0"
+    cuSPARSE = "6.4.0"
+    ScopedValues = "1.6.2"
+    Tables = "1.14.0"
+    Tracy = "0.1.6"
+    LogDensityProblemsAD = "1.13.1"
+    StringManipulation = "0.5.0"
+    Test = "1.11.0"
+    PrettyTables = "3.4.8"
+    cuBLAS = "6.4.0"
+    IntelOpenMP_jll = "2025.2.0+0"
+    OpenSpecFun_jll = "0.5.6+0"
+    BenchmarkTools = "1.8.0"
+    AdvancedMH = "0.8.10"
+    SparseArrays = "1.13.0"
+    Artifacts = "1.11.0"
+    LogExpFunctions = "1.0.1"
+    NetworkOptions = "1.3.0"
+    NVPTX_LLVM_Backend_jll = "23.1.1+3"
+    REPL = "1.11.0"
+    Accessors = "0.1.45"
+    OrderedCollections = "2.0.1"
+    cuFFT = "6.4.0"
+    FillArrays = "1.17.0"
+    DataValueInterfaces = "1.0.0"
+    HypergeometricFunctions = "0.3.30"
+    Zstd_jll = "1.5.7+1"
+    ProgressLogging = "0.1.6"
+    LineSearches = "7.8.2"
+    CompilerSupportLibraries_jll = "1.5.5+2"
+    CUDA_Runtime_jll = "0.25.0+0"
+    PCRE2_jll = "10.46.0+0"
+    EnumX = "1.0.7"
+    GPUCompiler = "2.8.1"
+    AliasTables = "1.1.3"
+    LaTeXStrings = "1.4.1"
+    p7zip_jll = "17.8.2+0"
+    EnsembleMCMC = "0.0.1"
+    CUPTI = "6.4.0"
+    Random123 = "1.7.1"
+    GPUToolbox = "3.0.0"
+    Distributions = "0.25.131"
+    Dates = "1.11.0"
+    IrrationalConstants = "0.2.6"
+    LMDB = "3.0.1"
+    FFTW_jll = "3.3.12+0"
+    PDMats = "0.11.41"
+    MKL_jll = "2025.2.0+0"
+    ConstructionBase = "1.6.0"
+    DiffResults = "1.1.0"
+    StructUtils = "2.8.5"
+    UUIDs = "1.11.0"
+    CompositionsBase = "0.1.2"
+    ConsoleProgressMonitor = "0.1.2"
+    tree_sitter_spirv_jll = "0.1.0+0"
+    Serialization = "1.11.0"
+    LazyArtifacts = "1.11.0"
+    Gamma = "1.2.0"
+    NaNMath = "1.1.4"
+    Downloads = "1.7.0"
+    AbstractMCMC = "5.16.0"
+    CUDA_Compiler_jll = "0.6.3+0"
+    CommonSubexpressions = "0.3.1"
+    Distributed = "1.11.0"
+    Rmath = "0.9.0"
+    MLDataDevices = "1.17.10"
+    MCMCDiagnosticTools = "0.3.19"
+    BangBang = "0.4.9"
+    CEnum = "0.5.0"
+    LibGit2_jll = "1.9.1+0"
+    CompilerCaching = "0.5.1"
+    LLVMLoopInfo = "1.0.0"
+    DocStringExtensions = "0.9.5"
+    ExprTools = "0.1.11"
+    cuSOLVER = "6.4.0"
+    KernelAbstractions = "0.9.42"
+    DataAPI = "1.16.0"
+    StyledStrings = "1.11.0"
+    NVML = "6.4.0"
+
+[setup_timing]
+times = [0.005455509, 0.005356648, 0.005331918]
+seconds = 0.005356648
+host_allocations = 491
+host_bytes = 43016
+
+[[pilots]]
+seed = 12201
+
+    [pilots.timing]
+    times = [0.286888495, 0.129588937, 0.111255835]
+    seconds = 0.129588937
+    host_allocations = 12592
+    host_bytes = 134486128
+[[pilots]]
+seed = 12202
+
+    [pilots.timing]
+    times = [0.140917421, 0.2650978, 0.098501785]
+    seconds = 0.140917421
+    host_allocations = 12592
+    host_bytes = 134486128

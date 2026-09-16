@@ -57,7 +57,13 @@ end
 
 const DEFAULT_POPULATION = (scale=1.2, count=16, rounds=4)
 
-function tune_population(rng, device, model, bank, pilot)
+function population_proposal(family, location, factor; dof=8.0)
+    family === :gaussian && return IS.FactorGaussian(location,factor)
+    family === :student_t && return IS.FactorStudentT(dof,location,factor)
+    error("Unknown population family: $family")
+end
+
+function tune_population(rng, device, model, bank, pilot; family=:student_t)
     start = time_ns()
     logsumexp = IS.LogExpFunctions.logsumexp
     # A separate stream prevents the main sampler from replaying pilot draws.
@@ -67,14 +73,15 @@ function tune_population(rng, device, model, bank, pilot)
     samples = IS.importance_sample!(prepared)
     transfer = device === nothing ? identity : device
     d = size(samples.samples,1)
-    nu = first(bank.proposals).family.dof
+    nu = family === :gaussian ? nothing : first(bank.proposals).family.dof
+    logkernel = family === :gaussian ? (r -> -r/2) : (r -> -((nu+d)/2)*log1p(r/nu))
     radii = reduce(hcat,[vec(sum(abs2,
         LowerTriangular(transfer(q.scale.factor)) \
             (samples.samples .- transfer(q.location));dims=1)) for q in bank.proposals])
     constants = transpose(transfer([q.lognormalizer+log(m/sum(bank.masses))
         for (q,m) in zip(bank.proposals,bank.masses)]))
-    logmixture(logscale) = vec(logsumexp(constants .- d*logscale .-
-        ((nu+d)/2).*log1p.(radii.*exp(-2logscale)./nu);dims=2))
+    logmixture(logscale) = vec(logsumexp(constants .- d*logscale .+
+        logkernel.(radii.*exp(-2logscale));dims=2))
     # E_q0[pi^2/(q_s*q0)] estimates the weight second moment under q_s.
     # Ordinary pi/q_s weights on q0 draws would optimize the wrong sampling law.
     numerator = 2 .* samples.logweights .+ logmixture(0.0)
@@ -82,7 +89,7 @@ function tune_population(rng, device, model, bank, pilot)
     fit = Optim.optimize(objective,log(pilot.scale_limits[1]),log(pilot.scale_limits[2]),
         Optim.Brent();iterations=32,abs_tol=1e-3)
     scale = exp(Optim.minimizer(fit))
-    fitted = IS.ProposalBank([IS.FactorStudentT(q.family.dof,q.location,scale*q.scale.factor)
+    fitted = IS.ProposalBank([population_proposal(family,q.location,scale*q.scale.factor;dof=nu)
         for q in bank.proposals],copy(bank.masses))
     copyto!(fitted.masses,bank.masses)
     return (; bank=fitted, scale, draws=length(samples), seconds=(time_ns()-start)/1e9)
@@ -103,12 +110,13 @@ function run_method(method, device, model, seed; nsamples=2^18, warmup=1024, nch
             IS.AMIS(proposal; options...)
         else
             settings = method in (:dmpmc, :lais) ? population : DEFAULT_POPULATION
+            family = get(settings,:family,:student_t)
             locations = fit.location .+ 0.25fit.factor*randn(rng,model.dimension,settings.count)
             bank = IS.ProposalBank([
-                IS.FactorStudentT(8.0,locations[:,j],settings.scale*fit.factor) for j in 1:settings.count
+                population_proposal(family,locations[:,j],settings.scale*fit.factor) for j in 1:settings.count
             ],ones(settings.count))
             if method in (:dmpmc,:lais) && pilot !== nothing
-                tuned = tune_population(rng,device,model,bank,pilot)
+                tuned = tune_population(rng,device,model,bank,pilot;family)
                 bank = tuned.bank
                 pilot_stats = (;tuned.draws,tuned.seconds,tuned.scale)
             end
@@ -197,7 +205,8 @@ end
 function population_settings(settings, model, label)
     entry = get(get(settings,model.name,Dict()),label,nothing)
     entry === nothing && return DEFAULT_POPULATION
-    return (scale=entry["scale"],count=entry["count"],rounds=entry["rounds"])
+    return (scale=entry["scale"],count=entry["count"],rounds=entry["rounds"],
+            family=Symbol(get(entry,"family","student_t")))
 end
 
 function moment_errors(row, reference)
@@ -339,9 +348,10 @@ function print_table(report; io=stdout, accuracy=false)
     settings = get(report,"population_settings",Dict())
     if !isempty(settings)
         println(io,"\nPopulation settings supplied to this run. Per-run initialization and adaptation remain timed.\n")
-        println(io,"| Model | Sampler / device | Initial scale / Laplace factor | Proposals | Rounds |\n|:--|:--|--:|--:|--:|")
+        println(io,"| Model | Sampler / device | Family | Initial scale / Laplace factor | Proposals | Rounds |\n|:--|:--|:--|--:|--:|--:|")
         for name in names, (label,p) in sort!(collect(get(settings,name,Dict()));by=first)
-            println(io,"| $name | $label | ",p["scale"]," | ",p["count"]," | ",p["rounds"]," |")
+            println(io,"| $name | $label | ",get(p,"family","student_t")," | ",
+                p["scale"]," | ",p["count"]," | ",p["rounds"]," |")
         end
     end
     println(io,"\n| Model | Sampler / device | Mean seconds | ",
@@ -399,6 +409,8 @@ budget. The median supplies its elapsed time. All raw times remain in the report
 An optional `pilot=(nsamples=4096, scale_limits=(0.25,2.0))` tunes only lower
 proposal widths for DM-PMC and LAIS. Its cost is timed, and its samples and
 settings remain separate from the main sampling budget and round schedule.
+Population settings accept `family="gaussian"` or `"student_t"` (the default).
+Gaussian factors define covariance directly. Student-t factors define scale.
 Use `only_methods` to measure a subset. `reuse` accepts a compatible earlier
 report for unchanged importance-sampler calls. Ensemble rows need retained
 sweep diagnostics and are measured anew. Every reused row keeps its source.
