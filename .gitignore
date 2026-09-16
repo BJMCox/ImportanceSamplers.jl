@@ -3,3 +3,4 @@
 *.cov
 /lcov.info
 /benchmark/comparison/results.toml
+/Manifest.toml
