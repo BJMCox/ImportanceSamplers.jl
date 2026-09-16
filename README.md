@@ -37,6 +37,29 @@ The proposal must cover the target's support. Results retain samples and log
 weights. Transfer a prepared sampler explicitly with `device(sampler)` for
 accelerator execution.
 
+## ESS per second
+
+Five seeds, Float64, eight CPU threads, and one A100. Timings include preparation,
+warmup/adaptation, and posterior means, but exclude compilation.
+
+| Sampler / device | Linear (32) | Logistic (12) | Poisson (12) | Robust (13) | Eight schools (10) |
+|:--|--:|--:|--:|--:|--:|
+| IS / CPU | 2.7e+04 | 4.3e+04 | 9.4e+04 | 1e+05 | 1.9e+04 |
+| AMIS / CPU | 2.8e+04 | 4.9e+04 | 1.2e+05 | 1.1e+05 | 5.8e+05 |
+| AdvancedHMC NUTS / CPU | 2.4e+03 | 3.1e+03 | 9.2e+03 | 1.1e+04 | divergences |
+| AdvancedMH RWMH / CPU | 1.8e+02 | 5.9e+02 | 1.3e+03 | 1.2e+03 | 5.8e+03 |
+| SliceSampling / CPU | 2.1e+02 | 5.8e+02 | 1.6e+03 | 1.3e+03 | 6.5e+04 |
+| IS / CUDA | 2.9e+05 | 1.6e+06 | 2e+06 | 2.4e+06 | 1.8e+05 |
+| AMIS / CUDA | 1.6e+05 | 6.8e+05 | 8.9e+05 | 1.1e+06 | 2e+06 |
+
+IS/AMIS use weight ESS. MCMC uses minimum bulk ESS across parameters.
+**These are different diagnostics, not an equal-accuracy speedup comparison.**
+MH has R-hat above 1.01 at this budget. Plain IS varies widely on eight schools.
+
+[Reproducer and pinned versions](benchmark/comparison/README.md) ·
+[Timings, ranges, and accuracy checks](benchmark/comparison/results-2026-09-16.md) ·
+[Models and methodology](https://bjmcox.github.io/ImportanceSamplers.jl/guide/benchmarks/)
+
 [Documentation](https://bjmcox.github.io/ImportanceSamplers.jl/) ·
 [Logistic regression example](examples/logistic_regression.jl) ·
 [Apache 2.0 license](LICENSE)

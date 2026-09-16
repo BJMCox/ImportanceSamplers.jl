@@ -1,0 +1,32 @@
+[deps]
+AbstractMCMC = "80f14c24-f653-4e6a-9b94-39d6b0f70001"
+AdvancedHMC = "0bf59076-c3b1-5ca4-86bd-e02cd72cde3d"
+AdvancedMH = "5b7e9947-ddc0-4b3f-9b55-0d8042f74170"
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
+EnsembleMCMC = "ee15a35a-54c9-4a12-9721-3f3d8c2797c8"
+FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
+ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
+ImportanceSamplers = "f51d20bd-8e2c-46f0-bdaa-6990265b9f1c"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+LogDensityProblems = "6fdf6af0-433a-55f7-b3ed-c6c6e0b8df7c"
+MCMCDiagnosticTools = "be115224-59cd-429b-ad48-344e309966f0"
+MLDataDevices = "7e8f7934-dd98-4c1a-8fe8-92b47a384d40"
+Optim = "429524aa-4258-5aef-a3af-852621145aeb"
+Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Random123 = "74087812-796a-5b5d-8853-05524746bad3"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+SliceSampling = "43f4d3e8-9711-4a8c-bd1b-03ac73a255cf"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+
+[sources]
+EnsembleMCMC = {rev = "758f8a3c01c034c308746e65e0bcafcb40553163", url = "https://github.com/JuliaBayes/EnsembleMCMC.jl"}
+ImportanceSamplers = {path = "../.."}
+
+[compat]
+ImportanceSamplers = "0.0.1"
+julia = "1.13"

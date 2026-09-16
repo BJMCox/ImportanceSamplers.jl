@@ -503,6 +503,7 @@ makedocs(
             "Native proposals" => "guide/native_proposals.md",
             "Transforms" => "guide/transforms.md",
             "Accelerators" => "guide/accelerators.md",
+            "Sampler benchmarks" => "guide/benchmarks.md",
             "Validation and support" => "guide/validation.md",
         ],
         "Reference" => "reference.md",
