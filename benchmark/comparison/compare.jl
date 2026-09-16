@@ -9,6 +9,7 @@ using FFTW
 include("models.jl")
 const IS = ImportanceSamplers
 const HMC = AdvancedHMC
+const IMPORTANCE_METHODS = (:is, :amis, :dmpmc, :cais, :lais)
 
 function nuts(target, seed, draws, warmup; acceptance=0.8)
     rng = Xoshiro(seed)
@@ -52,14 +53,31 @@ function chains(method, target, seed, draws, warmup, nchains; acceptance=0.8)
     return (; values, divergences=sum(r.divergences for r in results))
 end
 
-function run_method(method, device, model, seed; nsamples=65_536, warmup=1024,
-                    nchains=Threads.nthreads(:default))
+function run_method(method, device, model, seed; nsamples=2^18, warmup=1024, nchains=16)
     fit = laplace(model)
     rng = Xoshiro(seed)
-    if method in (:is, :amis)
+    if method in IMPORTANCE_METHODS
         proposal = IS.FactorStudentT(8.0, fit.location, 1.2fit.factor)
-        algorithm = method === :is ? IS.ImportanceSampling(proposal; nsamples) :
-                    IS.AMIS(proposal; rounds=4, round_size=nsamples÷4)
+        options = (; rounds=4, round_size=nsamples÷4)
+        algorithm = if method === :is
+            IS.ImportanceSampling(proposal; nsamples)
+        elseif method === :amis
+            IS.AMIS(proposal; options...)
+        else
+            locations = fit.location .+ 0.25fit.factor*randn(rng,model.dimension,16)
+            bank = IS.ProposalBank([
+                IS.FactorStudentT(8.0,locations[:,j],1.2fit.factor) for j in 1:16
+            ],ones(16))
+            if method === :dmpmc
+                IS.DeterministicMixturePMC(bank; options...)
+            elseif method === :cais
+                IS.CAIS(bank; options...)
+            else
+                covariance = (2.38^2/model.dimension)*Symmetric(fit.factor*fit.factor')
+                transition = IS.RAM(covariance; tuning=IS.WarmupTuning(warmup))
+                IS.LAIS(bank; transition, options...)
+            end
+        end
         prepared = IS.prepare_sampler(rng, logtarget, model.data, algorithm)
         device === nothing || (prepared = device(prepared))
         result = IS.importance_sample!(prepared)
@@ -73,7 +91,7 @@ function run_method(method, device, model, seed; nsamples=65_536, warmup=1024,
         state = EnsembleMCMC.initialize(Philox4x((UInt64(seed),UInt64(1))),
             x -> LogDensityProblems.logdensity(target,x), randn(rng,model.dimension,nwalkers);
             move=EnsembleMCMC.DEMove(), executor=EnsembleMCMC.ThreadedExecutor())
-        EnsembleMCMC.step!(state,256)
+        EnsembleMCMC.step!(state,warmup)
         result = EnsembleMCMC.sample!(state,cld(nsamples,nwalkers))
         estimate = fit.location + fit.factor*vec(mean(result.positions; dims=(2,3)))
         return (; estimate, samples=nothing, divergences=0, draws=length(result.positions)÷model.dimension)
@@ -151,6 +169,7 @@ function interval(rows, ref)
 end
 
 function print_table(report; io=stdout, accuracy=false)
+    println(io,accuracy ? "Posterior-mean accuracy per second.\n" : "Effective sample size per second (ESS/s)\\*.\n")
     names = report["model_order"]
     labels = filter(report["method_order"]) do label
         accuracy || all(name->haskey(first(report["models"][name]["runs"][label]),"ess"),names)
@@ -161,21 +180,27 @@ function print_table(report; io=stdout, accuracy=false)
     for label in labels
         cells = map(names) do name
             rows = report["models"][name]["runs"][label]
-            any(r->r["divergences"]>0,rows) && return "divergences"
             value = accuracy ? rate(rows,report["models"][name]["reference"]) :
                     mean(r["ess"] for r in rows)/mean(r["seconds"] for r in rows)
-            @sprintf("%.2g",value)
+            mark = (any(r->r["divergences"]>0,rows) ? "†" : "") *
+                   (any(r->get(r,"max_rhat",0.0)>1.01,rows) ? "‡" : "")
+            if haskey(first(rows),"ess") && !haskey(first(rows),"max_rhat")
+                maximum(r["ess"] for r in rows) > 10minimum(r["ess"] for r in rows) && (mark *= "§")
+            end
+            @sprintf("%.2g%s",value,mark)
         end
         println(io,"| ",label," | ",join(cells," | ")," |")
     end
-    println(io,accuracy ? "\nAccuracy-based ESS/s from repeated posterior-mean error." :
-        "\nESS/s: weight ESS for IS/AMIS, minimum bulk ESS across parameters for MCMC. These are different diagnostics, not a common accuracy score.")
-    println(io,"Includes fresh preparation, warmup/adaptation, and posterior means. Excludes compilation and post-run diagnostics.")
+    println(io,accuracy ? "\nAccuracy-based ESS/s estimates posterior-mean precision per unit time." :
+        "\n\\* ESS denotes weight ESS for importance sampling and minimum bulk ESS across parameters for MCMC. These diagnostics do not define an equal-accuracy comparison.")
+    println(io,"\n† At least one retained NUTS transition diverged. ‡ At least one run had maximum R-hat above 1.01. § Weight ESS varied by more than a factor of ten across seeds.")
+    println(io,"\nElapsed time includes initialization, warmup or adaptation, sampling, and posterior-mean estimation. Compilation and post-run diagnostics are excluded.")
     println(io,"\nJulia ",report["metadata"]["julia"],". ",report["metadata"]["cpu"],
         ". Julia threads: ",report["metadata"]["threads"],". BLAS threads: ",report["metadata"]["blas_threads"],".")
     haskey(report["metadata"],"gpu") && println(io,"GPU: ",report["metadata"]["gpu"],".")
     println(io,"\n",report["repeats"]," independent seeds. IS samples: ",report["nsamples"],
-        ". MCMC samples: ",report["mcmc_samples"],". MCMC warmup: 1024 per chain, or 256 ensemble sweeps. AMIS: four rounds.")
+        ". MCMC samples: ",report["mcmc_samples"],". MCMC chains: ",get(report,"mcmc_chains",report["metadata"]["threads"]),
+        ". MCMC warmup: 1024 per chain. Ensemble warmup: ",get(report,"ensemble_warmup",256)," sweeps. Adaptive IS: four rounds.")
     println(io,"\n| Model | Sampler / device | Mean seconds | ",
         accuracy ? "Accuracy ESS/s, 95% bootstrap interval" : "ESS/s range across seeds | Max R-hat | Max mean error / posterior SD",
         " |\n|:--|:--|--:|--:|",accuracy ? "" : "--:|--:|")
@@ -199,7 +224,7 @@ function print_table(report; io=stdout, accuracy=false)
 end
 
 """
-    compare(; cuda=false, resume=false, repeats=5, nsamples=65_536, mcmc_samples=8192, reference_draws=8192,
+    compare(; cuda=false, resume=false, repeats=3, nsamples=2^18, mcmc_draws=2^14, nchains=16, reference_draws=8192,
               references=nothing,
               selected=eachindex(models()), output="results.toml")
 
@@ -209,30 +234,34 @@ Reference runs use different seeds. Pass a saved report as `references` to reuse
 its reference moments. Normal data generation and compilation stay
 outside timing. All methods receive the same timed Laplace initialization.
 """
-function compare(; cuda=false, resume=false, repeats=5, nsamples=65_536, mcmc_samples=8192, reference_draws=8192,
+function compare(; cuda=false, resume=false, repeats=3, nsamples=2^18, mcmc_draws=2^14, nchains=16, reference_draws=8192,
                   references=nothing,
                   selected=eachindex(models()), output=joinpath(@__DIR__,"results.toml"))
     ispath(output) && !resume && error("Output already exists: $output (use --resume)")
     BLAS.set_num_threads(1)
     FFTW.set_num_threads(1)
-    nsamples % 4 == 0 || error("nsamples must divide into four AMIS rounds")
+    nsamples % 64 == 0 || error("nsamples must divide across four rounds and sixteen proposals")
     cases = models()[collect(selected)]
     methods = [(:is,nothing,"IS / CPU"),(:amis,nothing,"AMIS / CPU"),
+               (:dmpmc,nothing,"DM-PMC / CPU"),(:cais,nothing,"CAIS / CPU"),(:lais,nothing,"LAIS-RAM / CPU"),
                (:nuts,nothing,"AdvancedHMC NUTS / CPU"),(:mh,nothing,"AdvancedMH RWMH / CPU"),
                (:slice,nothing,"SliceSampling / CPU"),(:ensemble,nothing,"EnsembleMCMC DE / CPU")]
+    mcmc_samples = mcmc_draws*nchains
     report = Dict{String,Any}("metadata"=>metadata(), "repeats"=>repeats,"nsamples"=>nsamples,"mcmc_samples"=>mcmc_samples,
+        "mcmc_chains"=>nchains,"mcmc_draws_per_chain"=>mcmc_draws,"ensemble_warmup"=>1024,
         "model_order"=>[m.name for m in cases], "models"=>Dict{String,Any}())
     if cuda
         CUDA.allowscalar(false)
         CUDA.functional() || error("CUDA is not functional")
         device = MLDataDevices.with_eltype(MLDataDevices.CUDADevice(),nothing)
-        methods = vcat(methods,[(:is,device,"IS / CUDA"),(:amis,device,"AMIS / CUDA")])
+        methods = vcat(methods,[(method,device,replace(label,"CPU"=>"CUDA"))
+            for (method,_,label) in methods if method in IMPORTANCE_METHODS])
         report["metadata"]["gpu"] = CUDA.name(CUDA.device())
     end
     report["method_order"] = [m[3] for m in methods]
     if resume
         saved = TOML.parsefile(output)
-        for key in ("repeats", "nsamples", "mcmc_samples", "model_order", "method_order")
+        for key in ("repeats", "nsamples", "mcmc_samples", "mcmc_chains", "model_order", "method_order")
             saved[key] == report[key] || error("Resume configuration differs: $key")
         end
         saved["metadata"] == report["metadata"] || error("Resume environment differs")
@@ -247,7 +276,7 @@ function compare(; cuda=false, resume=false, repeats=5, nsamples=65_536, mcmc_sa
             error("Analytic gradient failed for $(model.name)")
         record = get!(report["models"],model.name) do
             @info "Reference" model=model.name dimension=model.dimension
-            ref = references === nothing ? reference(model; draws=reference_draws) :
+            ref = references === nothing ? reference(model; draws=reference_draws,nchains=8) :
                   references["models"][model.name]["reference"]
             Dict{String,Any}("reference"=>ref,
                 "dimension"=>model.dimension,"observations"=>model.observations,
@@ -258,12 +287,15 @@ function compare(; cuda=false, resume=false, repeats=5, nsamples=65_536, mcmc_sa
             rows = get!(record["runs"],label,Dict{String,Any}[])
             length(rows) == repeats && continue
             @info "Benchmark" model=model.name sampler=label
-            count = method in (:is,:amis) ? nsamples : mcmc_samples
+            count = method in IMPORTANCE_METHODS ? nsamples : mcmc_samples
             # Compile once, then retain the actual timed result. @btimed would
             # execute each expensive chain again for warmup and result capture.
-            captured = Ref(run_method(method,device,model,900_001; nsamples=count))
+            # Compile with a short run. Population covariance fits require more
+            # than d+1 samples per proposal, even for this untimed warmup.
+            compile_count = method in IMPORTANCE_METHODS ? max(4096,64*(model.dimension+2)) : 1024
+            captured = Ref(run_method(method,device,model,900_001; nsamples=compile_count,warmup=128,nchains))
             for seed in 1001+length(rows):1000+repeats
-                bench = @benchmarkable $captured[] = run_method($method,$device,$model,$seed; nsamples=$count) samples=1 evals=1 gctrial=false
+                bench = @benchmarkable $captured[] = run_method($method,$device,$model,$seed; nsamples=$count,nchains=$nchains) samples=1 evals=1 gctrial=false
                 measured = minimum(run(bench; warmup=false))
                 value = captured[]
                 push!(rows,Dict("seed"=>seed,"seconds"=>measured.time/1e9,"host_bytes"=>measured.memory,
