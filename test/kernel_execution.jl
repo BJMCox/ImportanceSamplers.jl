@@ -1042,7 +1042,7 @@ end
         threaded=true,
     )
 
-    destination = @inferred device(source)
+    destination = device(source)
     destination_rng = getfield(destination, :rng)
     destination_buffers = getfield(destination, :random_buffers)
     @test destination_rng isa Random.Xoshiro

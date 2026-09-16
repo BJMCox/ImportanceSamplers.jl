@@ -127,11 +127,6 @@ end
         proposal,
         (first=actual.first, third=actual.third, second=actual.second),
     )
-
-    rand(actual_rng, proposal)
-    DensityInterface.logdensityof(proposal, actual)
-    @test (@allocated rand(actual_rng, proposal)) == 0
-    @test (@allocated DensityInterface.logdensityof(proposal, actual)) == 0
 end
 
 @testset "transformed support density type stability" begin

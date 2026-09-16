@@ -167,7 +167,7 @@ function _target_transfer_rewrites_opaque_closure(target::_BoundTarget)
     return _target_has_opaque_host_closure(target)
 end
 
-_has_opaque_host_closure(target) = _has_opaque_host_closure(target, IdSet())
+_has_opaque_host_closure(target) = _has_opaque_host_closure(target, Base.IdSet())
 
 function _has_opaque_host_closure(target::Function, seen)
     return !isbitstype(typeof(target))

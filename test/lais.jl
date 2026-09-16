@@ -203,7 +203,7 @@ end
     for (T, warmup) in ((Float32, false), (Float64, false), (Float64, true))
         oracle = lais_ram_oracle(T)
         bank = ProposalBank([FactorGaussian(zeros(T, 2), Matrix{T}(LinearAlgebra.I, 2, 2))])
-        target = x -> -sum(abs2, x) / T(20)
+        target = x -> -sum(abs2, x) / 20
         normals = warmup ? [oracle.normals; [zeros(T, 2)]] :
             reduce(vcat, [[u, zeros(T, 2)] for u in oracle.normals])
         rng = LAISScriptedRNG(normals, [[v] for v in oracle.uniforms], 1, 1)

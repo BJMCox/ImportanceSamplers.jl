@@ -942,9 +942,10 @@ end
             ]
         end
         bank = ProposalBank(proposals, T[1, 3, 2])
+        divisor = T(3)
         target = vector_layout ?
-                 (sample -> -sum(abs2, sample) / T(3)) :
-                 (sample -> -abs2(sample) / T(3))
+                 (sample -> -sum(abs2, sample) / divisor) :
+                 (sample -> -abs2(sample) / divisor)
         nsamples = 37
 
         for threaded in (false, true)

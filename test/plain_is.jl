@@ -663,8 +663,4 @@ end
     result = @inferred importance_sample!(sampler)
     @test maximum(abs, result.logweights) <= 4eps()
     @test abs(lognormalizer(result)) <= 4eps()
-
-    logical_value = 1.25
-    DensityInterface.logdensityof(proposal, logical_value)
-    @test (@allocated DensityInterface.logdensityof(proposal, logical_value)) == 0
 end

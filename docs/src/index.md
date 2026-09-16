@@ -7,7 +7,7 @@ canonical raw log weights.
 
 ## Installation
 
-Requires Julia 1.12 or later. Until registration, install the public repository:
+Requires Julia 1.10 or later. Until registration, install the public repository:
 
 ```julia
 using Pkg

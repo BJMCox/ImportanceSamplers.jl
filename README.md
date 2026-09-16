@@ -10,7 +10,7 @@ CAIS, N-PMC, DM-PMC, and first-order GRAMIS-CAIS. Supports threaded CPU executio
 native Gaussian and Student-t proposals, constrained parameters, and optional
 CUDA, Metal, and Reactant paths with [documented support limits](https://bjmcox.github.io/ImportanceSamplers.jl/guide/accelerators/).
 
-Requires Julia 1.12 or later. Install from GitHub until the package is registered:
+Requires Julia 1.10 or later. Install from GitHub until the package is registered:
 
 ```julia
 using Pkg

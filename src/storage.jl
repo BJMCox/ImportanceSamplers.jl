@@ -85,6 +85,5 @@ end
 @inline _sample_at(batch::AbstractMatrix, sample_index) = view(batch, :, sample_index)
 
 function _sample_at(batch::NamedTuple, sample_index)
-    sample_leaves = map(leaf -> _sample_at(leaf, sample_index), values(batch))
-    return NamedTuple{keys(batch)}(sample_leaves)
+    return map(leaf -> _sample_at(leaf, sample_index), batch)
 end

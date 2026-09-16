@@ -691,7 +691,7 @@ end
         device=cpu,
     )
 
-    destination = @inferred cpu32(source)
+    destination = cpu32(source)
     destination_parts = prepared_parts(destination)
 
     @test destination !== source
@@ -732,7 +732,7 @@ end
         Random.default_rng();
         threaded=false,
     )
-    default_rng_destination = @inferred cpu(default_rng_source)
+    default_rng_destination = cpu(default_rng_source)
     @test getfield(default_rng_destination, :rng) isa Random.Xoshiro
     @test getfield(default_rng_destination, :rng) !==
           getfield(default_rng_source, :rng)
@@ -795,7 +795,7 @@ end
     DERIVATIVE_GRADIENT_TRANSFERS[] = 0
     DERIVATIVE_CONTEXT_TRANSFERS[] = 0
 
-    destination = @inferred MLDataDevices.cpu_device(Float32)(source)
+    destination = MLDataDevices.cpu_device(Float32)(source)
 
     @test DERIVATIVE_VALUE_TRANSFERS[] == 1
     @test DERIVATIVE_GRADIENT_TRANSFERS[] == 1

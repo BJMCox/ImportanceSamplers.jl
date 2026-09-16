@@ -62,7 +62,7 @@ end
     )
     sampler = prepare_sampler(
         Random.Xoshiro(1),
-        x -> -sum(abs2, x) / T(2),
+        x -> -sum(abs2, x) / 2,
         algorithm;
         threaded=false,
     )
@@ -104,7 +104,7 @@ end
     samples = T[-1 0 1 0; 0 1 0 -2]
     initial_mean = zeros(T, 2)
     initial_factor = Matrix{T}(LinearAlgebra.I, 2, 2)
-    logtarget(x) = cais_factor_logdensity(x, initial_mean, initial_factor) + T(6)x[1]
+    logtarget(x) = cais_factor_logdensity(x, initial_mean, initial_factor) + 6x[1]
     algorithm = CAIS(
         ProposalBank([FactorGaussian(initial_mean, initial_factor)]);
         rounds=1,
@@ -288,7 +288,7 @@ end
     bank = ProposalBank([SphericalGaussian(T(-1), T(1.5))], T[1])
     algorithm = CAIS(bank; rounds=2, round_size=[4, 5])
     batches = [T[-1, -0.25, 0.5, 1, 0], T[-0.75, -0.1, 0.25, 0.8, 1.2]]
-    logtarget(x) = -abs2(x - T(0.25)) / T(2)
+    logtarget(x) = -abs2(x - oftype(x, 0.25)) / 2
     base = prepare_sampler(
         CAISPrefilledNormals(deepcopy(batches), 1),
         logtarget,
@@ -296,7 +296,7 @@ end
     )
     shifted = prepare_sampler(
         CAISPrefilledNormals(deepcopy(batches), 1),
-        x -> logtarget(x) + T(100),
+        x -> logtarget(x) + 100,
         algorithm,
     )
     base_result = importance_sample!(base)

@@ -100,7 +100,7 @@ end
     )
     @test eltype(low_precision.masses) === Float32
     @test all(>(0), low_precision.masses)
-    @test isapprox(sum(low_precision.masses), 1; rtol=4eps(Float32))
+    @test isapprox(sum(Float64, low_precision.masses), 1; rtol=4eps(Float32))
     @test eltype(ProposalBank(proposals, Float64[1, 1]).masses) === Float64
     @test eltype(ProposalBank(proposals, BigFloat[1, 1]).masses) === BigFloat
 

@@ -295,7 +295,7 @@ end
         T[-1, 0.5, 1.5, -0.5, 0.25, 1],
         T[0.2, -1, 1.2, 0, 1, -1],
     ]
-    logtarget(sample) = -abs2(sample - T(0.75)) / T(3)
+    logtarget(sample) = -abs2(sample - oftype(sample, 0.75)) / 3
     bank = ProposalBank([
         SphericalGaussian(initial_means[1], scales[1]),
         SphericalGaussian(initial_means[2], scales[2]),

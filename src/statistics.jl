@@ -228,16 +228,17 @@ function _weighted_quantile(
     cumulative_weights = cumsum(sorted_weights)
     total_weight = last(cumulative_weights)
     first_weight = first(sorted_weights)
+    zero_value = zero(T)
 
     return map(probabilities) do probability
         threshold = probability * (total_weight - first_weight) + first_weight
         upper = searchsortedlast(cumulative_weights, threshold) + 1
-        upper > length(values) && return T(last(values))
+        upper > length(values) && return oftype(zero_value, last(values))
         lower = upper - 1
         lower_weight = cumulative_weights[lower]
         fraction = (threshold - lower_weight) /
                    (cumulative_weights[upper] - lower_weight)
-        return T(values[lower] + fraction * (values[upper] - values[lower]))
+        return oftype(zero_value, values[lower] + fraction * (values[upper] - values[lower]))
     end
 end
 

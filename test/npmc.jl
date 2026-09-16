@@ -50,7 +50,7 @@ end
         initial = SphericalGaussian(T(-1), T(2))
         batches = [T[-3, -2, -1, -0.5, 0, 0.5, 1, 2, 3],
                    T[3, 2, 1, 0.5, 0, -0.5, -1, -2, -3]]
-        logtarget(x) = -abs2(x - T(0.75)) / T(3)
+        logtarget(x) = -abs2(x - oftype(x, 0.75)) / 3
         sampler = prepare_sampler(NPMCNormals(batches, 1), logtarget,
             NPMC(initial; rounds=2, round_size=[9, 4]); threaded=false)
         result = importance_sample!(sampler)

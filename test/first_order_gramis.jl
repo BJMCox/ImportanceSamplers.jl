@@ -170,11 +170,12 @@ end
 @testset "FirstOrderGRAMIS numeric controls" begin
     for T in (Float32, Float64)
         bank = first_order_gramis_bank(T)
+        round_size = T === Float32 ? Int16[15, 16] : UInt8[15, 16]
         function prepare_controls(; kwargs...)
             algorithm = FirstOrderGRAMIS(
                 bank;
                 rounds=2,
-                round_size=T === Float32 ? Int16[15, 16] : UInt8[15, 16],
+                round_size,
                 repulsion_strength=Float64(0.01),
                 kwargs...,
             )
@@ -378,7 +379,7 @@ end
 function first_order_gramis_assert_same_diagnostics(serial, threaded)
     @test serial.execution === :serial
     @test serial.threaded === false
-    @test threaded.execution === :threaded
+    @test threaded.execution === (Threads.nthreads(:default) > 1 ? :threaded : :serial)
     @test threaded.threaded === true
     for field in propertynames(serial)
         field in (:execution, :threaded, :transfers) && continue
@@ -530,8 +531,8 @@ end
         @test !isempty(preparations)
         @test all(preparation -> preparation === first(preparations), preparations)
         slot = threaded_pool.thread_slots[thread_id]
-        @test first(preparations) === threaded_pool.preparations[slot]
-        @test first(preparations) !== serial_only_preparation
+        expected = worker_count > 1 ? threaded_pool.preparations[slot] : serial_only_preparation
+        @test first(preparations) === expected
     end
     used_preparations = [
         only(unique(last.(filter(call -> first(call) == thread_id, calls)))) for
@@ -857,8 +858,8 @@ end
     before = copy(first(bank.proposals).scale.factor)
     normals = T[-1, 1, 0, 0, -1, 0, 1, 2]
     extreme_target(sample) = only(sample) < 0 ?
-                             (only(sample) < T(-2.5) ? floatmax(T) : -floatmax(T)) :
-                             -sum(abs2, sample) / T(2)
+                             (only(sample) < -2.5 ? floatmax(eltype(sample)) : -floatmax(eltype(sample))) :
+                             -sum(abs2, sample) / 2
     sampler = prepare_sampler(
         FirstOrderGRAMISPrefilledRNG([normals]),
         LogTarget(extreme_target; grad=first_order_gramis_zero_gradient!),

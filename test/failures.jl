@@ -1065,7 +1065,7 @@ end
 
     zero_sampler = prepare_sampler(
         AMISFailureRNG(deepcopy(batches)),
-        _ -> T(-Inf),
+        x -> oftype(x, -Inf),
         algorithm;
         threaded=false,
     )
@@ -1079,7 +1079,7 @@ end
 
     invalid_sampler = prepare_sampler(
         AMISFailureRNG(deepcopy(batches)),
-        _ -> T(NaN),
+        x -> oftype(x, NaN),
         algorithm;
         threaded=false,
     )
@@ -1095,7 +1095,7 @@ end
     tiny = T(1.0e-200)
     covariance_sampler = prepare_sampler(
         AMISFailureRNG([zeros(T, 6)]),
-        _ -> zero(T),
+        x -> zero(eltype(x)),
         AMIS(
             FactorGaussian(zeros(T, 2), T[tiny 0; 0 tiny]);
             rounds=1,

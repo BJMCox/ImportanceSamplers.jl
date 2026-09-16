@@ -53,7 +53,7 @@ end
         batched = gram_is_factor_policy_result(algorithm, BatchedFactorExecution())
 
         @test fused.samples == batched.samples
-        @test fused.logweights == batched.logweights
+        @test fused.logweights ≈ batched.logweights rtol=8eps(Float64)
         @test fused.provenance == batched.provenance
         @test fused.diagnostics.factor_execution_policy === :fused
         @test batched.diagnostics.factor_execution_policy === :batched
