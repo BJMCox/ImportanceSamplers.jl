@@ -17,20 +17,22 @@ using Pkg
 Pkg.add(url="https://github.com/BJMCox/ImportanceSamplers.jl.git")
 ```
 
+Sample a three-dimensional standard Gaussian using a broader Gaussian proposal:
+
 ```julia
 using ImportanceSamplers, Random, Statistics
 
-proposal = SphericalGaussian(0.0, 1.0)
-logtarget(x) = -abs2(x) / 2  # unnormalized log density
+proposal = SphericalGaussian(zeros(3), 1.5)
+logtarget(x) = -sum(abs2, x) / 2  # unnormalized log density, x is a 3-vector
 
 samples = importance_sample(
     Xoshiro(42), logtarget, ImportanceSampling(proposal; nsamples=10_000),
 )
 
-mean(samples)                # weighted estimate of E[x]
-var(samples)                 # weighted estimate of Var[x]
-samples.logweights           # raw log target/proposal ratios
-lognormalizer(samples)       # estimate of log integral(exp(logtarget(x)))
+mean(samples)           # coordinate means, approximately [0, 0, 0]
+var(samples)            # coordinate variances, approximately [1, 1, 1]
+samples.logweights      # raw log target/proposal ratios
+lognormalizer(samples)  # estimate of log integral(exp(logtarget(x)))
 ```
 
 The proposal must cover the target's support. Results retain samples and log
@@ -43,39 +45,59 @@ Effective sample size per second (ESS/s)\* for five posterior models. Parenthese
 give the number of parameters. Measurements use Float64 and include initialization,
 warmup or adaptation, sampling, and posterior-mean estimation.
 
-| Sampler / device | Linear (32) | Logistic (12) | Poisson (12) | Robust (13) | Eight schools (10) |
+### CPU
+
+| Sampler | Linear (32) | Logistic (12) | Poisson (12) | Robust (13) | Eight schools (10) |
 |:--|--:|--:|--:|--:|--:|
-| IS / CPU | 5.1e+04 | 7.4e+04 | 1.8e+05 | 1.6e+05 | 2.9e+04§ |
-| AMIS / CPU | 4.9e+04 | 8.6e+04 | 1.8e+05 | 1.9e+05 | 7.6e+05 |
-| DM-PMC / CPU | 9.7 | 5.9e+03 | 1.4e+04 | 1.1e+04 | 4.8e+04§ |
-| CAIS / CPU | 2e+04 | 6.7e+04 | 1.5e+05 | 1.4e+05 | 1.8e+05§ |
-| LAIS-RAM / CPU | 15 | 4e+03 | 1.1e+04 | 7.3e+03 | 6.2e+04 |
-| AdvancedHMC NUTS / CPU | 1.5e+04 | 9e+03 | 2.1e+04 | 5e+04 | 1.3e+05† |
-| AdvancedMH RWMH / CPU | 8.5e+02‡ | 2.6e+03 | 5.2e+03 | 4.5e+03 | 1.8e+04 |
-| SliceSampling / CPU | 7.7e+02 | 1.9e+03 | 5.6e+03 | 4.4e+03 | 1.6e+05 |
-| IS / CUDA | **5.4e+05** | **2.6e+06** | **3.3e+06** | **3.7e+06** | 4.8e+04 |
-| AMIS / CUDA | 3.5e+05 | 9.4e+05 | 1.4e+06 | 1.3e+06 | **1.6e+06** |
-| DM-PMC / CUDA | 33 | 1.1e+05 | 1.3e+05 | 1.1e+05 | 2.2e+04 |
-| CAIS / CUDA | 1.9e+05 | 2.1e+06 | 2.4e+06 | 2.9e+06 | 3.5e+05 |
-| LAIS-RAM / CUDA | 28 | 5.4e+03 | 1e+04 | 1.1e+04 | 1.8e+05 |
+| IS | **5.1e+04** | 7.4e+04 | 1.8e+05 | 1.6e+05 | 2.9e+04§ |
+| AMIS | 4.9e+04 | **8.6e+04** | 1.8e+05 | **1.9e+05** | **7.6e+05** |
+| DM-PMC | 49¶ | 7.7e+03 | 1.6e+04 | 1.4e+04 | 4.8e+04 |
+| CAIS | 2e+04 | 6.7e+04 | 1.5e+05 | 1.4e+05 | 1.8e+05§ |
+| LAIS-RAM | 12¶ | 4.9e+03 | 1.2e+04 | 8.3e+03 | 7e+04 |
+| AdvancedHMC NUTS | 1.5e+04 | 9e+03 | 2.1e+04 | 5e+04 | 1.3e+05† |
+| AdvancedMH RWMH | 8.5e+02‡ | 2.6e+03 | 5.2e+03 | 4.5e+03 | 1.8e+04 |
+| SliceSampling | 7.7e+02 | 1.9e+03 | 5.6e+03 | 4.4e+03 | 1.6e+05 |
+| EnsembleMCMC DE | 67‡ | 8.5e+02‡ | 1.3e+03‡ | 1.2e+03‡ | 5e+03‡ |
+| First-order GRAMIS-CAIS | 4.4e+04 | 8.3e+04 | **1.9e+05** | 1.6e+05 | 1.9e+04 |
+| EnsembleMCMC Stretch | 23‡ | 2.1e+02‡ | 4.7e+02‡ | 2.8e+02‡ | 8.6e+02‡ |
+| EnsembleMCMC snooker | 29‡ | 1.2e+02‡ | 1.5e+02‡ | 2.3e+02‡ | 4.2e+02‡ |
 
-Bold denotes the highest measured ESS/s per model.
+### CUDA
 
-\* Importance sampling uses weight ESS. MCMC uses minimum bulk ESS across
-parameters. These diagnostics do not define an equal-accuracy comparison.
+| Sampler | Linear (32) | Logistic (12) | Poisson (12) | Robust (13) | Eight schools (10) |
+|:--|--:|--:|--:|--:|--:|
+| IS | 5.4e+05 | 2.6e+06 | 3.3e+06 | 3.7e+06 | 4.8e+04 |
+| AMIS | 3.5e+05 | 9.4e+05 | 1.4e+06 | 1.3e+06 | 1.6e+06 |
+| DM-PMC | 1.8e+02¶ | 9.2e+04 | 2.2e+05 | 1.8e+05 | 3.3e+05 |
+| CAIS | 1.9e+05 | 2.1e+06 | 2.4e+06 | 2.9e+06 | 3.5e+05 |
+| LAIS-RAM | 4.8¶ | 7.5e+03 | 1.2e+04 | 1.4e+04 | 2.3e+05 |
+| First-order GRAMIS-CAIS | 3.6e+05 | 1.4e+06 | 2e+06 | 2.1e+06 | 1.5e+05 |
+
+Bold denotes the highest measured CPU ESS/s per model. GPU results appear separately.
+
+\* Importance sampling uses weight ESS. Independent-chain MCMC uses minimum
+bulk ESS. EnsembleMCMC uses minimum mean ESS from the sweep-average process.
+These diagnostics do not define an equal-accuracy comparison.
 
 † At least one retained NUTS transition diverged.
 
-‡ At least one run had maximum R-hat above 1.01.
+‡ At least one run had maximum R-hat above 1.01. Ensemble R-hat splits the
+sweep-average time series, not the walkers.
 
 § Weight ESS varied by more than a factor of ten across seeds.
 
-These measurements use three seeds, 16 CPU threads, and one A100. MCMC retains
-16,384 draws in each of 16 chains. Importance samplers retain 262,144 draws.
-Compilation and post-run diagnostics are excluded.
+¶ At least one run exceeded a mean error of 0.2 posterior standard deviations
+or a marginal variance error of 30%. Archived rows lack variance checks.
+
+Measurements use three seeds, 16 threads on a 128-thread EPYC CPU, and one A100.
+Independent-chain MCMC retains 16,384 draws per chain in 16 chains. Importance
+samplers retain 262,144 draws. Ensemble methods retain at least that count in
+whole sweeps. DM-PMC and LAIS include an independent 4,096-draw width pilot.
+Compilation and post-run diagnostics are excluded. Unchanged rows reuse archived
+measurements. The report records each row's source and timing protocol.
 
 [Reproducer and pinned versions](benchmark/comparison/README.md) ·
-[Timings, ranges, and accuracy checks](benchmark/comparison/results-2026-09-16-long.md) ·
+[Timings, ranges, and accuracy checks](benchmark/comparison/results-2026-09-16-comparison.md) ·
 [Models and methodology](https://bjmcox.github.io/ImportanceSamplers.jl/guide/benchmarks/)
 
 [Documentation](https://bjmcox.github.io/ImportanceSamplers.jl/) ·
