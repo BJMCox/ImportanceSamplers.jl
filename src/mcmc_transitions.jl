@@ -403,8 +403,8 @@ end
 function _transition_batch!(::KernelAbstractions.CPU, state, target, rng, execution, transfers, update)
     if _has_batch_target(target)
         backend = KernelAbstractions.CPU()
-        evaluator = _initialize_transition_batch!(backend, state, target, transfers)
-        _launch_transition_move!(backend, state, evaluator, rng, update, execution)
+        batch_evaluator = _initialize_transition_batch!(backend, state, target, transfers)
+        _launch_transition_move!(backend, state, batch_evaluator, rng, update, execution)
         KernelAbstractions.synchronize(backend)
         _check_transition_failure!(state, transfers)
         state.steps += 1
