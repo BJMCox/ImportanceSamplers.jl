@@ -1,7 +1,7 @@
 name = "ImportanceSamplers"
 uuid = "f51d20bd-8e2c-46f0-bdaa-6990265b9f1c"
 version = "0.0.1"
-authors = ["Ben Cox <bcox@mpp.mpg.de>"]
+authors = ["Jessica Cox <bcox@mpp.mpg.de>"]
 
 [deps]
 ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
