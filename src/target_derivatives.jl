@@ -43,6 +43,7 @@ end
 function _prepare_accelerator_gradient(
     target::_PreparedLogTarget{F,P,A,Nothing}, locations, values,
 ) where {F,P,A<:ADTypes.AutoEnzyme}
+    target = _scalar_target(target)
     sample = view(locations, :, 1)
     ADTypes.mode(target.adtype) isa Union{ADTypes.ReverseMode,ADTypes.ForwardOrReverseMode} ||
         _reject_cpu_gradient_on_accelerator(sample)
@@ -115,7 +116,7 @@ function _prepare_bound_gradient(
     worker_count,
 ) where {F,P,A,G}
     _validate_gradient_worker_count(worker_count)
-    return _prepare_explicit_gradient(target, sample)
+    return _prepare_explicit_gradient(_scalar_target(target), sample)
 end
 
 function _prepare_bound_gradient(
@@ -133,6 +134,7 @@ function _prepare_bound_gradient(
     worker_count,
 ) where {F,P,A}
     _validate_gradient_worker_count(worker_count)
+    target = _scalar_target(target)
     _reject_cpu_gradient_on_accelerator(sample)
     preparation = _prepare_di_pool(target, sample, worker_count)
     return _BoundDIGradient(target, target.adtype, preparation)

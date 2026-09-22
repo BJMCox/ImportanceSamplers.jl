@@ -193,8 +193,7 @@ function _launch_prefilled_amis_factor_batch!(
         )
         _factor_batch_draw!(new_samples, normals, history, round)
 
-        target_kernel = _gaussian_batch_target_kernel!(backend)
-        target_kernel(
+        _launch_gaussian_target!(
             view(logtargets, new_indices),
             view(lognumerators, new_indices),
             view(logweights, new_indices),
@@ -202,9 +201,8 @@ function _launch_prefilled_amis_factor_batch!(
             new_samples,
             target,
             round,
-            failure_storage;
-            ndrange=new_sample_count,
-            workgroupsize=_native_workgroupsize(execution, new_sample_count),
+            failure_storage,
+            execution,
         )
 
         new_round_ids = view(round_ids, new_indices)
@@ -375,7 +373,7 @@ function _preflight_amis_kernels(
     binding_sample = _native_binding_sample(samples)
     bound_target = _bind_resolved_target(target, binding_sample)
     log_type = eltype(workspace.logweights)
-    target_argument = _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
+    target_argument = _native_device_evaluator(bound_target, log_type)
     backend = KernelAbstractions.get_backend(buffers.normal)
     round_ids = similar(workspace.logweights, Int, 1)
     logtotal = log(eltype(method_state.logcounts)(last_sample))

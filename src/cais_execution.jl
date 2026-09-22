@@ -342,7 +342,7 @@ function _preflight_accelerator_method(
     views = _cais_round_views(method_state, representative_round)
     bound_target = _bind_resolved_target(target, _population_binding_sample(bank))
     log_type = eltype(views.logweights)
-    target_argument = _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
+    target_argument = _native_device_evaluator(bound_target, log_type)
     backend = KernelAbstractions.get_backend(buffers.normals)
     denominator = _EqualAllocationGeneratingDenominator()
     output = _MISRoundOutput(

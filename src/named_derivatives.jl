@@ -22,6 +22,7 @@ function _logical_gradient(layout, scratch)
 end
 
 function _prepare_bound_gradient(target::_NamedPreparedTarget, sample, worker_count)
+    target = _scalar_target(target)
     _validate_gradient_worker_count(worker_count)
     inner = target.target
     inner isa _PreparedLogTarget || return _prepare_bound_gradient(inner, sample, worker_count)
@@ -48,6 +49,7 @@ function _validate_named_gradient(target, sample, scratch)
 end
 
 function _prepare_accelerator_gradient(target::_NamedPreparedTarget, locations, values)
+    target = _scalar_target(target)
     inner = target.target
     inner isa _PreparedLogTarget || return _prepare_accelerator_gradient(inner, locations, values)
     isnothing(inner.gradient) && return _prepare_accelerator_gradient(

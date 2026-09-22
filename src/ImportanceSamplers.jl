@@ -125,5 +125,6 @@ include("mcmc_transition_kernels.jl")
 include("results.jl")
 include("resampling.jl")
 include("statistics.jl")
+include("batched_targets.jl")
 
 end # module ImportanceSamplers

@@ -149,7 +149,7 @@ function _preflight_accelerator_method(
         bank,
         typeof(binding_sample),
     )
-    target_argument = _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
+    target_argument = _native_device_evaluator(bound_target, log_type)
     backend = KernelAbstractions.get_backend(buffers.normals)
     representative_round = findmax(plan.schedule)[2]
     round_views = _apis_round_views(method_state, representative_round)

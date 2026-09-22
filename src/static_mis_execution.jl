@@ -217,7 +217,7 @@ function _preflight_packed_static_mis_kernel_target(
     )
     logweights = similar(buffers.normal, log_type, 1)
     proposal_ids = similar(buffers.assignments, Int, 1)
-    target_argument = _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
+    target_argument = _native_device_evaluator(bound_target, log_type)
     backend = KernelAbstractions.get_backend(buffers.normal)
 
     assignment_kernel = _static_mis_assignment_kernel!(backend)
@@ -340,8 +340,9 @@ function _importance_sample_cpu!(
         nsamples,
     )
     binding_sample = _native_binding_sample(samples)
+    transfers = _ResultTransferCounter(0, 0)
     target = _capture_sampler_failure(:target, 1) do
-        _bind_resolved_target(sampler.target, binding_sample)
+        _bind_resolved_target(sampler.target, binding_sample, transfers)
     end
     log_type = _resolve_packed_static_mis_logweight_type(
         target,
@@ -375,7 +376,7 @@ function _importance_sample_cpu!(
         target_failures,
         _NoSampleTransform(),
     )
-    transfers = _ResultTransferCounter(snapshot.transfers.count, snapshot.transfers.bytes)
+    _record_reported_transfer!(transfers, snapshot.transfers.count, snapshot.transfers.bytes, Val(:failure_snapshot))
     samples = _map_result_samples(sampler.target, samples, failure_scratch,
         transfers, sampler.threaded)
     return _packed_static_mis_result(sampler, samples, logweights, proposal_ids,

@@ -432,6 +432,11 @@ end
 function _launch_smh_cache!(state, evaluator, execution)
     backend = KernelAbstractions.get_backend(state.normals)
     _reset_native_failure_scratch!(state.failure_scratch)
+    if evaluator isa _NativeBatchTarget
+        _invoke_batch_target!(evaluator.target, state.logratios, state.centres,
+            state.failure_scratch.record.storage, execution)
+        evaluator = _CachedTargetValues(state.logratios)
+    end
     kernel = _smh_cache_kernel!(backend)
     count = length(state.logratios)
     kernel(state.centres, state.logratios, state.density_scratch, evaluator,
@@ -500,7 +505,7 @@ end
 
 function _preflight_transition(device, state::_SampleMetropolisHastingsState, target)
     backend = KernelAbstractions.get_backend(state.normals)
-    evaluator = _NativeDeviceTarget{eltype(state.logratios),typeof(target)}(target)
+    evaluator = _native_device_evaluator(target, eltype(state.logratios))
     cache_kernel = _smh_cache_kernel!(backend)
     for argument in (state.centres, state.logratios, state.density_scratch,
         evaluator, state.proposal, state.failure_scratch.record.storage)

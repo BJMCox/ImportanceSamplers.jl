@@ -1188,14 +1188,19 @@ end
 function _launch_gramis_gradients!(::Nothing, method_state, target, bound_gradient, execution, device, failure_record)
     workspace = method_state.workspace
     device === nothing || fill!(failure_record.storage, zero(eltype(failure_record.storage)))
+    value_target = _has_batch_target(target) ? _DeferredTargetValues{eltype(workspace.frozen_values)}() : target
     _evaluate_frozen_gradients!(
         workspace.frozen_values,
         workspace.gradients,
-        target,
+        value_target,
         bound_gradient,
         method_state.run.locations,
         execution,
     )
+    if _has_batch_target(target)
+        _invoke_batch_target!(target, workspace.frozen_values, method_state.run.locations, nothing, execution)
+        device === nothing && _validate_frozen_derivatives!(workspace.frozen_values, workspace.gradients)
+    end
     device === nothing && return nothing
     _validate_gramis_gradients!(workspace, failure_record, execution)
     return nothing
@@ -1719,6 +1724,11 @@ function _backtrack_means!(
         workspace.moves,
         method_state.max_backtracking_trials,
     )
+    if _has_batch_target(target)
+        batch = NamedTuple{(:candidate_locations, :candidate_values, :active_mask, :steps,
+            :trials, :target, :frozen_values, :locations, :moves, :max_trials)}(arguments)
+        return _backtrack_batch_values!(backend_execution, batch, execution, device, failure_record, transfers)
+    end
     execution isa _KernelExecution && return _backtrack_means!(
         arguments...,
         execution;
@@ -2621,11 +2631,15 @@ function _launch_gramis_round!(rng, buffers, state, target, round, execution, de
     _fill_radial_buffers!(rng, buffers.radial)
     _prepare_mis_normals!(normal, buffers.radial, state.run,
         views.assignments, buffers.failure_scratch.record.storage, execution)
+    # Explicit batches use the shared MIS draw/value/weight phases, including
+    # on serial CPU where scalar GRAMIS has a fused slot loop.
+    draw_execution = target isa _NativeBatchTarget && execution isa _SerialCPUExecution ?
+        _KernelExecution(execution) : execution
     _first_order_gramis_sample_round!(views.samples, views.logweights, views.local_logweights,
         views.generating_logdensities, views.proposal_ids, views.round_ids,
         buffers.failure_scratch.record.storage, normal, target, state.run, views.assignments,
         _RealizedMixtureDenominator(state.plan.logcoefficients, round), state.workspace.solve_scratch,
-        round, execution, device, _resolved_factor_execution(device, factor_execution))
+        round, draw_execution, device, _resolved_factor_execution(device, factor_execution))
     return nothing
 end
 
@@ -2757,6 +2771,7 @@ function _importance_sample_cpu!(
             _bind_resolved_target(
                 sampler.target,
                 view(method_state.run.locations, :, 1),
+                transfers,
             )
         end,
     )
@@ -3078,4 +3093,97 @@ function _importance_sample_cpu!(
     method_state.committed, method_state.run =
         method_state.run, method_state.committed
     return result
+end
+
+@kernel function _initialize_batch_backtracking_kernel!(batch)
+    slot = @index(Global, Linear)
+    _initialize_backtracking_slot!(batch.candidate_locations, batch.candidate_values,
+        batch.active_mask, batch.steps, batch.trials, batch.frozen_values, batch.locations, slot)
+end
+
+@kernel function _pack_backtracking_kernel!(packed, indices, offsets, batch, step)
+    slot = @index(Global, Linear)
+    if batch.active_mask[slot]
+        index = offsets[slot]
+        indices[index] = slot
+        for row in axes(packed, 1)
+            packed[row, index] = batch.locations[row, slot] + step * batch.moves[row, slot]
+        end
+    end
+end
+
+@kernel function _accept_batch_backtracking_kernel!(batch, packed, logs, indices, step, trial)
+    index = @index(Global, Linear)
+    slot = indices[index]
+    value = logs[index]
+    for row in axes(packed, 1)
+        batch.candidate_locations[row, slot] = packed[row, index]
+    end
+    batch.candidate_values[slot] = value
+    batch.trials[slot] = trial
+    if isfinite(value) && value >= batch.frozen_values[slot]
+        batch.steps[slot] = step
+        batch.active_mask[slot] = false
+    end
+end
+
+@kernel function _validate_batch_backtracking_kernel!(batch, logs, indices, trial, failures)
+    index = @index(Global, Linear)
+    value = logs[index]
+    if !iszero(_native_target_reason(value))
+        slot = indices[index]
+        batch.candidate_values[slot] = value
+        _record_native_failure!(failures, (trial - 1) * length(batch.steps) + slot,
+            0, _GRAMIS_CANDIDATE_VALUE_NONFINITE)
+    end
+end
+
+@kernel function _finish_batch_backtracking_kernel!(batch)
+    slot = @index(Global, Linear)
+    _finish_backtracking_slot!(batch.candidate_locations, batch.candidate_values,
+        batch.active_mask, batch.frozen_values, batch.locations, slot)
+end
+
+# The scalar count controls callback width. Coordinates, values and compaction
+# indices stay resident. A failed run never commits the candidate population.
+function _backtrack_batch_values!(::Nothing, batch, execution, device, record, transfers)
+    record = isnothing(record) ? _DeviceFailureRecord(zeros(UInt64, 3)) : record
+    transfers = isnothing(transfers) ? _ResultTransferCounter(0, 0) : transfers
+    fill!(record.storage, zero(eltype(record.storage)))
+    backend = KernelAbstractions.get_backend(batch.locations)
+    count = size(batch.locations, 2)
+    workgroupsize = _native_workgroupsize(execution, count)
+    # Only numerical arrays enter kernels, never the host callback.
+    arrays = Base.structdiff(batch, (; target=batch.target))
+    packed = similar(batch.locations)
+    logs = similar(batch.candidate_values)
+    indices = similar(batch.trials)
+    offsets = similar(indices)
+    _initialize_batch_backtracking_kernel!(backend)(arrays; ndrange=count, workgroupsize)
+    for trial in 1:batch.max_trials
+        offsets .= batch.active_mask
+        cumsum!(offsets, offsets)
+        width = _is_host_storage(offsets) ? offsets[end] : only(Array(view(offsets, count:count)))
+        _record_device_scalar_transfer!(transfers, offsets, eltype(offsets))
+        iszero(width) && break
+        step = ldexp(one(eltype(batch.steps)), 1 - trial)
+        _pack_backtracking_kernel!(backend)(packed, indices, offsets, arrays, step;
+            ndrange=count, workgroupsize)
+        values = view(logs, 1:width)
+        samples = view(packed, :, 1:width)
+        _invoke_batch_target!(batch.target, values, samples, nothing, execution)
+        _validate_batch_backtracking_kernel!(backend)(arrays, values, indices, trial, record.storage;
+            ndrange=width, workgroupsize=_native_workgroupsize(execution, width))
+        KernelAbstractions.synchronize(backend)
+        _throw_first_order_gramis_device_backtracking_failure(device, record,
+            batch.candidate_values, count, transfers)
+        _accept_batch_backtracking_kernel!(backend)(arrays, samples, values, indices,
+            step, trial; ndrange=width,
+            workgroupsize=_native_workgroupsize(execution, width))
+    end
+    _finish_batch_backtracking_kernel!(backend)(arrays; ndrange=count, workgroupsize)
+    KernelAbstractions.synchronize(backend)
+    _throw_first_order_gramis_device_backtracking_failure(device, record,
+        batch.candidate_values, count, transfers)
+    return nothing
 end

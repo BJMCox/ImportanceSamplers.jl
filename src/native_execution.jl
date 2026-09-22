@@ -805,6 +805,12 @@ function _launch_native_fused!(
     transform,
     execution,
 )
+    if target isa _NativeBatchTarget
+        _launch_native_fused!(samples, logweights, failure_record, uniform_buffer,
+            normal_buffer, _deferred_target(target), base, transform, execution)
+        return _finish_batch_weights!(logweights, target.target, samples,
+            failure_record.storage, execution; transform)
+    end
     backend = KernelAbstractions.get_backend(normal_buffer)
     kernel = _native_fused_kernel!(backend)
     kernel(
@@ -883,6 +889,12 @@ function _launch_native_factor_batch!(
     base,
     execution,
 )
+    if target isa _NativeBatchTarget
+        _launch_native_factor_batch!(samples, logweights, failure_record, normal_buffer,
+            _deferred_target(target), base, execution)
+        return _finish_batch_weights!(logweights, target.target, samples,
+            failure_record.storage, execution)
+    end
     sample_count = length(logweights)
     dimension = _gaussian_dimension(base.location)
     normals = reshape(normal_buffer, dimension, sample_count)

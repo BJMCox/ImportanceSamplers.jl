@@ -82,14 +82,21 @@ function _prepare_compiled_transition(state::Union{IS._RandomWalkState,IS._RAMSt
     clear_phase = walk -> IS._reset_native_failure_scratch!(walk.failure_scratch)
     cache_phase = function (walk, target)
         clear_phase(walk)
-        evaluator = IS._NativeDeviceTarget{L,typeof(target)}(target)
+        evaluator, _ = IS._native_target_evaluator(KA.get_backend(walk.normals),
+            target, L, walk.failure_scratch.target_failures)
+        if evaluator isa IS._NativeBatchTarget
+            IS._invoke_batch_target!(target, walk.logtargets, walk.centres,
+                walk.failure_scratch.record.storage, IS._ThreadedCPUExecution())
+            evaluator = IS._CachedTargetValues(walk.logtargets)
+        end
         IS._transition_cache_kernel!(KA.get_backend(walk.normals))(
             walk.centres, walk.logtargets, evaluator, walk.failure_scratch.record.storage;
             ndrange=length(walk.logtargets))
         return nothing
     end
     move_phase = function (walk, target, rng, update)
-        evaluator = IS._NativeDeviceTarget{L,typeof(target)}(target)
+        evaluator, _ = IS._native_target_evaluator(KA.get_backend(walk.normals),
+            target, L, walk.failure_scratch.target_failures)
         IS._launch_transition_move!(KA.get_backend(walk.normals), walk, evaluator, rng, update)
         return nothing
     end
@@ -112,7 +119,8 @@ function _prepare_compiled_warmup(state::IS._RAMState{W,<:IS.WarmupTuning}, targ
     compile_chunk = function (steps)
         phase = function (state, target, rng, normals, uniforms, first_step)
             walk = state.walk
-            evaluator = IS._NativeDeviceTarget{L,typeof(target)}(target)
+            evaluator, _ = IS._native_target_evaluator(KA.get_backend(walk.normals),
+                target, L, walk.failure_scratch.target_failures)
             IS._launch_transition_warmup!(KA.get_backend(walk.normals), state,
                 evaluator, rng, normals, uniforms, first_step, steps)
             return nothing
@@ -167,7 +175,8 @@ function _prepare_compiled_transition(state::IS._SampleMetropolisHastingsState, 
     execution = IS._ThreadedCPUExecution()
     L = eltype(state.logratios)
     cache_phase = function (state, target)
-        evaluator = IS._NativeDeviceTarget{L,typeof(target)}(target)
+        evaluator, _ = IS._native_target_evaluator(KA.get_backend(state.normals),
+            target, L, state.failure_scratch.target_failures)
         IS._launch_smh_cache!(state, evaluator, execution)
         return nothing
     end

@@ -435,7 +435,7 @@ function _importance_sample_fixed_population!(sampler, method_state, threaded)
         plan.schedule[1],
         0,
     ) do
-        _bind_resolved_target(sampler.target, _population_binding_sample(bank))
+        _bind_resolved_target(sampler.target, _population_binding_sample(bank), transfers)
     end
     target_evaluator, target_failures = _capture_population_round(
         algorithm,

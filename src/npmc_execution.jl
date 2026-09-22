@@ -107,11 +107,9 @@ function _launch_npmc_factor_batch!(
         samples, reshape(view(normals, 1:(dimension * count)), dimension, count),
         history, output.round,
     )
-    kernel = _gaussian_batch_target_kernel!(backend)
-    kernel(
+    _launch_gaussian_target!(
         output.logtargets, output.lognumerators, output.logweights, output.round_ids,
-        samples, target, output.round, failure_storage;
-        ndrange=count, workgroupsize=_native_workgroupsize(execution, count),
+        samples, target, output.round, failure_storage, execution,
     )
     _factor_batch_solve!(solve_scratch, samples, history, output.round)
     weight_kernel = _npmc_factor_weights_kernel!(backend)
@@ -132,7 +130,7 @@ function _preflight_accelerator_method(
     binding_sample = _native_binding_sample(workspace.samples)
     bound_target = _bind_resolved_target(target, binding_sample)
     T = eltype(workspace.logweights)
-    target_argument = _NativeDeviceTarget{T,typeof(bound_target)}(bound_target)
+    target_argument = _native_device_evaluator(bound_target, T)
     backend = KernelAbstractions.get_backend(buffers.normal)
     kernel = _gaussian_round_launch_kernel!(backend)
     round = findmax(state.schedule)[2]
