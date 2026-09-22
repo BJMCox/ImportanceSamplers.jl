@@ -49,7 +49,8 @@ remain in the raw screening file.
 The September 17 measurements used remote `main` at
 `2942c10d5de675863ec5c216e9137ff4e28b81be`, including its workload-aware CPU
 scheduling. The current environment pins `5fcb74c1a7c19bedf95795644fb6296901d25d0e`
-(0.0.2). This environment update does not relabel the archived measurements.
+(0.0.2). The September 22 refresh measures that revision on fresh held-out seeds.
+It does not relabel archived measurements or establish a cross-version speedup.
 Each report records its measured revision in addition to the package version.
 
 ## Scalar and batch regression targets
@@ -77,47 +78,93 @@ The callback reuses an observation-by-8192 scratch matrix and handles shorter
 chunks. At 1024 observations in Float64, this is 64 MiB. Scratch allocation and
 device transfer remain inside the timed run. The reported bytes and allocation
 counts are **host** measurements, not device memory measurements. CUDA memory
-pools and compilation are warm. Mode order is counterbalanced across seeds,
-models and methods.
+pools and compilation are warm. Each seed interleaves four complete executions
+per mode in ABBA and BAAB blocks. Starting order changes across seeds, models
+and methods. Both full workloads compile before timing. Full GC runs before
+each measured execution, outside timing. CUDA synchronizes inside the timed
+operation after the final mean transfer.
 
 Times include fitting, pilot tuning, scratch setup, transfers, sampling and
 posterior-mean estimation. Post-run ESS and accuracy diagnostics are excluded.
-Each seed uses median timing and the last same-seed result. CPU contention can
-affect GPU rows through host setup. Treat shared-host results as provisional
-and retain the raw timing ranges and load records.
+Each seed uses median timing and the last same-seed result. Diagnostics run only
+after both balanced blocks. The report retains execution order, per-call times,
+GC time, host allocations and load. Its paired ratio divides mean batch time by
+mean scalar time within each block, then reports the median and range across
+blocks. A ratio above one means batching took longer.
+
+Interleaving reduces drift but does not remove rapid contention. CPU load also
+affects GPU setup. Compare package revisions with the same driver, dependency
+versions and settings in interleaved executions. Scalar/batch comparisons do not
+test whether the original scalar path regressed. Older blocked-timing reports
+remain readable, but cannot resume under this paired protocol.
+
+The September 22 paired refresh covers AMIS and LAIS-RAM on all four regression
+models. It uses package revision `29c8fc5`, which fixes CPU LAIS closure boxing.
+The [CPU report](batch-cpu-2026-09-22-paired.md) and
+[CUDA report](batch-cuda-2026-09-22-paired.md) retain every measured time and
+accuracy warning. Their raw TOML files include the execution chronology and
+source hashes. These are separate scalar/batch comparisons, not replacements
+for the cross-package table below.
+
+The paired medians favour batching for linear regression on CPU and CUDA, and
+for LAIS-RAM on CUDA. Nonlinear CPU callbacks and nonlinear CUDA AMIS are slower
+in this configuration. Scalar/batch posterior means agree within `2.0e-14` on
+CPU and `1.1e-12` on CUDA. Linear LAIS-RAM fails moment checks in both modes on
+both backends; all other measured cases pass. The reports retain those warnings.
+
+Reproduce this subset from the repository root in a session launched with
+`--threads=16 --project=benchmark/comparison`:
+
+```julia
+include("benchmark/comparison/batch.jl")
+BatchComparison.compare(methods=(:amis, :lais), cpu=true, cuda=false,
+    output="batch-cpu-new.toml")
+BatchComparison.compare(methods=(:amis, :lais), cpu=false, cuda=true,
+    output="batch-cuda-new.toml")
+```
 
 ## Published results
 
-The [current combined report](results-2026-09-22-comparison.md) shows one selected
-EnsembleMCMC move per model. It retains all September 17 measurements unchanged.
+The [current combined report](results-2026-09-22-refresh-comparison.md) shows one
+selected EnsembleMCMC move per model. It refreshes all four moves at 0.0.2 and
+retains every non-Ensemble row unchanged.
 Selection uses the highest mean ESS / mean seconds among the accuracy-eligible,
 width-selected candidates in the independent screen. It never selects on the
-reporting seeds. This selects DE for five models and Stretch for signal-background.
-Gaussian replacement has no archived measurements and cannot win this selection.
+reporting seeds. This selects DE for eight schools and Gaussian replacement
+with shrinkage 1 for the other five models. All 18 selected-move runs pass the
+moment checks. Signal-background retains an R-hat warning. Measurements use a
+shared host and a different window from the archived non-Ensemble rows.
 Raw files retain their original source hashes, versions, and timings.
 Print the report without sampling:
 
 ```sh
-julia --project=benchmark/comparison benchmark/comparison/compare.jl --report benchmark/comparison/results-2026-09-22-comparison.toml
+julia --project=benchmark/comparison benchmark/comparison/compare.jl --report benchmark/comparison/results-2026-09-22-refresh-comparison.toml
 ```
 
 Rebuild the combined TOML and Markdown from the saved raw artifacts:
 
-```sh
-julia --project=benchmark/comparison benchmark/comparison/ensemble.jl --report
+```julia
+include("benchmark/comparison/ensemble.jl")
+EnsembleComparison.report(
+    ensemblefile="benchmark/comparison/ensemble-results-2026-09-22-refresh.toml",
+    screenfile="benchmark/comparison/ensemble-screen-2026-09-22-refresh.toml",
+    output="benchmark/comparison/rebuilt-comparison.toml",
+)
 ```
 
-This reads `ensemble-results-2026-09-17.toml`,
-`signal-background-results-2026-09-17.toml`, and
-`ensemble-screen-2026-09-17.toml` and writes `results-2026-09-22-comparison.toml`
-and Markdown. It never reruns a sampler or changes the archived raw files. The screen uses
-seeds 8301–8303, ensemble validation uses 8401–8403, and the new model's other
-methods use 8501–8503. The combined report records the screening file hash
-and retains the baseline when no screening candidate passed the moment checks.
-This occurred only for signal-background DE, so it is ineligible for the selected
-headline despite passing held-out moment checks. Its R-hat still exceeded 1.01
-in one run. Snooker failed a held-out variance check.
-CAIS CPU and LAIS-RAM CUDA also failed new-model moment checks. All remain visible.
+Run this in the comparison environment. It reuses the archived
+`signal-background-results-2026-09-17.toml` and writes TOML and Markdown without
+sampling or changing the raw files. The fresh screen uses seeds 8301–8303 and
+held-out validation uses 9401–9403. The frozen selection and screen hash are in
+`ensemble-selection-2026-09-22-refresh.toml`. The combined report records the
+screening hash and retains a baseline when no screening candidate passes.
+This occurred only for signal-background DE, which is ineligible for the
+headline. Both DE and snooker fail held-out variance checks on that model.
+The archived CAIS CPU and LAIS-RAM CUDA warnings remain visible.
+
+The [September 17 selection report](results-2026-09-22-comparison.md) remains
+unchanged. The default `ensemble.jl --report` command rebuilds that archive,
+not the fresh report above.
 
 The [previous combined report](results-2026-09-16-comparison.md) remains archived.
 Print it without sampling:
@@ -205,6 +252,16 @@ To reuse an older screen without Gaussian replacement, restrict `only_methods`
 to `(:ensemble, :stretch, :snooker)`. Gaussian replacement needs a fresh screen.
 All six models reuse the references in `results-2026-09-17-comparison.toml`.
 Fresh references are generated only for models missing from that archive.
+The September 22 refresh uses held-out seeds 9401–9403. Reproduce its protocol
+in a Julia session launched with `--threads=16 --project=benchmark/comparison`:
+
+```julia
+include("benchmark/comparison/ensemble.jl")
+EnsembleComparison.screen(output="screen-new.toml")
+EnsembleComparison.compare(screenfile="screen-new.toml", seed_start=9401,
+    output="ensemble-new.toml")
+```
+
 To select settings directly, pass `ensemble_settings` to `compare`:
 
 ```julia

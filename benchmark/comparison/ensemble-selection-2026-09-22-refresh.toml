@@ -1,0 +1,18 @@
+frozen_at_utc = "2026-09-22T12:52:14.736"
+
+[selected]
+robust = "EnsembleMCMC Gaussian replacement / CPU"
+poisson = "EnsembleMCMC Gaussian replacement / CPU"
+logistic = "EnsembleMCMC Gaussian replacement / CPU"
+linear = "EnsembleMCMC Gaussian replacement / CPU"
+eight_schools = "EnsembleMCMC DE / CPU"
+signal-background = "EnsembleMCMC Gaussian replacement / CPU"
+
+[provenance]
+no_eligible_candidate = ["signal-background / EnsembleMCMC DE / CPU"]
+source = "ensemble-screen-2026-09-22-refresh.toml"
+seeds = [8301, 8302, 8303]
+move_selection = "maximum mean(ESS) / mean(seconds) among eligible, selected screening settings"
+sha256 = "1c9366ebe00c257003760b6b54df48af549bc1bce8c42f2f43da00552bad74ad"
+selection = "minimum mean(seconds * standardized mean squared error), subject to moment checks"
+script_sha256 = "7d48d906e18d74b88e008dd2f1351093c94a6a19ef3b609544a6a632a604c521"

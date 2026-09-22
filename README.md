@@ -59,7 +59,7 @@ Each table lists importance samplers first, followed by other measured methods.
 | AdvancedHMC NUTS | 1.5e+04 | 9e+03 | 2.1e+04 | 5e+04 | 1.3e+05† | 5.2e+04 |
 | AdvancedMH RWMH | 8.5e+02‡ | 2.6e+03 | 5.2e+03 | 4.5e+03 | 1.8e+04 | 1.4e+04 |
 | SliceSampling | 7.7e+02 | 1.9e+03 | 5.6e+03 | 4.4e+03 | 1.6e+05 | 1.5e+04 |
-| EnsembleMCMC (selected) | 5.4e+02‡ | 1.3e+03 | 3.5e+03‡ | 3.4e+03‡ | 9.2e+03‡ | 6.9e+02‡ |
+| EnsembleMCMC (selected) | 3e+04 | 2.4e+04 | 4.9e+04 | 5e+04 | 1e+04 | 3.5e+03‡ |
 
 ### GPU (CUDA)
 
@@ -78,10 +78,10 @@ Only importance samplers have GPU measurements in this comparison.
 
 Bold denotes the highest measured CPU ESS/s per model. GPU results appear separately.
 
-EnsembleMCMC uses the highest screening ESS/s among accuracy-eligible candidates:
-DE for the first five models and Stretch for signal-background. The table reports
-held-out results. All held-out move rows remain in the detailed report.
-Gaussian replacement in 0.0.2 is available for future screens, but is not yet measured here.
+EnsembleMCMC 0.0.2 uses the highest screening ESS/s among accuracy-eligible
+candidates: DE for eight schools and Gaussian replacement with shrinkage 1 for
+the other models. The table reports held-out results. All four moves remain
+in the detailed report.
 
 \* Importance sampling uses weight ESS. Independent-chain MCMC uses minimum
 bulk ESS. EnsembleMCMC uses minimum mean ESS from the sweep-average process.
@@ -111,11 +111,13 @@ at stationarity without warmup; other models use 1,024 warmup sweeps.
 DM-PMC and LAIS include an independent 4,096-draw width pilot.
 Compilation and post-run diagnostics are excluded. Unchanged rows reuse archived
 measurements. The report records each row's source and timing protocol.
+The September 22 EnsembleMCMC refresh used a shared host. Other rows retain
+their original measurement windows; these are not matched cross-version timings.
 
 Signal-background uses the nine-parameter BAT paper model and its original
 37-event dataset. Its CAIS CPU and LAIS-RAM CUDA runs include failed moment
 checks, marked above. The detailed report also retains ensemble snooker's
-failed checks. Offline settings search is not timed.
+and DE's failed checks. Offline settings search is not timed.
 
 The linear posterior is Gaussian, so a fitted Gaussian proposal leaves little
 room for adaptation to improve weight ESS. Follow-up CUDA runs used an independent
@@ -125,7 +127,8 @@ Longer LAIS runs degraded the fitted proposal. These findings concern a differen
 configuration from the LAIS-RAM rows above, which remain for comparison.
 
 [Reproducer and pinned versions](benchmark/comparison/README.md) ·
-[Timings, ranges, and accuracy checks](benchmark/comparison/results-2026-09-22-comparison.md) ·
+[Timings, ranges, and accuracy checks](benchmark/comparison/results-2026-09-22-refresh-comparison.md) ·
+[Scalar/batch measurements](benchmark/comparison/README.md#scalar-and-batch-regression-targets) ·
 [Models and methodology](https://bjmcox.github.io/ImportanceSamplers.jl/guide/benchmarks/)
 
 [Documentation](https://bjmcox.github.io/ImportanceSamplers.jl/) ·

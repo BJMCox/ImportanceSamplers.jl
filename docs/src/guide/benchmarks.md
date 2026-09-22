@@ -3,20 +3,22 @@
 The [reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/README.md)
 compares plain IS, AMIS, DM-PMC, CAIS, LAIS-RAM, and first-order GRAMIS-CAIS with AdvancedHMC NUTS,
 AdvancedMH random-walk MH, SliceSampling, and EnsembleMCMC. The current harness
-includes DE, Stretch, snooker and Gaussian replacement candidates. The archived
-measurements contain only the first three. The headline shows one selected move
+includes DE, Stretch, snooker and Gaussian replacement candidates. The September
+22 refresh measures all four at version 0.0.2. The headline shows one selected move
 per model while the detailed report retains all held-out move rows. Width-screen
 trials remain in the raw screening file.
 It measures all six importance samplers on CPU and CUDA. The environment is
 separate from the package and docs dependencies. Its committed manifest pins package versions, including the
 EnsembleMCMC source revision.
 
-The [recorded report](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/results-2026-09-22-comparison.md)
+The [recorded report](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/results-2026-09-22-refresh-comparison.md)
 contains the ESS/s table, raw timing ranges, R-hat, and moment errors.
 Symbol footnotes identify divergences, R-hat warnings, large weight-ESS variation,
 and failed moment checks. The report retains every measured run.
 It combines archived unchanged rows with new measurements. Each row links to
 its raw source, including the original seeds, source hashes, and timing protocol.
+The fresh EnsembleMCMC rows use a shared host. Their measurement window differs
+from the archived rows, so the table does not establish cross-version speedups.
 First-order GRAMIS-CAIS uses repulsion strength 0.1, the same Student-t bank and
 round budget as CAIS, and the models' analytic gradients. This is not the
 original second-order GRAMIS algorithm.
@@ -64,8 +66,8 @@ The target has checked analytic gradients and uses the same scalar code on CPU
 and CUDA. Parameter-independent constants are omitted, so the benchmark does not
 compare absolute evidence with BAT. Source-data hashes appear in new reports.
 The reference has maximum R-hat 1.0004 and minimum bulk ESS 23,801. CAIS CPU,
-LAIS-RAM CUDA, and ensemble snooker failed moment checks in at least one run;
-the detailed report retains those measurements with warning symbols.
+LAIS-RAM CUDA, ensemble DE and ensemble snooker failed moment checks in at least
+one run. The detailed report retains those measurements with warning symbols.
 
 ## What ESS/s means here
 
@@ -87,11 +89,12 @@ rate per model, selected before rounding. GPU cells are not bolded.
 
 The EnsembleMCMC headline selects the highest screening mean ESS / mean seconds
 among accuracy-eligible candidates at their independently selected settings.
-Reporting seeds never choose or replace the selected move. Current archived
-data select DE on five models and Stretch on signal-background. If no candidate
-passes the screening checks, its headline cell shows a dash. The report names each
-selected move and retains all held-out diagnostics. Gaussian replacement
-requires a new screen and held-out measurements before it can appear as selected.
+Reporting seeds never choose or replace the selected move. The fresh screen
+selects DE on eight schools and Gaussian replacement with shrinkage 1 on the
+other five models. All selected runs pass moment checks, but signal-background
+retains an R-hat warning. If no candidate passes the screening checks, its
+headline cell shows a dash. The report names each
+selected move and retains all held-out diagnostics.
 
 These ESS definitions are **different diagnostics, not a common accuracy score**.
 Weight ESS measures weight concentration. It does not detect missed modes or
@@ -207,13 +210,14 @@ Linear's stationary Gaussian start needs no warmup; other models initially use
 before the held-out seeds. Every row records the resolved configuration.
 The screen uses seeds 8301–8303 and 4,096 sweeps. It selects by standardized
 mean squared error times elapsed time, subject to the moment checks. The
-held-out comparison uses seeds 8401–8403 and 16,384 sweeps. Search cost is
+fresh held-out comparison uses seeds 9401–9403 and 16,384 sweeps. Search cost is
 separate from per-run fitting and warmup. A failed screen keeps its baseline
 and is disclosed separately from held-out diagnostics. Signal-background DE
 was the only such case. It is excluded from the selected headline, not from the
-raw archive. The recorded runs used EnsembleMCMC `2942c10`. The current
-environment pins 0.0.2 at `5fcb74c`, including Gaussian replacement with
-shrinkage candidates 0.5, 0 and 1. No new timings are implied by that update.
+raw archive. The September 17 runs used EnsembleMCMC `2942c10` and validation
+seeds 8401–8403. The September 22 refresh uses 0.0.2 at `5fcb74c`, including
+Gaussian replacement with shrinkage candidates 0.5, 0 and 1. Source artifacts
+retain both revisions and their distinct measurement windows.
 Other retained counts
 match exactly. IS uses batches while MCMC uses correlated
 transitions and warmup. These settings are not a search for each
@@ -228,6 +232,46 @@ CUDA timing includes target-data and sampler transfers, device reductions,
 and the final posterior-mean transfer to the CPU. That final transfer also
 synchronises the measured work. GPU compilation is excluded. These are
 end-to-end timings, not isolated kernel throughput.
+
+## Scalar and batch targets
+
+The [CPU](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-cpu-2026-09-22-paired.md)
+and [CUDA](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-cuda-2026-09-22-paired.md)
+paired reports compare scalar targets with explicit batch callbacks for AMIS
+and LAIS-RAM on the four regression models. Each execution retains 262,144
+draws. The three seeds each have four measured executions per mode, arranged
+in balanced ABBA/BAAB blocks after both complete workloads compile.
+
+Time includes fitting, pilot tuning, batch scratch allocation, transfers,
+sampling and posterior-mean estimation. Diagnostics run after both blocks.
+Full garbage collection precedes each execution outside timing. Raw TOML
+files record execution order, elapsed and GC times, host allocations, CPU load,
+source hashes and package versions. CUDA timings include synchronization.
+
+The paired ratio is batch time divided by scalar time within each block.
+The report gives its median and range across blocks. CPU scalar runs use one
+BLAS thread; batch CPU runs use sixteen throughout fitting and sampling.
+These compare complete execution strategies, not callback dispatch alone.
+Both CUDA modes use one BLAS thread. Interleaving reduces load drift but does
+not remove shared-host contention. These measurements do not replace the
+cross-package table or establish a cross-version speedup.
+
+Median batch/scalar elapsed-time ratios:
+
+| Model | CPU AMIS | CPU LAIS-RAM | CUDA AMIS | CUDA LAIS-RAM |
+|:--|--:|--:|--:|--:|
+| Linear | 0.479 | 0.507† | 0.915 | 0.211† |
+| Logistic | 9.74 | 8.67 | 1.69 | 0.274 |
+| Poisson | 3.18 | 2.90 | 1.83 | 0.515 |
+| Robust | 8.77 | 7.23 | 1.28 | 0.404 |
+
+† Linear LAIS-RAM fails the moment checks in both target modes on both backends.
+All other rows pass. Matched scalar/batch posterior means differ by at most
+`2.0e-14` on CPU and `1.1e-12` on CUDA. Batching helps CUDA LAIS in these cases,
+but is not a universal speedup. The linked reports retain every timing range.
+
+The [reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/README.md#scalar-and-batch-regression-targets)
+also supports the full six-method comparison.
 
 ## Reproduce
 

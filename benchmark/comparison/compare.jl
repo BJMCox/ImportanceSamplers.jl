@@ -214,8 +214,11 @@ function measure_run(method, device, model, seed; timing_samples=1, kwargs...)
     captured = Ref{Any}()
     bench = @benchmarkable $captured[] = run_method($method,$device,$model,$seed; $kwargs...) samples=1 evals=1 gctrial=false
     trial = run(bench; samples=timing_samples, seconds=5.0, warmup=false)
+    return summarize_run(trial,captured[],seed)
+end
+
+function summarize_run(trial,value,seed)
     measured = median(trial)
-    value = captured[]
     row = Dict("seed"=>seed,"seconds"=>measured.time/1e9,"host_bytes"=>measured.memory,
         "host_allocations"=>measured.allocs,"estimate"=>value.estimate,
         "divergences"=>value.divergences,"draws"=>value.draws,
@@ -449,6 +452,8 @@ function print_table(report; io=stdout, accuracy=false)
             println(io,"| $name | $label | ",join(["[$s]($s)" for s in sources],", ")," |")
         end
     end
+    haskey(report,"sources") && println(io,
+        "\nThis package table describes only the report-environment source. The linked measurement sources retain their own package versions and revisions.")
     println(io,"\n| Package | Version | Source revision |\n|:--|:--|:--|")
     for (name,version) in sort!(collect(report["metadata"]["packages"]); by=first)
         revision = get(get(report["metadata"],"package_revisions",Dict()),name,"—")
