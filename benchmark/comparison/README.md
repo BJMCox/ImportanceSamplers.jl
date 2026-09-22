@@ -203,8 +203,9 @@ The first command writes `ensemble-screen.toml`; the second writes
 The driver requires a completed screen for every requested model and move.
 To reuse an older screen without Gaussian replacement, restrict `only_methods`
 to `(:ensemble, :stretch, :snooker)`. Gaussian replacement needs a fresh screen.
-Fresh references are generated only for models missing from the saved reference
-file. To select settings directly, pass `ensemble_settings` to `compare`:
+All six models reuse the references in `results-2026-09-17-comparison.toml`.
+Fresh references are generated only for models missing from that archive.
+To select settings directly, pass `ensemble_settings` to `compare`:
 
 ```julia
 settings = Dict("linear" => Dict("EnsembleMCMC Stretch / CPU" =>

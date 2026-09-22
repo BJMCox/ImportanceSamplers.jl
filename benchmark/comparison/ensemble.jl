@@ -18,7 +18,7 @@ function screen(; output=joinpath(@__DIR__,"ensemble-screen.toml"), repeats=3, s
     ispath(output) && error("Screen output already exists: $output")
     SC.BLAS.set_num_threads(1)
     SC.FFTW.set_num_threads(1)
-    archive = TOML.parsefile(joinpath(@__DIR__,"accuracy-2026-09-16.toml"))
+    archive = TOML.parsefile(joinpath(@__DIR__,"results-2026-09-17-comparison.toml"))
     report = Dict{String,Any}("metadata"=>SC.metadata(), "seeds"=>collect(8301:8300+repeats),
         "sweeps"=>sweeps, "models"=>Dict{String,Any}(), "settings"=>Dict{String,Any}(),
         "script_sha256"=>bytes2hex(SC.sha256(read(@__FILE__))),
