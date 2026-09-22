@@ -4,7 +4,7 @@ include("compare.jl")
 using .SamplerComparison, Statistics, TOML
 const SC = SamplerComparison
 const LABELS = (ensemble="EnsembleMCMC DE / CPU", stretch="EnsembleMCMC Stretch / CPU",
-    snooker="EnsembleMCMC snooker / CPU")
+    snooker="EnsembleMCMC snooker / CPU", gaussian="EnsembleMCMC Gaussian replacement / CPU")
 
 """
     screen(; output, repeats=3, sweeps=4096)
@@ -32,7 +32,8 @@ function screen(; output=joinpath(@__DIR__,"ensemble-screen.toml"), repeats=3, s
         for method in keys(LABELS)
             label = LABELS[method]
             base = SC.ensemble_options(Dict(),model,label,method; sweeps)
-            candidates = method === :ensemble ? [base] :
+            candidates = method === :ensemble ? [base] : method === :gaussian ?
+                [merge(base,(;shrinkage)) for shrinkage in (0.5,0.0,1.0)] :
                 [merge(base,(;scale)) for scale in (method === :stretch ?
                     unique([base.scale,1+2.151/sqrt(model.dimension),1.5]) : [1.7,1.2,0.85])]
             trials = record["trials"][label] = Dict{String,Any}[]
@@ -62,17 +63,43 @@ function screen(; output=joinpath(@__DIR__,"ensemble-screen.toml"), repeats=3, s
     return report
 end
 
+"""Select one eligible move per model using only the independent screening runs."""
+function selected_moves(pilot)
+    result = Dict{String,String}()
+    for (name,record) in pilot["models"]
+        candidates = Pair{String,Float64}[]
+        for (label,trials) in record["trials"], trial in trials
+            get(trial,"selected",false) && trial["eligible"] || continue
+            rows = trial["runs"]
+            isempty(rows) && continue
+            rate = mean(r["ess"] for r in rows)/mean(r["seconds"] for r in rows)
+            isfinite(rate) && rate > 0 && push!(candidates,label=>rate)
+        end
+        result[name] = isempty(candidates) ? "" : first(candidates[argmax(last.(candidates))])
+    end
+    return result
+end
+
 function screen_provenance(screenfile, pilot)
     failed = ["$name / $label" for (name,record) in pilot["models"]
         for (label,trials) in record["trials"] if all(!t["eligible"] for t in trials)]
     return Dict("source"=>basename(screenfile), "sha256"=>bytes2hex(SC.sha256(read(screenfile))),
         "script_sha256"=>get(pilot,"script_sha256","unrecorded"), "seeds"=>pilot["seeds"],
-        "selection"=>pilot["selection"], "no_eligible_candidate"=>failed)
+        "selection"=>pilot["selection"], "no_eligible_candidate"=>failed,
+        "move_selection"=>"maximum mean(ESS) / mean(seconds) among eligible, selected screening settings")
 end
 
-function compare(; screenfile=joinpath(@__DIR__,"ensemble-screen.toml"), kwargs...)
+function compare(; screenfile=joinpath(@__DIR__,"ensemble-screen.toml"),
+                   only_methods=keys(LABELS), selected=eachindex(SC.models()), kwargs...)
     pilot = TOML.parsefile(screenfile)
-    return SC.compare(; only_methods=keys(LABELS), ensemble_settings=pilot["settings"],
+    for model in SC.models()[collect(selected)], method in only_methods
+        label = LABELS[method]
+        trials = get(get(pilot["models"],model.name,Dict()),"trials",Dict())
+        haskey(get(pilot["settings"],model.name,Dict()),label) &&
+            any(t->get(t,"selected",false) && !isempty(t["runs"]),get(trials,label,())) ||
+            error("Missing screening result for $(model.name) / $label. Run a new screen or restrict only_methods.")
+    end
+    return SC.compare(; only_methods, selected, ensemble_settings=pilot["settings"],
         configuration_search=screen_provenance(screenfile,pilot), references=pilot, seed_start=8401,
         output=joinpath(@__DIR__,"ensemble-results.toml"), kwargs...)
 end
@@ -81,7 +108,7 @@ end
 function report(; ensemblefile=joinpath(@__DIR__,"ensemble-results-2026-09-17.toml"),
                   signalfile=joinpath(@__DIR__,"signal-background-results-2026-09-17.toml"),
                   screenfile=joinpath(@__DIR__,"ensemble-screen-2026-09-17.toml"),
-                  output=joinpath(@__DIR__,"results-2026-09-17-comparison.toml"))
+                  output=joinpath(@__DIR__,"results-2026-09-22-comparison.toml"))
     combined = TOML.parsefile(joinpath(@__DIR__,"results-2026-09-16-comparison.toml"))
     for path in (signalfile,ensemblefile)
         fresh = TOML.parsefile(path)
@@ -112,6 +139,7 @@ function report(; ensemblefile=joinpath(@__DIR__,"ensemble-results-2026-09-17.to
     combined["ensemble_settings"] = screen["settings"]
     combined["ensemble_sweeps"] = 2^14
     combined["configuration_search"] = screen_provenance(screenfile,screen)
+    combined["ensemble_selection"] = selected_moves(screen)
     # The old load summary belongs only to its archived measurements.
     delete!(combined,"host_load")
     open(io->TOML.print(io,combined),output,"w")

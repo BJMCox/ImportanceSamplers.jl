@@ -7,16 +7,19 @@ import AbstractMCMC, AdvancedHMC, AdvancedMH, CUDA, EnsembleMCMC, ImportanceSamp
 using FFTW
 
 include("models.jl")
+include("batch_targets.jl")
 const IS = ImportanceSamplers
 const HMC = AdvancedHMC
 const IMPORTANCE_METHODS = (:is, :amis, :dmpmc, :cais, :lais, :gramis)
 const ENSEMBLE_MOVES = (ensemble=EnsembleMCMC.DEMove(),
-    stretch=EnsembleMCMC.StretchMove(), snooker=EnsembleMCMC.DESnookerMove())
+    stretch=EnsembleMCMC.StretchMove(), snooker=EnsembleMCMC.DESnookerMove(),
+    gaussian=EnsembleMCMC.GaussianReplacementMove())
 
 function ensemble_options(settings, model, label, method; sweeps=2^14)
     # Only linear has an exact Gaussian stationary start. The dimension-based
     # stretch width helped linear, but hurt schools in the separate ESS review.
-    move = method === :ensemble ? (gamma0=2.38/sqrt(2model.dimension), sigma=1e-5) :
+    move = method === :gaussian ? (shrinkage=0.5,) :
+        method === :ensemble ? (gamma0=2.38/sqrt(2model.dimension), sigma=1e-5) :
         (scale=method === :snooker ? 1.7 : model.name == "linear" ? 1+2.151/sqrt(model.dimension) : 2.0,)
     defaults = (; walkers=4model.dimension, sweeps, warmup=model.name == "linear" ? 0 : 1024, move...)
     overrides = get(get(settings,model.name,Dict()),label,Dict())
@@ -26,6 +29,7 @@ end
 ensemble_move(::Val{:ensemble}, p) = EnsembleMCMC.DEMove(; p.gamma0, p.sigma)
 ensemble_move(::Val{:stretch}, p) = EnsembleMCMC.StretchMove(; p.scale)
 ensemble_move(::Val{:snooker}, p) = EnsembleMCMC.DESnookerMove(; p.scale)
+ensemble_move(::Val{:gaussian}, p) = EnsembleMCMC.GaussianReplacementMove(; p.shrinkage)
 
 function nuts(target, seed, draws, warmup; acceptance=0.8)
     rng = Xoshiro(seed)
@@ -77,11 +81,12 @@ function population_proposal(family, location, factor; dof=8.0)
     error("Unknown population family: $family")
 end
 
-function tune_population(rng, device, model, bank, pilot; family=:student_t)
+function tune_population(rng, device, model, bank, pilot; family=:student_t,
+                         target=logtarget, data=model.data)
     start = time_ns()
     logsumexp = IS.LogExpFunctions.logsumexp
     # A separate stream prevents the main sampler from replaying pilot draws.
-    prepared = IS.prepare_sampler(Xoshiro(rand(rng,UInt64)),logtarget,model.data,
+    prepared = IS.prepare_sampler(Xoshiro(rand(rng,UInt64)),target,data,
         IS.ImportanceSampling(bank;nsamples=pilot.nsamples,mis_scheme=IS.RandomMixture()))
     device === nothing || (prepared = device(prepared))
     samples = IS.importance_sample!(prepared)
@@ -110,10 +115,15 @@ function tune_population(rng, device, model, bank, pilot; family=:student_t)
 end
 
 function run_method(method, device, model, seed; nsamples=2^18, warmup=1024, nchains=16,
-                    population=DEFAULT_POPULATION, pilot=nothing, ensemble=nothing)
+                    population=DEFAULT_POPULATION, pilot=nothing, ensemble=nothing,
+                    batch_capacity=0)
     fit = laplace(model)
     rng = Xoshiro(seed)
     if method in IMPORTANCE_METHODS
+        data = iszero(batch_capacity) ? model.data : merge(model.data,
+            (;workspace=similar(model.data.X,model.observations,batch_capacity)))
+        target = IS.LogTarget(logtarget; grad=method === :gramis ? evaluate : nothing,
+            batch=iszero(batch_capacity) ? nothing : regression_batch!)
         pilot_stats = nothing
         proposal = IS.FactorStudentT(8.0, fit.location, 1.2fit.factor)
         rounds = method in (:dmpmc, :lais) ? population.rounds : 4
@@ -130,7 +140,7 @@ function run_method(method, device, model, seed; nsamples=2^18, warmup=1024, nch
                 population_proposal(family,locations[:,j],settings.scale*fit.factor) for j in 1:settings.count
             ],ones(settings.count))
             if method in (:dmpmc,:lais) && pilot !== nothing
-                tuned = tune_population(rng,device,model,bank,pilot;family)
+                tuned = tune_population(rng,device,model,bank,pilot;family,target,data)
                 bank = tuned.bank
                 pilot_stats = (;tuned.draws,tuned.seconds,tuned.scale)
             end
@@ -146,8 +156,7 @@ function run_method(method, device, model, seed; nsamples=2^18, warmup=1024, nch
                 IS.LAIS(bank; transition, options...)
             end
         end
-        target = method === :gramis ? IS.LogTarget(logtarget; grad=evaluate) : logtarget
-        prepared = IS.prepare_sampler(rng, target, model.data, algorithm)
+        prepared = IS.prepare_sampler(rng, target, data, algorithm)
         device === nothing || (prepared = device(prepared))
         result = IS.importance_sample!(prepared)
         # This includes the device reduction, final transfer, and its sync.
@@ -306,22 +315,28 @@ function print_table(report; io=stdout, accuracy=false)
     labels = filter(report["method_order"]) do label
         accuracy || all(name->haskey(first(report["models"][name]["runs"][label]),"ess"),names)
     end
-    scores = map(Iterators.product(labels,names)) do (label,name)
-        rows = report["models"][name]["runs"][label]
-        accuracy ? rate(rows,report["models"][name]["reference"]) :
+    selection = get(report,"ensemble_selection",Dict())
+    headline = isempty(selection) ? labels :
+        [filter(label->!startswith(label,"EnsembleMCMC "),labels); "EnsembleMCMC (selected) / CPU"]
+    rows_for(label,name) = get(report["models"][name]["runs"],
+        label == "EnsembleMCMC (selected) / CPU" ? get(selection,name,"") : label,())
+    scores = map(Iterators.product(headline,names)) do (label,name)
+        rows = rows_for(label,name)
+        isempty(rows) ? -Inf : accuracy ? rate(rows,report["models"][name]["reference"]) :
             mean(r["ess"] for r in rows)/mean(r["seconds"] for r in rows)
     end
     headers = ["$(uppercasefirst(replace(name,'_'=>' '))) ($(report["models"][name]["dimension"]))" for name in names]
     for device in ("CPU","CUDA")
-        indices = findall(label->endswith(label," / $device"),labels)
+        indices = findall(label->endswith(label," / $device"),headline)
         isempty(indices) && continue
         best = maximum(scores[indices,:]; dims=1)
         println(io,"### ",device,"\n\n| Sampler | ",join(headers," | ")," |")
         println(io,"|:--|",join(fill("--:",length(names)),"|"),"|")
         for i in indices
-            label = labels[i]
+            label = headline[i]
             cells = map(eachindex(names)) do j
-                rows = report["models"][names[j]]["runs"][label]
+                rows = rows_for(label,names[j])
+                isempty(rows) && return "—"
                 mark = (any(r->r["divergences"]>0,rows) ? "†" : "") *
                        (any(r->get(r,"max_rhat",0.0)>1.01,rows) ? "‡" : "")
                 if haskey(first(rows),"ess") && !haskey(first(rows),"max_rhat")
@@ -336,6 +351,12 @@ function print_table(report; io=stdout, accuracy=false)
         end
         println(io)
     end
+    if !isempty(selection)
+        choices = ["$name: " * (isempty(get(selection,name,"")) ? "no eligible move" :
+            replace(selection[name],"EnsembleMCMC "=>""," / CPU"=>"")) for name in names]
+        println(io,"EnsembleMCMC moves: ",join(choices,"; "),".\n")
+        println(io,"Moves maximize screening mean ESS / mean seconds among accuracy-eligible, width-selected candidates. Reporting seeds do not select the move. All held-out move rows remain below; width-screen trials remain in the screen artifact.\n")
+    end
     println(io,accuracy ? "\nAccuracy-based ESS/s estimates posterior-mean precision per unit time." :
         "\n\\* ESS denotes weight ESS for importance sampling, minimum bulk ESS for independent-chain MCMC, and minimum mean ESS for EnsembleMCMC. Ensemble mean ESS is marginal variance divided by the squared MCSE of the sweep-mean process. These diagnostics do not define an equal-accuracy comparison.")
     println(io,"\nBold denotes the highest measured CPU rate per model. GPU results appear separately.")
@@ -348,7 +369,7 @@ function print_table(report; io=stdout, accuracy=false)
         println(io,"\n| Model | Ensemble move | Walkers | Retained sweeps | Warmup sweeps | Move settings |\n|:--|:--|--:|--:|--:|:--|")
         for (name,label,row) in ensemble_rows
             p = row["ensemble"]
-            move = join(["$k=$(p[k])" for k in ("gamma0","sigma","scale") if haskey(p,k)],", ")
+            move = join(["$k=$(p[k])" for k in ("gamma0","sigma","scale","shrinkage") if haskey(p,k)],", ")
             println(io,"| $name | $label | ",p["walkers"]," | ",p["sweeps"]," | ",p["warmup"]," | $move |")
         end
     end
@@ -480,7 +501,8 @@ function compare(; cuda=false, cpu=true, resume=false, repeats=3, timing_samples
                (:gramis,nothing,"First-order GRAMIS-CAIS / CPU"),
                (:nuts,nothing,"AdvancedHMC NUTS / CPU"),(:mh,nothing,"AdvancedMH RWMH / CPU"),
                (:slice,nothing,"SliceSampling / CPU"),(:ensemble,nothing,"EnsembleMCMC DE / CPU"),
-               (:stretch,nothing,"EnsembleMCMC Stretch / CPU"),(:snooker,nothing,"EnsembleMCMC snooker / CPU")]
+               (:stretch,nothing,"EnsembleMCMC Stretch / CPU"),(:snooker,nothing,"EnsembleMCMC snooker / CPU"),
+               (:gaussian,nothing,"EnsembleMCMC Gaussian replacement / CPU")]
     only_methods === nothing || filter!(m->m[1] in only_methods,methods)
     mcmc_samples = mcmc_draws*nchains
     report = Dict{String,Any}("metadata"=>metadata(), "repeats"=>repeats,"timing_samples"=>timing_samples,"nsamples"=>nsamples,"mcmc_samples"=>mcmc_samples,

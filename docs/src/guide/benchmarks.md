@@ -2,12 +2,16 @@
 
 The [reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/README.md)
 compares plain IS, AMIS, DM-PMC, CAIS, LAIS-RAM, and first-order GRAMIS-CAIS with AdvancedHMC NUTS,
-AdvancedMH random-walk MH, SliceSampling, and EnsembleMCMC DE, Stretch, and snooker moves.
+AdvancedMH random-walk MH, SliceSampling, and EnsembleMCMC. The current harness
+includes DE, Stretch, snooker and Gaussian replacement candidates. The archived
+measurements contain only the first three. The headline shows one selected move
+per model while the detailed report retains all held-out move rows. Width-screen
+trials remain in the raw screening file.
 It measures all six importance samplers on CPU and CUDA. The environment is
 separate from the package and docs dependencies. Its committed manifest pins package versions, including the
 EnsembleMCMC source revision.
 
-The [recorded report](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/results-2026-09-17-comparison.md)
+The [recorded report](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/results-2026-09-22-comparison.md)
 contains the ESS/s table, raw timing ranges, R-hat, and moment errors.
 Symbol footnotes identify divergences, R-hat warnings, large weight-ESS variation,
 and failed moment checks. The report retains every measured run.
@@ -61,7 +65,7 @@ and CUDA. Parameter-independent constants are omitted, so the benchmark does not
 compare absolute evidence with BAT. Source-data hashes appear in new reports.
 The reference has maximum R-hat 1.0004 and minimum bulk ESS 23,801. CAIS CPU,
 LAIS-RAM CUDA, and ensemble snooker failed moment checks in at least one run;
-the table retains those measurements with warning symbols.
+the detailed report retains those measurements with warning symbols.
 
 ## What ESS/s means here
 
@@ -80,6 +84,14 @@ R-hat above 1.01. Section signs mark a weight-ESS range exceeding a factor of te
 ESS and R-hat calculations run outside the timing interval.
 CPU and GPU results appear in separate tables. Bold denotes the highest CPU
 rate per model, selected before rounding. GPU cells are not bolded.
+
+The EnsembleMCMC headline selects the highest screening mean ESS / mean seconds
+among accuracy-eligible candidates at their independently selected settings.
+Reporting seeds never choose or replace the selected move. Current archived
+data select DE on five models and Stretch on signal-background. If no candidate
+passes the screening checks, its headline cell shows a dash. The report names each
+selected move and retains all held-out diagnostics. Gaussian replacement
+requires a new screen and held-out measurements before it can appear as selected.
 
 These ESS definitions are **different diagnostics, not a common accuracy score**.
 Weight ESS measures weight concentration. It does not detect missed modes or
@@ -186,7 +198,7 @@ linear-model ESS or accuracy. Failed checks remain visible in the report.
 | NUTS | 16,384 per chain, 16 chains | 1,024 warmup steps per chain, target acceptance 0.8 |
 | Random-walk MH | 16,384 per chain, 16 chains | 1,024 discarded steps per chain, proposal covariance ``2.38^2 I/d`` |
 | Slice sampling | 16,384 per chain, 16 chains | 1,024 discarded steps per chain, random-permutation Gibbs with stepping-out width 2 |
-| Ensemble DE, Stretch, snooker | 16,384 sweeps per walker | ``4d`` walkers initially, model-specific widths and warmup |
+| Ensemble DE, Stretch, snooker, Gaussian replacement | 16,384 sweeps per walker | ``4d`` walkers initially, model-specific widths/shrinkage and warmup |
 
 Archived ensemble runs pooled at least 262,144 positions, giving linear only
 2,048 retained sweeps. Fresh runs specify the time-axis budget directly.
@@ -198,7 +210,10 @@ mean squared error times elapsed time, subject to the moment checks. The
 held-out comparison uses seeds 8401–8403 and 16,384 sweeps. Search cost is
 separate from per-run fitting and warmup. A failed screen keeps its baseline
 and is disclosed separately from held-out diagnostics. Signal-background DE
-was the only such case. The environment pins EnsembleMCMC main at `2942c10`.
+was the only such case. It is excluded from the selected headline, not from the
+raw archive. The recorded runs used EnsembleMCMC `2942c10`. The current
+environment pins 0.0.2 at `5fcb74c`, including Gaussian replacement with
+shrinkage candidates 0.5, 0 and 1. No new timings are implied by that update.
 Other retained counts
 match exactly. IS uses batches while MCMC uses correlated
 transitions and warmup. These settings are not a search for each

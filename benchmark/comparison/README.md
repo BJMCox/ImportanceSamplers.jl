@@ -42,19 +42,63 @@ The headline uses weight ESS for importance samplers, minimum bulk ESS for
 NUTS, MH, and slice sampling, and minimum mean ESS for EnsembleMCMC.
 These are different diagnostics, each divided by elapsed time.
 The report also prints R-hat, divergences, posterior-mean error, and timing ranges.
-EnsembleMCMC includes DE, Stretch, and snooker moves with model-specific settings.
-The environment pins remote `main` at `2942c10d5de675863ec5c216e9137ff4e28b81be`,
-including its workload-aware CPU scheduling. The report records this source
-revision in addition to the package version.
+EnsembleMCMC includes DE, Stretch, snooker, and Gaussian replacement candidates
+with model-specific settings. The headline shows only the selected move per
+model. All held-out move rows remain in the detailed report. Width-screen trials
+remain in the raw screening file.
+The September 17 measurements used remote `main` at
+`2942c10d5de675863ec5c216e9137ff4e28b81be`, including its workload-aware CPU
+scheduling. The current environment pins `5fcb74c1a7c19bedf95795644fb6296901d25d0e`
+(0.0.2). This environment update does not relabel the archived measurements.
+Each report records its measured revision in addition to the package version.
 
-The [current combined report](results-2026-09-17-comparison.md) adds
-signal-background and replaces every ensemble row with the held-out,
-model-specific run. It retains the other five-model measurements unchanged.
+## Scalar and batch regression targets
+
+`batch.jl` compares explicit batch callbacks with the scalar targets on linear,
+logistic, Poisson and robust regression. It uses all six importance samplers,
+three seeds and 262,144 retained draws per run. It preserves the existing
+proposal settings, adaptation budgets and independent DM-PMC/LAIS pilot.
+Both the pilot and main run use the selected target mode.
+
+```sh
+julia --threads=16 --project=benchmark/comparison benchmark/comparison/batch.jl
+julia --project=benchmark/comparison benchmark/comparison/batch.jl --report benchmark/comparison/batch-results.toml
+```
+
+The default runs CUDA only. Add `--cpu` for both backends or `--cpu-only` for CPU.
+Use `--resume` to continue a saved run with matching settings and provenance.
+The script saves raw measurements after each seed and writes a Markdown table.
+CPU scalar and CUDA runs use one BLAS thread. Batch CPU uses sixteen BLAS
+threads throughout the timed run, including fitting and setup, because the
+callback owns parallelism. Each row records this setting.
+Compare the full execution strategies, not only callback dispatch overhead.
+
+The callback reuses an observation-by-8192 scratch matrix and handles shorter
+chunks. At 1024 observations in Float64, this is 64 MiB. Scratch allocation and
+device transfer remain inside the timed run. The reported bytes and allocation
+counts are **host** measurements, not device memory measurements. CUDA memory
+pools and compilation are warm. Mode order is counterbalanced across seeds,
+models and methods.
+
+Times include fitting, pilot tuning, scratch setup, transfers, sampling and
+posterior-mean estimation. Post-run ESS and accuracy diagnostics are excluded.
+Each seed uses median timing and the last same-seed result. CPU contention can
+affect GPU rows through host setup. Treat shared-host results as provisional
+and retain the raw timing ranges and load records.
+
+## Published results
+
+The [current combined report](results-2026-09-22-comparison.md) shows one selected
+EnsembleMCMC move per model. It retains all September 17 measurements unchanged.
+Selection uses the highest mean ESS / mean seconds among the accuracy-eligible,
+width-selected candidates in the independent screen. It never selects on the
+reporting seeds. This selects DE for five models and Stretch for signal-background.
+Gaussian replacement has no archived measurements and cannot win this selection.
 Raw files retain their original source hashes, versions, and timings.
 Print the report without sampling:
 
 ```sh
-julia --project=benchmark/comparison benchmark/comparison/compare.jl --report benchmark/comparison/results-2026-09-17-comparison.toml
+julia --project=benchmark/comparison benchmark/comparison/compare.jl --report benchmark/comparison/results-2026-09-22-comparison.toml
 ```
 
 Rebuild the combined TOML and Markdown from the saved raw artifacts:
@@ -65,12 +109,14 @@ julia --project=benchmark/comparison benchmark/comparison/ensemble.jl --report
 
 This reads `ensemble-results-2026-09-17.toml`,
 `signal-background-results-2026-09-17.toml`, and
-`ensemble-screen-2026-09-17.toml`. It never reruns a sampler. The screen uses
+`ensemble-screen-2026-09-17.toml` and writes `results-2026-09-22-comparison.toml`
+and Markdown. It never reruns a sampler or changes the archived raw files. The screen uses
 seeds 8301–8303, ensemble validation uses 8401–8403, and the new model's other
 methods use 8501–8503. The combined report records the screening file hash
 and retains the baseline when no screening candidate passed the moment checks.
-This occurred only for signal-background DE; its held-out moment checks passed,
-but R-hat still exceeded 1.01 in one run. Snooker failed a held-out variance check.
+This occurred only for signal-background DE, so it is ineligible for the selected
+headline despite passing held-out moment checks. Its R-hat still exceeded 1.01
+in one run. Snooker failed a held-out variance check.
 CAIS CPU and LAIS-RAM CUDA also failed new-model moment checks. All remain visible.
 
 The [previous combined report](results-2026-09-16-comparison.md) remains archived.
@@ -140,7 +186,8 @@ starting points, not a requirement to use one setting across different targets.
 All moves use `ThreadedExecutor` and pay for the common timed Laplace fit.
 
 `ensemble.jl` screens Stretch and snooker widths separately for each model.
-It retains the reviewed DE baseline. It uses three screening seeds, keeps every
+It also screens Gaussian replacement shrinkage at 0.5, 0 and 1 using the same
+4d walkers. It retains the reviewed DE baseline. It uses three screening seeds, keeps every
 trial, and selects by standardized posterior-mean squared error times run time,
 subject to the usual mean and variance checks. The subsequent run freezes those
 settings and uses three different seeds with 16,384 retained sweeps. Offline
@@ -153,6 +200,9 @@ julia --threads=16 --project=benchmark/comparison benchmark/comparison/ensemble.
 
 The first command writes `ensemble-screen.toml`; the second writes
 `ensemble-results.toml` and prints the table. Both refuse to overwrite results.
+The driver requires a completed screen for every requested model and move.
+To reuse an older screen without Gaussian replacement, restrict `only_methods`
+to `(:ensemble, :stretch, :snooker)`. Gaussian replacement needs a fresh screen.
 Fresh references are generated only for models missing from the saved reference
 file. To select settings directly, pass `ensemble_settings` to `compare`:
 
@@ -163,7 +213,7 @@ SamplerComparison.compare(; only_methods=(:stretch,), ensemble_settings=settings
 ```
 
 The accepted override keys are `walkers`, `sweeps`, `warmup`, and the move's
-`gamma0`/`sigma` or `scale`. Results store the resolved values for every seed.
+`gamma0`/`sigma`, `scale`, or Gaussian `shrinkage`. Results store the resolved values for every seed.
 Resume checks the settings, budget, and configuration-search provenance. The
 ensemble driver records its source hash, screening file hash, seeds, criterion,
 and cases with no eligible candidate. Archived tables keep their original
