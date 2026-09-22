@@ -552,8 +552,8 @@ version = "1.7.0"
 
 [[deps.EnsembleMCMC]]
 deps = ["KernelAbstractions", "LinearAlgebra", "Random", "Random123"]
-git-tree-sha1 = "1c42d0e811eeffb3dba8e4742a2b658faa579f7f"
-repo-rev = "758f8a3c01c034c308746e65e0bcafcb40553163"
+git-tree-sha1 = "28c6f798e61bb650b64f81262c07bb9f617fa914"
+repo-rev = "2942c10d5de675863ec5c216e9137ff4e28b81be"
 repo-url = "https://github.com/JuliaBayes/EnsembleMCMC.jl"
 uuid = "ee15a35a-54c9-4a12-9721-3f3d8c2797c8"
 version = "0.0.1"

@@ -41,42 +41,42 @@ accelerator execution.
 
 ## Sampling efficiency
 
-Effective sample size per second (ESS/s)\* for five posterior models. Parentheses
+Effective sample size per second (ESS/s)\* for six posterior models. Parentheses
 give the number of parameters. Measurements use Float64 and include initialization,
 warmup or adaptation, sampling, and posterior-mean estimation.
 Each table lists importance samplers first, followed by other measured methods.
 
 ### CPU
 
-| Sampler | Linear (32) | Logistic (12) | Poisson (12) | Robust (13) | Eight schools (10) |
-|:--|--:|--:|--:|--:|--:|
-| IS | **5.1e+04** | 7.4e+04 | 1.8e+05 | 1.6e+05 | 2.9e+04§ |
-| AMIS | 4.9e+04 | **8.6e+04** | 1.8e+05 | **1.9e+05** | **7.6e+05** |
-| DM-PMC | 49¶ | 7.7e+03 | 1.6e+04 | 1.4e+04 | 4.8e+04 |
-| CAIS | 2e+04 | 6.7e+04 | 1.5e+05 | 1.4e+05 | 1.8e+05§ |
-| LAIS-RAM | 12¶ | 4.9e+03 | 1.2e+04 | 8.3e+03 | 7e+04 |
-| First-order GRAMIS-CAIS | 4.4e+04 | 8.3e+04 | **1.9e+05** | 1.6e+05 | 1.9e+04 |
-| AdvancedHMC NUTS | 1.5e+04 | 9e+03 | 2.1e+04 | 5e+04 | 1.3e+05† |
-| AdvancedMH RWMH | 8.5e+02‡ | 2.6e+03 | 5.2e+03 | 4.5e+03 | 1.8e+04 |
-| SliceSampling | 7.7e+02 | 1.9e+03 | 5.6e+03 | 4.4e+03 | 1.6e+05 |
-| EnsembleMCMC DE | 67‡ | 8.5e+02‡ | 1.3e+03‡ | 1.2e+03‡ | 5e+03‡ |
-| EnsembleMCMC Stretch | 23‡ | 2.1e+02‡ | 4.7e+02‡ | 2.8e+02‡ | 8.6e+02‡ |
-| EnsembleMCMC snooker | 29‡ | 1.2e+02‡ | 1.5e+02‡ | 2.3e+02‡ | 4.2e+02‡ |
+| Sampler | Linear (32) | Logistic (12) | Poisson (12) | Robust (13) | Eight schools (10) | Signal-background (9) |
+|:--|--:|--:|--:|--:|--:|--:|
+| IS | **5.1e+04** | 7.4e+04 | 1.8e+05 | 1.6e+05 | 2.9e+04§ | 7.3e+04 |
+| AMIS | 4.9e+04 | **8.6e+04** | 1.8e+05 | **1.9e+05** | **7.6e+05** | **2.3e+05** |
+| DM-PMC | 49¶ | 7.7e+03 | 1.6e+04 | 1.4e+04 | 4.8e+04 | 6e+04 |
+| CAIS | 2e+04 | 6.7e+04 | 1.5e+05 | 1.4e+05 | 1.8e+05§ | 1.8e+04§¶ |
+| LAIS-RAM | 12¶ | 4.9e+03 | 1.2e+04 | 8.3e+03 | 7e+04 | 6.8e+04 |
+| First-order GRAMIS-CAIS | 4.4e+04 | 8.3e+04 | **1.9e+05** | 1.6e+05 | 1.9e+04 | 9.7e+04 |
+| AdvancedHMC NUTS | 1.5e+04 | 9e+03 | 2.1e+04 | 5e+04 | 1.3e+05† | 5.2e+04 |
+| AdvancedMH RWMH | 8.5e+02‡ | 2.6e+03 | 5.2e+03 | 4.5e+03 | 1.8e+04 | 1.4e+04 |
+| SliceSampling | 7.7e+02 | 1.9e+03 | 5.6e+03 | 4.4e+03 | 1.6e+05 | 1.5e+04 |
+| EnsembleMCMC DE | 5.4e+02‡ | 1.3e+03 | 3.5e+03‡ | 3.4e+03‡ | 9.2e+03‡ | 1.2e+03‡ |
+| EnsembleMCMC Stretch | 60‡ | 2.2e+02‡ | 6e+02‡ | 6.5e+02‡ | 2.7e+03‡ | 6.9e+02‡ |
+| EnsembleMCMC snooker | 40‡ | 2.3e+02‡ | 2.1e+02‡ | 2.9e+02‡ | 2.6e+03‡ | 6.4e+02‡¶ |
 
 ### GPU (CUDA)
 
 Only importance samplers have GPU measurements in this comparison.
 
-| Sampler | Linear (32) | Logistic (12) | Poisson (12) | Robust (13) | Eight schools (10) |
-|:--|--:|--:|--:|--:|--:|
-| IS | 5.4e+05 | 2.6e+06 | 3.3e+06 | 3.7e+06 | 4.8e+04 |
-| AMIS | 3.5e+05 | 9.4e+05 | 1.4e+06 | 1.3e+06 | 1.6e+06 |
-| DM-PMC | 1.8e+02¶ | 9.2e+04 | 2.2e+05 | 1.8e+05 | 3.3e+05 |
-| CAIS | 1.9e+05 | 2.1e+06 | 2.4e+06 | 2.9e+06 | 3.5e+05 |
-| LAIS-RAM | 4.8¶ | 7.5e+03 | 1.2e+04 | 1.4e+04 | 2.3e+05 |
-| First-order GRAMIS-CAIS | 3.6e+05 | 1.4e+06 | 2e+06 | 2.1e+06 | 1.5e+05 |
-| IS, AMIS-fitted‖ | 3.5e+05 | — | — | 1.6e+06 | — |
-| LAIS-RWM, AMIS-fitted‖ | 2.7e+05 | — | — | 1.1e+06 | — |
+| Sampler | Linear (32) | Logistic (12) | Poisson (12) | Robust (13) | Eight schools (10) | Signal-background (9) |
+|:--|--:|--:|--:|--:|--:|--:|
+| IS | 5.4e+05 | 2.6e+06 | 3.3e+06 | 3.7e+06 | 4.8e+04 | 7.3e+05 |
+| AMIS | 3.5e+05 | 9.4e+05 | 1.4e+06 | 1.3e+06 | 1.6e+06 | 2.1e+06 |
+| DM-PMC | 1.8e+02¶ | 9.2e+04 | 2.2e+05 | 1.8e+05 | 3.3e+05 | 3.4e+05 |
+| CAIS | 1.9e+05 | 2.1e+06 | 2.4e+06 | 2.9e+06 | 3.5e+05 | 1.7e+06 |
+| LAIS-RAM | 4.8¶ | 7.5e+03 | 1.2e+04 | 1.4e+04 | 2.3e+05 | 6.2e+04¶ |
+| First-order GRAMIS-CAIS | 3.6e+05 | 1.4e+06 | 2e+06 | 2.1e+06 | 1.5e+05 | 4.1e+05 |
+| IS, AMIS-fitted‖ | 3.5e+05 | — | — | 1.6e+06 | — | — |
+| LAIS-RWM, AMIS-fitted‖ | 2.7e+05 | — | — | 1.1e+06 | — | — |
 
 Bold denotes the highest measured CPU ESS/s per model. GPU results appear separately.
 
@@ -101,10 +101,17 @@ Dashes denote unmeasured cases. [Protocol, results, and reproducer](benchmark/co
 
 The main comparison uses three seeds, 16 threads on a 128-thread EPYC CPU, and one A100.
 Independent-chain MCMC retains 16,384 draws per chain in 16 chains. Importance
-samplers retain 262,144 draws. Ensemble methods retain at least that count in
-whole sweeps. DM-PMC and LAIS include an independent 4,096-draw width pilot.
+samplers retain 262,144 draws. Ensemble methods use 4d walkers and retain
+16,384 sweeps per walker. Model-specific move widths come from a separate
+three-seed screen, then remain fixed for three held-out seeds. Linear starts
+at stationarity without warmup; other models use 1,024 warmup sweeps.
+DM-PMC and LAIS include an independent 4,096-draw width pilot.
 Compilation and post-run diagnostics are excluded. Unchanged rows reuse archived
 measurements. The report records each row's source and timing protocol.
+
+Signal-background uses the nine-parameter BAT paper model and its original
+37-event dataset. Its CAIS CPU, LAIS-RAM CUDA, and ensemble snooker runs include
+failed moment checks, marked above. Offline settings search is not timed.
 
 The linear posterior is Gaussian, so a fitted Gaussian proposal leaves little
 room for adaptation to improve weight ESS. Follow-up CUDA runs used an independent
@@ -114,7 +121,7 @@ Longer LAIS runs degraded the fitted proposal. These findings concern a differen
 configuration from the LAIS-RAM rows above, which remain for comparison.
 
 [Reproducer and pinned versions](benchmark/comparison/README.md) ·
-[Timings, ranges, and accuracy checks](benchmark/comparison/results-2026-09-16-comparison.md) ·
+[Timings, ranges, and accuracy checks](benchmark/comparison/results-2026-09-17-comparison.md) ·
 [Models and methodology](https://bjmcox.github.io/ImportanceSamplers.jl/guide/benchmarks/)
 
 [Documentation](https://bjmcox.github.io/ImportanceSamplers.jl/) ·

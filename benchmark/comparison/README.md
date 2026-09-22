@@ -42,16 +42,45 @@ The headline uses weight ESS for importance samplers, minimum bulk ESS for
 NUTS, MH, and slice sampling, and minimum mean ESS for EnsembleMCMC.
 These are different diagnostics, each divided by elapsed time.
 The report also prints R-hat, divergences, posterior-mean error, and timing ranges.
-EnsembleMCMC includes DE, Stretch, and snooker moves with their default parameters.
+EnsembleMCMC includes DE, Stretch, and snooker moves with model-specific settings.
+The environment pins remote `main` at `2942c10d5de675863ec5c216e9137ff4e28b81be`,
+including its workload-aware CPU scheduling. The report records this source
+revision in addition to the package version.
 
-The [combined report](results-2026-09-16-comparison.md) comes from
-`results-2026-09-16-comparison.toml`. Print it without sampling:
+The [current combined report](results-2026-09-17-comparison.md) adds
+signal-background and replaces every ensemble row with the held-out,
+model-specific run. It retains the other five-model measurements unchanged.
+Raw files retain their original source hashes, versions, and timings.
+Print the report without sampling:
+
+```sh
+julia --project=benchmark/comparison benchmark/comparison/compare.jl --report benchmark/comparison/results-2026-09-17-comparison.toml
+```
+
+Rebuild the combined TOML and Markdown from the saved raw artifacts:
+
+```sh
+julia --project=benchmark/comparison benchmark/comparison/ensemble.jl --report
+```
+
+This reads `ensemble-results-2026-09-17.toml`,
+`signal-background-results-2026-09-17.toml`, and
+`ensemble-screen-2026-09-17.toml`. It never reruns a sampler. The screen uses
+seeds 8301–8303, ensemble validation uses 8401–8403, and the new model's other
+methods use 8501–8503. The combined report records the screening file hash
+and retains the baseline when no screening candidate passed the moment checks.
+This occurred only for signal-background DE; its held-out moment checks passed,
+but R-hat still exceeded 1.01 in one run. Snooker failed a held-out variance check.
+CAIS CPU and LAIS-RAM CUDA also failed new-model moment checks. All remain visible.
+
+The [previous combined report](results-2026-09-16-comparison.md) remains archived.
+Print it without sampling:
 
 ```sh
 julia --project=benchmark/comparison benchmark/comparison/compare.jl --report benchmark/comparison/results-2026-09-16-comparison.toml
 ```
 
-The report reuses the published IS, AMIS, CAIS, NUTS, MH, and slice rows.
+That previous report reuses the published IS, AMIS, CAIS, NUTS, MH, and slice rows.
 Only DM-PMC and LAIS with the independent 4,096-draw pilot, first-order GRAMIS,
 and the three ensemble moves receive new measurements. Main populations remain
 at 16 proposals and four rounds. Existing reference moments are reused.
@@ -59,7 +88,7 @@ Every row names its raw source. Archived rows use seeds 1001–1003 and one
 timed execution per seed. Refreshed rows use seeds 7101–7103 and the bounded
 repeat policy above. Archived rows lack per-run variance checks.
 
-`refresh.jl` performs this selective refresh and combines the reports. It reuses
+`refresh.jl` reproduces that earlier selective refresh. It reuses
 completed importance-sampler rows from `results-2026-09-16-partial.toml`.
 Use `--resume` to continue its saved run or `--report` to rebuild the combined
 table without sampling. For a fresh run on another machine, use `compare` with
@@ -98,9 +127,47 @@ cost basis, ESS definitions, and limits of the comparison.
 
 ## Ensemble ESS
 
-An ensemble has `4d` walkers. It discards 1,024 warmup sweeps, then retains
-enough whole sweeps for at least 262,144 draws. The excess is less than one
-sweep. All three moves use `ThreadedExecutor` and the common timed Laplace fit.
+Fresh comparisons use `4d` walkers and retain **16,384 sweeps per walker**.
+This is a time-axis budget, not 262,144 pooled walker positions. The old linear
+configuration had only 2,048 sweeps. Longer histories improve the stability of
+the diagnostic, but do not remove autocorrelation or guarantee good mixing.
+
+DE keeps `gamma0=2.38/sqrt(2d)` and `sigma=1e-5`. Linear starts exactly at
+stationarity under the fitted Gaussian, so its warmup is zero. Its Stretch width
+is `1+2.151/sqrt(d)`, supported by the independent Gaussian study. Other models
+start with 1,024 warmup sweeps and their move's default width. These choices are
+starting points, not a requirement to use one setting across different targets.
+All moves use `ThreadedExecutor` and pay for the common timed Laplace fit.
+
+`ensemble.jl` screens Stretch and snooker widths separately for each model.
+It retains the reviewed DE baseline. It uses three screening seeds, keeps every
+trial, and selects by standardized posterior-mean squared error times run time,
+subject to the usual mean and variance checks. The subsequent run freezes those
+settings and uses three different seeds with 16,384 retained sweeps. Offline
+configuration search is separate from each run's timed fit and warmup.
+
+```sh
+julia --threads=16 --project=benchmark/comparison benchmark/comparison/ensemble.jl --screen
+julia --threads=16 --project=benchmark/comparison benchmark/comparison/ensemble.jl
+```
+
+The first command writes `ensemble-screen.toml`; the second writes
+`ensemble-results.toml` and prints the table. Both refuse to overwrite results.
+Fresh references are generated only for models missing from the saved reference
+file. To select settings directly, pass `ensemble_settings` to `compare`:
+
+```julia
+settings = Dict("linear" => Dict("EnsembleMCMC Stretch / CPU" =>
+    Dict("scale" => 1.38, "warmup" => 0, "walkers" => 128)))
+SamplerComparison.compare(; only_methods=(:stretch,), ensemble_settings=settings)
+```
+
+The accepted override keys are `walkers`, `sweeps`, `warmup`, and the move's
+`gamma0`/`sigma` or `scale`. Results store the resolved values for every seed.
+Resume checks the settings, budget, and configuration-search provenance. The
+ensemble driver records its source hash, screening file hash, seeds, criterion,
+and cases with no eligible candidate. Archived tables keep their original
+shorter histories and are not relabelled as measurements of the new settings.
 
 For each coordinate, average the walkers within each sweep. Estimate the mean's
 MCSE from this time series with MCMCDiagnosticTools, then divide the marginal
@@ -111,6 +178,38 @@ The [MCSE implementation](https://julia.arviz.org/MCMCDiagnosticTools/#Monte-Car
 accounts for serial dependence. Cross-walker lag covariance enters through the
 sweep means. R-hat splits that time series, not the walkers. This mean ESS is
 not rank-normalized bulk ESS. Short ensemble histories can give noisy estimates.
+
+## Signal-background
+
+The sixth model is the signal-plus-background posterior from the
+[BAT.jl paper example](https://github.com/bat/BAT.jl/blob/3ab3baf1d1666fcd22c08e6f4db3089feec57c39/examples/paper-example/paper_example.jl).
+Its unchanged CSV data and license are in [data/signal-background](data/signal-background/README.md).
+The target has nine free parameters and 37 events from five detectors. It uses
+the original Poisson counts, exponential background, fixed Gaussian signal,
+and hierarchical background priors.
+
+The four bounded parent parameters use logistic coordinates. Detector rates use
+a noncentred lognormal representation. The target includes the corresponding
+Jacobian and prior, and supplies an analytic gradient for NUTS and GRAMIS.
+The scalar target serves CPU and CUDA. Diagnostics use these common sampling
+coordinates for every method. The benchmark omits parameter-independent density
+constants, so its log normalizer is not BAT's absolute evidence.
+
+To repeat the new model's non-ensemble measurements after the ensemble screen:
+
+```julia
+include("benchmark/comparison/compare.jl")
+references = SamplerComparison.TOML.parsefile("benchmark/comparison/ensemble-screen.toml")
+SamplerComparison.compare(; selected=[6], cuda=true, references, seed_start=8501,
+    only_methods=(:is, :amis, :dmpmc, :cais, :lais, :gramis, :nuts, :mh, :slice),
+    pilot=(nsamples=4096, scale_limits=(0.25, 2.0)),
+    output="benchmark/comparison/signal-background-results.toml")
+```
+
+The report records both source CSV hashes. It does not infer from truth columns
+or event source labels. The reference used eight independent NUTS chains with
+8,192 retained draws each. Its maximum R-hat was 1.0004 and minimum bulk ESS
+was 23,801. The same reference checks every new-model sampler.
 
 ## Independent width pilot
 

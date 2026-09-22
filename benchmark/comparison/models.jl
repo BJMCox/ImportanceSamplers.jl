@@ -1,7 +1,11 @@
 # These targets share their scalar log density across CPU and CUDA. Constants
 # independent of the sampled parameters are omitted throughout.
-softplus(x) = max(x, zero(x)) + log1p(exp(-abs(x)))
+# Both branches have derivative 1/2 at zero; a max/abs composition does not
+# preserve that derivative under ForwardDiff's tie rules.
+softplus(x) = x > zero(x) ? x + log1p(exp(-x)) : log1p(exp(x))
 sigmoid(x) = exp(-softplus(-x))
+
+include("signal_background.jl")
 
 observation(::Val{:linear}, y, eta, logscale) = (-(y-eta)^2/2, y-eta, zero(eta))
 observation(::Val{:logistic}, y, eta, logscale) = (y*eta-softplus(eta), y-sigmoid(eta), zero(eta))
@@ -93,6 +97,7 @@ function models()
         (; name="eight_schools", dimension=10, observations=8,
            data=(; schools=[28.,8.,-3.,7.,-1.,1.,18.,12.],
                    errors=[15.,10.,16.,11.,9.,11.,10.,18.])),
+        signal_background(),
     ]
 end
 

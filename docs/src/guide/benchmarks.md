@@ -7,7 +7,7 @@ It measures all six importance samplers on CPU and CUDA. The environment is
 separate from the package and docs dependencies. Its committed manifest pins package versions, including the
 EnsembleMCMC source revision.
 
-The [recorded report](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/results-2026-09-16-comparison.md)
+The [recorded report](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/results-2026-09-17-comparison.md)
 contains the ESS/s table, raw timing ranges, R-hat, and moment errors.
 Symbol footnotes identify divergences, R-hat warnings, large weight-ESS variation,
 and failed moment checks. The report retains every measured run.
@@ -31,6 +31,7 @@ school effects.
 | Poisson regression | 12 | 1,024 | Poisson with a log link |
 | Robust regression | 13 | 512 | Student-t noise with four degrees of freedom and an inferred log scale |
 | Eight schools | 10 | 8 | Non-centred normal hierarchy with an inferred mean and log scale |
+| Signal-background | 9 | 37 | BAT paper example: Poisson event counts, exponential background and a fixed Gaussian signal across five detectors |
 
 Regression coefficients have independent `Normal(0, 2)` priors. The intercept
 counts as a coefficient. Non-intercept predictors have correlation
@@ -43,6 +44,24 @@ Its latent standardised effects have `Normal(0, 1)` priors, its population mean
 has a `Normal(0, 5)` prior, and its population scale has a half-normal prior
 with scale 5. The log target includes the log-scale Jacobian. This is not the
 half-Cauchy-prior variant of that model.
+
+Signal-background copies the data and model from
+[BAT's paper example](https://github.com/bat/BAT.jl/blob/3ab3baf1d1666fcd22c08e6f4db3089feec57c39/examples/paper-example/paper_example.jl).
+The signal rate has a uniform prior on `[0,10]`. The hierarchical background
+parameters have uniform priors on `sigma_B ∈ [0.1,1]`, `m_B ∈ [1e-10,20]`, and
+the exponential scale `lambda ∈ [1e-10,100]`. Detector rates satisfy
+`log(B_j) = log(m_B) - sigma_B^2/2 + sigma_B*z_j`, with independent standard
+normal `z_j`. The signal mean and standard deviation stay fixed at 100 and 2.
+The bounded parent parameters use logits. All samplers use these same
+unconstrained coordinates and full Jacobians. The copied data include 37 events
+with detector counts `(13,10,10,2,2)`.
+
+The target has checked analytic gradients and uses the same scalar code on CPU
+and CUDA. Parameter-independent constants are omitted, so the benchmark does not
+compare absolute evidence with BAT. Source-data hashes appear in new reports.
+The reference has maximum R-hat 1.0004 and minimum bulk ESS 23,801. CAIS CPU,
+LAIS-RAM CUDA, and ensemble snooker failed moment checks in at least one run;
+the table retains those measurements with warning symbols.
 
 ## What ESS/s means here
 
@@ -167,9 +186,20 @@ linear-model ESS or accuracy. Failed checks remain visible in the report.
 | NUTS | 16,384 per chain, 16 chains | 1,024 warmup steps per chain, target acceptance 0.8 |
 | Random-walk MH | 16,384 per chain, 16 chains | 1,024 discarded steps per chain, proposal covariance ``2.38^2 I/d`` |
 | Slice sampling | 16,384 per chain, 16 chains | 1,024 discarded steps per chain, random-permutation Gibbs with stepping-out width 2 |
-| Ensemble DE, Stretch, snooker | At least 262,144 | ``4d`` walkers, 1,024 warmup sweeps, whole retained sweeps |
+| Ensemble DE, Stretch, snooker | 16,384 sweeps per walker | ``4d`` walkers initially, model-specific widths and warmup |
 
-Ensemble runs exceed the budget by less than one sweep. Other retained counts
+Archived ensemble runs pooled at least 262,144 positions, giving linear only
+2,048 retained sweeps. Fresh runs specify the time-axis budget directly.
+Linear's stationary Gaussian start needs no warmup; other models initially use
+1,024 warmup sweeps. The separate ensemble screen selects move widths per model
+before the held-out seeds. Every row records the resolved configuration.
+The screen uses seeds 8301–8303 and 4,096 sweeps. It selects by standardized
+mean squared error times elapsed time, subject to the moment checks. The
+held-out comparison uses seeds 8401–8403 and 16,384 sweeps. Search cost is
+separate from per-run fitting and warmup. A failed screen keeps its baseline
+and is disclosed separately from held-out diagnostics. Signal-background DE
+was the only such case. The environment pins EnsembleMCMC main at `2942c10`.
+Other retained counts
 match exactly. IS uses batches while MCMC uses correlated
 transitions and warmup. These settings are not a search for each
 method's best possible configuration. Do not interpret a large ESS/s ratio

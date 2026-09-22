@@ -13,6 +13,20 @@ const IMPORTANCE_METHODS = (:is, :amis, :dmpmc, :cais, :lais, :gramis)
 const ENSEMBLE_MOVES = (ensemble=EnsembleMCMC.DEMove(),
     stretch=EnsembleMCMC.StretchMove(), snooker=EnsembleMCMC.DESnookerMove())
 
+function ensemble_options(settings, model, label, method; sweeps=2^14)
+    # Only linear has an exact Gaussian stationary start. The dimension-based
+    # stretch width helped linear, but hurt schools in the separate ESS review.
+    move = method === :ensemble ? (gamma0=2.38/sqrt(2model.dimension), sigma=1e-5) :
+        (scale=method === :snooker ? 1.7 : model.name == "linear" ? 1+2.151/sqrt(model.dimension) : 2.0,)
+    defaults = (; walkers=4model.dimension, sweeps, warmup=model.name == "linear" ? 0 : 1024, move...)
+    overrides = get(get(settings,model.name,Dict()),label,Dict())
+    return merge(defaults, (; (Symbol(k)=>v for (k,v) in overrides)...))
+end
+
+ensemble_move(::Val{:ensemble}, p) = EnsembleMCMC.DEMove(; p.gamma0, p.sigma)
+ensemble_move(::Val{:stretch}, p) = EnsembleMCMC.StretchMove(; p.scale)
+ensemble_move(::Val{:snooker}, p) = EnsembleMCMC.DESnookerMove(; p.scale)
+
 function nuts(target, seed, draws, warmup; acceptance=0.8)
     rng = Xoshiro(seed)
     d = LogDensityProblems.dimension(target)
@@ -96,7 +110,7 @@ function tune_population(rng, device, model, bank, pilot; family=:student_t)
 end
 
 function run_method(method, device, model, seed; nsamples=2^18, warmup=1024, nchains=16,
-                    population=DEFAULT_POPULATION, pilot=nothing)
+                    population=DEFAULT_POPULATION, pilot=nothing, ensemble=nothing)
     fit = laplace(model)
     rng = Xoshiro(seed)
     if method in IMPORTANCE_METHODS
@@ -142,16 +156,18 @@ function run_method(method, device, model, seed; nsamples=2^18, warmup=1024, nch
     end
     target = WhitenedTarget(model.data, fit)
     if haskey(ENSEMBLE_MOVES,method)
-        nwalkers = 4model.dimension
+        options = ensemble === nothing ?
+            merge(ensemble_options(Dict(),model,"",method; sweeps=cld(nsamples,4model.dimension)),(;warmup)) : ensemble
+        nwalkers = options.walkers
         state = EnsembleMCMC.initialize(Philox4x((UInt64(seed),UInt64(1))),
             x -> LogDensityProblems.logdensity(target,x), randn(rng,model.dimension,nwalkers);
-            move=ENSEMBLE_MOVES[method], executor=EnsembleMCMC.ThreadedExecutor())
-        EnsembleMCMC.step!(state,warmup)
-        result = EnsembleMCMC.sample!(state,cld(nsamples,nwalkers))
+            move=ensemble_move(Val(method),options), executor=EnsembleMCMC.ThreadedExecutor())
+        EnsembleMCMC.step!(state,options.warmup)
+        result = EnsembleMCMC.sample!(state,options.sweeps)
         positions = reshape(fit.location .+ fit.factor*reshape(result.positions,model.dimension,:),
                             size(result.positions))
         return (; estimate=vec(mean(positions; dims=(2,3))), samples=(;positions),
-                divergences=0, draws=length(positions)÷model.dimension)
+                divergences=0, draws=length(positions)÷model.dimension, ensemble=options)
     end
     result = chains(method,target,seed,cld(nsamples,nchains),warmup,nchains)
     return (; estimate=vec(mean(result.values; dims=(1,2))), samples=result.values,
@@ -199,6 +215,8 @@ function measure_run(method, device, model, seed; timing_samples=1, kwargs...)
     pilot = get(value,:pilot,nothing)
     pilot === nothing || merge!(row,Dict("pilot_draws"=>pilot.draws,
         "pilot_seconds"=>pilot.seconds,"pilot_scale"=>pilot.scale))
+    ensemble = get(value,:ensemble,nothing)
+    ensemble === nothing || (row["ensemble"] = Dict(string(k)=>v for (k,v) in pairs(ensemble)))
     return row
 end
 
@@ -254,7 +272,12 @@ function metadata()
         "threads"=>Threads.nthreads(:default), "blas_threads"=>BLAS.get_num_threads(),
         "word_size"=>Sys.WORD_SIZE, "platform"=>Sys.MACHINE,
         "revision"=>readchomp(`git -C $root rev-parse HEAD`),
-        "benchmark_sha256"=>bytes2hex(sha256(read(@__FILE__,String)*read(joinpath(@__DIR__,"models.jl"),String))),
+        "benchmark_sha256"=>bytes2hex(sha256(join(read(joinpath(@__DIR__,file),String)
+            for file in ("compare.jl","models.jl","signal_background.jl")))),
+        "data_sha256"=>Dict(file=>bytes2hex(sha256(read(joinpath(@__DIR__,"data","signal-background",file))))
+            for file in ("sample_table.csv","summary_dataset_table.csv")),
+        "package_revisions"=>Dict(info.name=>info.git_revision for info in values(Pkg.dependencies())
+            if info.is_direct_dep && info.git_revision !== nothing),
         "manifest_sha256"=>bytes2hex(sha256(read(joinpath(@__DIR__,"Manifest.toml")))),
         "packages"=>packages)
 end
@@ -318,7 +341,26 @@ function print_table(report; io=stdout, accuracy=false)
     println(io,"\nBold denotes the highest measured CPU rate per model. GPU results appear separately.")
     println(io,"\n† At least one retained NUTS transition diverged. ‡ At least one run had maximum R-hat above 1.01. § Weight ESS varied by more than a factor of ten across seeds.")
     println(io,"\n¶ At least one run exceeded a mean error of 0.2 posterior standard deviations or a marginal variance error of 30%.")
-    println(io,"\nEnsembleMCMC uses 4d walkers and rounds the retained count up to a complete sweep. Its R-hat splits the sweep-mean time series, not the walkers.")
+    println(io,"\nEnsemble R-hat splits the sweep-mean time series, not the walkers. Settings below apply when recorded; archived ensemble runs used 4d walkers and rounded their pooled draw budget to complete sweeps.")
+    ensemble_rows = [(name,label,first(report["models"][name]["runs"][label])) for name in names for label in labels
+        if haskey(first(report["models"][name]["runs"][label]),"ensemble")]
+    if !isempty(ensemble_rows)
+        println(io,"\n| Model | Ensemble move | Walkers | Retained sweeps | Warmup sweeps | Move settings |\n|:--|:--|--:|--:|--:|:--|")
+        for (name,label,row) in ensemble_rows
+            p = row["ensemble"]
+            move = join(["$k=$(p[k])" for k in ("gamma0","sigma","scale") if haskey(p,k)],", ")
+            println(io,"| $name | $label | ",p["walkers"]," | ",p["sweeps"]," | ",p["warmup"]," | $move |")
+        end
+    end
+    search = get(report,"configuration_search",Dict())
+    if !isempty(search)
+        println(io,"\nOffline configuration search: `",get(search,"source","unrecorded"),
+            "`, SHA-256 `",get(search,"sha256","unrecorded"),"`. Screening seeds: ",
+            join(get(search,"seeds",Int[]),", "),". Selection: ",get(search,"selection","unrecorded"),".")
+        failed = get(search,"no_eligible_candidate",String[])
+        isempty(failed) || println(io,"\nNo screening candidate met the moment checks for ",
+            join(failed,", "),". Those cases retain the baseline; held-out diagnostics remain separate.")
+    end
     haskey(report,"host_load") && println(io,"\nHost conditions: ",report["host_load"]["note"],
         " ",report["host_load"]["before"],"; ",report["host_load"]["after"],".")
     println(io,"\nElapsed time includes initialization, warmup or adaptation, sampling, and posterior-mean estimation. Compilation and post-run diagnostics are excluded.")
@@ -344,7 +386,7 @@ function print_table(report; io=stdout, accuracy=false)
     haskey(report["metadata"],"gpu") && println(io,"GPU: ",report["metadata"]["gpu"],".")
     println(io,"\n",report["repeats"]," independent seeds. IS samples: ",report["nsamples"],
         ". MCMC samples: ",report["mcmc_samples"],". MCMC chains: ",get(report,"mcmc_chains",report["metadata"]["threads"]),
-        ". MCMC warmup: 1024 per chain. Ensemble warmup: ",get(report,"ensemble_warmup",256)," sweeps.")
+        ". MCMC warmup: 1024 per chain. Ensemble budgets and warmup are recorded per row.")
     settings = get(report,"population_settings",Dict())
     if !isempty(settings)
         println(io,"\nPopulation settings supplied to this run. Per-run initialization and adaptation remain timed.\n")
@@ -386,16 +428,18 @@ function print_table(report; io=stdout, accuracy=false)
             println(io,"| $name | $label | ",join(["[$s]($s)" for s in sources],", ")," |")
         end
     end
-    println(io,"\n| Package | Version |\n|:--|:--|")
+    println(io,"\n| Package | Version | Source revision |\n|:--|:--|:--|")
     for (name,version) in sort!(collect(report["metadata"]["packages"]); by=first)
-        println(io,"| ",name," | ",version," |")
+        revision = get(get(report["metadata"],"package_revisions",Dict()),name,"—")
+        println(io,"| ",name," | ",version," | ",revision," |")
     end
-    println(io,haskey(report,"sources") ? "\nArchived baseline source: `" : "\nSource: `",
+    println(io,haskey(report,"sources") ? "\nReport environment source: `" : "\nSource: `",
         report["metadata"]["revision"],"`. Manifest SHA-256: `",report["metadata"]["manifest_sha256"],"`.")
 end
 
 """
     compare(; cuda=false, cpu=true, resume=false, repeats=3, timing_samples=3, nsamples=2^18, mcmc_draws=2^14, nchains=16, reference_draws=8192,
+              ensemble_sweeps=2^14, ensemble_settings=Dict(), configuration_search=Dict(),
               references=nothing, settings=Dict(), pilot=nothing, seed_start=1001,
               selected=eachindex(models()), only_methods=nothing, reuse=nothing, output="results.toml")
 
@@ -411,11 +455,18 @@ proposal widths for DM-PMC and LAIS. Its cost is timed, and its samples and
 settings remain separate from the main sampling budget and round schedule.
 Population settings accept `family="gaussian"` or `"student_t"` (the default).
 Gaussian factors define covariance directly. Student-t factors define scale.
+Ensembles retain `ensemble_sweeps` time steps per walker, not a pooled draw
+count. `ensemble_settings[model][label]` overrides walkers, sweeps, warmup, and
+move parameters. Every result records the resolved settings. Freeze them before
+the held-out seeds. Linear alone defaults to zero warmup and a narrower Stretch move.
+`configuration_search` records an offline search's source, hashes, and selection
+status. Resume requires the same search provenance as well as the same settings.
 Use `only_methods` to measure a subset. `reuse` accepts a compatible earlier
 report for unchanged importance-sampler calls. Ensemble rows need retained
 sweep diagnostics and are measured anew. Every reused row keeps its source.
 """
 function compare(; cuda=false, cpu=true, resume=false, repeats=3, timing_samples=3, nsamples=2^18, mcmc_draws=2^14, nchains=16, reference_draws=8192,
+                  ensemble_sweeps=2^14, ensemble_settings=Dict(), configuration_search=Dict(),
                   references=nothing, settings=Dict(), pilot=nothing, seed_start=1001,
                   selected=eachindex(models()), only_methods=nothing, reuse=nothing,
                   output=joinpath(@__DIR__,"results.toml"))
@@ -433,7 +484,9 @@ function compare(; cuda=false, cpu=true, resume=false, repeats=3, timing_samples
     only_methods === nothing || filter!(m->m[1] in only_methods,methods)
     mcmc_samples = mcmc_draws*nchains
     report = Dict{String,Any}("metadata"=>metadata(), "repeats"=>repeats,"timing_samples"=>timing_samples,"nsamples"=>nsamples,"mcmc_samples"=>mcmc_samples,
-        "mcmc_chains"=>nchains,"mcmc_draws_per_chain"=>mcmc_draws,"ensemble_warmup"=>1024,
+        "mcmc_chains"=>nchains,"mcmc_draws_per_chain"=>mcmc_draws,
+        "ensemble_sweeps"=>ensemble_sweeps,"ensemble_settings"=>ensemble_settings,
+        "configuration_search"=>configuration_search,
         "seeds"=>collect(seed_start:seed_start+repeats-1),"population_settings"=>settings,
         "proposal_pilot"=>pilot === nothing ? Dict() :
             Dict("nsamples"=>pilot.nsamples,"scale_limits"=>collect(pilot.scale_limits)),
@@ -472,7 +525,7 @@ function compare(; cuda=false, cpu=true, resume=false, repeats=3, timing_samples
     end
     if resume
         saved = TOML.parsefile(output)
-        for key in ("repeats", "timing_samples", "nsamples", "mcmc_samples", "mcmc_chains", "model_order", "method_order", "seeds", "population_settings", "proposal_pilot")
+        for key in ("repeats", "timing_samples", "nsamples", "mcmc_samples", "mcmc_chains", "ensemble_sweeps", "ensemble_settings", "configuration_search", "model_order", "method_order", "seeds", "population_settings", "proposal_pilot")
             saved[key] == report[key] || error("Resume configuration differs: $key")
         end
         saved["metadata"] == report["metadata"] || error("Resume environment differs")
@@ -480,15 +533,16 @@ function compare(; cuda=false, cpu=true, resume=false, repeats=3, timing_samples
     end
     save() = open(io->TOML.print(io,report),output,"w")
     for model in cases
-        point = fill(0.1,model.dimension)
-        gradient = similar(point)
-        evaluate(gradient,point,model.data)
-        isapprox(gradient,ForwardDiff.gradient(x->logtarget(x,model.data),point); rtol=1e-10) ||
-            error("Analytic gradient failed for $(model.name)")
+        for point in (zeros(model.dimension), fill(0.1,model.dimension))
+            gradient = similar(point)
+            evaluate(gradient,point,model.data)
+            isapprox(gradient,ForwardDiff.gradient(x->logtarget(x,model.data),point); rtol=1e-10) ||
+                error("Analytic gradient failed for $(model.name)")
+        end
         record = get!(report["models"],model.name) do
             @info "Reference" model=model.name dimension=model.dimension
-            ref = references === nothing ? reference(model; draws=reference_draws,nchains=8) :
-                  references["models"][model.name]["reference"]
+            ref = references !== nothing && haskey(references["models"],model.name) ?
+                  references["models"][model.name]["reference"] : reference(model; draws=reference_draws,nchains=8)
             Dict{String,Any}("reference"=>ref,
                 "dimension"=>model.dimension,"observations"=>model.observations,
                 "runs"=>Dict{String,Any}())
@@ -496,6 +550,8 @@ function compare(; cuda=false, cpu=true, resume=false, repeats=3, timing_samples
         save()
         for (method,device,label) in methods
             population = population_settings(settings,model,label)
+            ensemble = haskey(ENSEMBLE_MOVES,method) ?
+                ensemble_options(ensemble_settings,model,label,method; sweeps=ensemble_sweeps) : nothing
             if method in (:dmpmc,:lais)
                 nsamples % (population.count*population.rounds) == 0 || error("Population budget does not divide: $label")
             end
@@ -508,9 +564,10 @@ function compare(; cuda=false, cpu=true, resume=false, repeats=3, timing_samples
             # Compile with a short run. Population covariance fits require more
             # than d+1 samples per proposal, even for this untimed warmup.
             compile_count = method in IMPORTANCE_METHODS ? max(4096,64*(model.dimension+2),population.count*population.rounds) : 1024
-            run_method(method,device,model,900_001; nsamples=compile_count,warmup=128,nchains,population,pilot)
+            compile_ensemble = ensemble === nothing ? nothing : merge(ensemble,(;sweeps=32,warmup=32))
+            run_method(method,device,model,900_001; nsamples=compile_count,warmup=128,nchains,population,pilot,ensemble=compile_ensemble)
             for seed in seed_start+length(rows):seed_start+repeats-1
-                push!(rows,measure_run(method,device,model,seed; nsamples=count,nchains,population,pilot,timing_samples))
+                push!(rows,measure_run(method,device,model,seed; nsamples=count,nchains,population,pilot,ensemble,timing_samples))
                 rows[end]["source"] = basename(output)
                 save()
             end
