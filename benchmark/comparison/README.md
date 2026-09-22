@@ -74,10 +74,13 @@ threads throughout the timed run, including fitting and setup, because the
 callback owns parallelism. Each row records this setting.
 Compare the full execution strategies, not only callback dispatch overhead.
 
-The callback reuses an observation-by-8192 scratch matrix and handles shorter
-chunks. At 1024 observations in Float64, this is 64 MiB. Scratch allocation and
-device transfer remain inside the timed run. The reported bytes and allocation
-counts are **host** measurements, not device memory measurements. CUDA memory
+The CPU callback reuses an observation-by-8192 scratch matrix and threads the
+likelihood sums across samples. The GPU callback allocates scratch directly on
+the device, once per call, capped at 8192 columns or the actual batch width.
+At 1024 observations in Float64, this is at most 64 MiB. Both paths evaluate
+likelihood values without computing unused gradients. Scratch allocation and
+required data transfers remain inside the timed run. The reported bytes and
+allocation counts are **host** measurements, not device memory measurements. CUDA memory
 pools and compilation are warm. Each seed interleaves four complete executions
 per mode in ABBA and BAAB blocks. Starting order changes across seeds, models
 and methods. Both full workloads compile before timing. Full GC runs before
@@ -98,13 +101,15 @@ versions and settings in interleaved executions. Scalar/batch comparisons do not
 test whether the original scalar path regressed. Older blocked-timing reports
 remain readable, but cannot resume under this paired protocol.
 
-The September 22 paired refresh covers AMIS and LAIS-RAM on all four regression
-models. It uses package revision `29c8fc5`, which fixes CPU LAIS closure boxing.
+The September 22 baseline reports cover AMIS and LAIS-RAM on all four regression
+models. They use package revision `29c8fc5`, which fixes CPU LAIS closure boxing.
 The [CPU report](batch-cpu-2026-09-22-paired.md) and
 [CUDA report](batch-cuda-2026-09-22-paired.md) retain every measured time and
 accuracy warning. Their raw TOML files include the execution chronology and
 source hashes. These are separate scalar/batch comparisons, not replacements
-for the cross-package table below.
+for the cross-package table below. They predate the threaded/value-only callback
+and native device-scratch changes described above. Their source hashes identify
+the measured implementation; rerunning the current script measures the new callbacks.
 
 The paired medians favour batching for linear regression on CPU and CUDA, and
 for LAIS-RAM on CUDA. Nonlinear CPU callbacks and nonlinear CUDA AMIS are slower
@@ -112,7 +117,7 @@ in this configuration. Scalar/batch posterior means agree within `2.0e-14` on
 CPU and `1.1e-12` on CUDA. Linear LAIS-RAM fails moment checks in both modes on
 both backends; all other measured cases pass. The reports retain those warnings.
 
-Reproduce this subset from the repository root in a session launched with
+Run this subset with the current callbacks from the repository root in a session launched with
 `--threads=16 --project=benchmark/comparison`:
 
 ```julia

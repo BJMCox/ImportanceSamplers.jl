@@ -120,8 +120,11 @@ function run_method(method, device, model, seed; nsamples=2^18, warmup=1024, nch
     fit = laplace(model)
     rng = Xoshiro(seed)
     if method in IMPORTANCE_METHODS
-        data = iszero(batch_capacity) ? model.data : merge(model.data,
-            (;workspace=similar(model.data.X,model.observations,batch_capacity)))
+        # Reuse CPU scratch. Device callbacks allocate scratch where it is used,
+        # avoiding a host copy and transfer of an uninitialized matrix.
+        workspace = iszero(batch_capacity) || device !== nothing ? nothing :
+            similar(model.data.X,model.observations,batch_capacity)
+        data = iszero(batch_capacity) ? model.data : merge(model.data,(;workspace,batch_capacity))
         target = IS.LogTarget(logtarget; grad=method === :gramis ? evaluate : nothing,
             batch=iszero(batch_capacity) ? nothing : regression_batch!)
         pilot_stats = nothing

@@ -56,7 +56,8 @@ function check_values(device=identity)
         rng = SC.Xoshiro(9300)
         theta = 0.1SC.randn(rng,model.dimension,37)
         expected = [SC.logtarget(x,model.data) for x in eachcol(theta)]
-        data = device(merge(model.data,(;workspace=similar(model.data.X,model.observations,17))))
+        workspace = device === identity ? similar(model.data.X,model.observations,17) : nothing
+        data = device(merge(model.data,(;workspace,batch_capacity=17)))
         values = device(zeros(37))
         SC.regression_batch!(values,device(theta),data)
         actual = Array(values)

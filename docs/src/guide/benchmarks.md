@@ -237,7 +237,7 @@ end-to-end timings, not isolated kernel throughput.
 
 The [CPU](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-cpu-2026-09-22-paired.md)
 and [CUDA](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-cuda-2026-09-22-paired.md)
-paired reports compare scalar targets with explicit batch callbacks for AMIS
+baseline paired reports compare scalar targets with explicit batch callbacks for AMIS
 and LAIS-RAM on the four regression models. Each execution retains 262,144
 draws. The three seeds each have four measured executions per mode, arranged
 in balanced ABBA/BAAB blocks after both complete workloads compile.
@@ -269,6 +269,12 @@ Median batch/scalar elapsed-time ratios:
 All other rows pass. Matched scalar/batch posterior means differ by at most
 `2.0e-14` on CPU and `1.1e-12` on CUDA. Batching helps CUDA LAIS in these cases,
 but is not a universal speedup. The linked reports retain every timing range.
+
+These reports predate the profiler-led callback fixes. The current CPU callback
+threads likelihood sums across samples. Both backends skip unused gradient
+calculations, and GPU scratch is allocated directly on-device rather than copied
+from the host. These changes affect the benchmark targets, not the sampler laws
+or package API. The table above remains a record of the earlier implementation.
 
 The [reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/README.md#scalar-and-batch-regression-targets)
 also supports the full six-method comparison.

@@ -7,9 +7,15 @@ sigmoid(x) = exp(-softplus(-x))
 
 include("signal_background.jl")
 
-observation(::Val{:linear}, y, eta, logscale) = (-(y-eta)^2/2, y-eta, zero(eta))
-observation(::Val{:logistic}, y, eta, logscale) = (y*eta-softplus(eta), y-sigmoid(eta), zero(eta))
-observation(::Val{:poisson}, y, eta, logscale) = (y*eta-exp(eta), y-exp(eta), zero(eta))
+observation_value(::Val{:linear}, y, eta, logscale) = -(y-eta)^2/2
+observation_value(::Val{:logistic}, y, eta, logscale) = y*eta-softplus(eta)
+observation_value(::Val{:poisson}, y, eta, logscale) = y*eta-exp(eta)
+observation_value(::Val{:robust}, y, eta, logscale) =
+    -logscale-2.5log1p((y-eta)^2*exp(-2logscale)/4)
+
+observation(family::Val{:linear}, y, eta, logscale) = (observation_value(family,y,eta,logscale), y-eta, zero(eta))
+observation(family::Val{:logistic}, y, eta, logscale) = (observation_value(family,y,eta,logscale), y-sigmoid(eta), zero(eta))
+observation(family::Val{:poisson}, y, eta, logscale) = (observation_value(family,y,eta,logscale), y-exp(eta), zero(eta))
 function observation(::Val{:robust}, y, eta, logscale)
     residual = y-eta
     scaled = residual^2 * exp(-2logscale) / 4
