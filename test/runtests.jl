@@ -23,6 +23,7 @@ test_files = if isempty(ARGS)
         "device_api",
         "target_derivatives",
         "plain_is",
+        "batched_targets",
         "retarget",
         "threading",
         "results",

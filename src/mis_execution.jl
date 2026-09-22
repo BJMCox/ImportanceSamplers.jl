@@ -172,6 +172,9 @@ struct _GaussianRoundOutput{T,N,W,R,L}
     round::Int
 end
 
+Adapt.@adapt_structure _MISRoundOutput
+Adapt.@adapt_structure _GaussianRoundOutput
+
 @inline _factor_batch_is_generating(::Nothing, sample_index, proposal_slot) = false
 @inline _factor_batch_is_generating(assignments, sample_index, proposal_slot) =
     @inbounds(assignments[sample_index]) == proposal_slot
@@ -444,10 +447,15 @@ function _launch_factor_batch_mis_round!(
     target,
     bank::_PackedFactorBank,
     assignments,
-    ::_EqualAllocationGeneratingDenominator,
+    denominator::_EqualAllocationGeneratingDenominator,
     solve_scratch,
     execution,
 )
+    if target isa _NativeBatchTarget
+        _launch_factor_batch_mis_round!(samples, output, failure_storage, normal_buffer,
+            _deferred_target(target), bank, assignments, denominator, solve_scratch, execution)
+        return _finish_batch_weights!(output, target.target, samples, failure_storage, execution)
+    end
     backend = KernelAbstractions.get_backend(normal_buffer)
     sample_count = length(output.logweights)
     proposal_count = size(bank.locations, 2)
@@ -515,6 +523,11 @@ function _launch_factor_batch_mis_round!(
     solve_scratch,
     execution,
 )
+    if target isa _NativeBatchTarget
+        _launch_factor_batch_mis_round!(samples, output, failure_storage, normal_buffer,
+            _deferred_target(target), bank, assignments, denominator, solve_scratch, execution)
+        return _finish_batch_weights!(output, target.target, samples, failure_storage, execution)
+    end
     backend = KernelAbstractions.get_backend(normal_buffer)
     sample_count = length(output.logweights)
     draw_kernel = _factor_batch_mis_draw_target_kernel!(backend)
@@ -801,6 +814,11 @@ function _launch_mis_round!(
     solve_scratch,
     execution,
 )
+    if target isa _NativeBatchTarget
+        _launch_mis_round!(samples, output, failure_storage, normal_buffer,
+            _deferred_target(target), bank, assignments, denominator, solve_scratch, execution)
+        return _finish_batch_weights!(output, target.target, samples, failure_storage, execution)
+    end
     backend = KernelAbstractions.get_backend(normal_buffer)
     launch_scratch = _fused_mis_solve_scratch(
         solve_scratch,
@@ -841,6 +859,11 @@ function _launch_mis_round!(
     solve_scratch,
     execution,
 )
+    if target isa _NativeBatchTarget
+        _launch_mis_round!(samples, output, failure_storage, normal_buffer,
+            _deferred_target(target), history, assignments, denominator, solve_scratch, execution)
+        return _finish_batch_weights!(output, target.target, samples, failure_storage, execution)
+    end
     backend = KernelAbstractions.get_backend(normal_buffer)
     launch_scratch = _fused_mis_solve_scratch(
         solve_scratch,

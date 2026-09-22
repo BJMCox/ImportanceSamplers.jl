@@ -156,11 +156,16 @@ end
 function _initialize_transition_batch!(backend, state, target, transfers)
     count = length(state.logtargets)
     L = eltype(state.logtargets)
-    evaluator = _NativeDeviceTarget{L,typeof(target)}(target)
+    evaluator, _ = _native_target_evaluator(backend, target, L, state.failure_scratch.target_failures)
     record = state.failure_scratch.record.storage
     _reset_native_failure_scratch!(state.failure_scratch)
     if !state.cache_valid
-        _transition_cache_kernel!(backend)(state.centres, state.logtargets, evaluator, record;
+        cache_target = evaluator
+        if evaluator isa _NativeBatchTarget
+            _invoke_batch_target!(target, state.logtargets, state.centres, record, _ThreadedCPUExecution())
+            cache_target = _CachedTargetValues(state.logtargets)
+        end
+        _transition_cache_kernel!(backend)(state.centres, state.logtargets, cache_target, record;
             ndrange=count)
         KernelAbstractions.synchronize(backend)
         _check_transition_failure!(state, transfers)
@@ -176,9 +181,13 @@ function _enqueue_transition_move!(backend, state, evaluator, rng, update)
     return nothing
 end
 
-function _launch_transition_move!(backend, state, evaluator, rng, update)
+function _launch_transition_move!(backend, state, evaluator, rng, update, execution=_ThreadedCPUExecution())
     Random.randn!(rng, state.normals)
     Random.rand!(rng, state.uniforms)
+    if evaluator isa _NativeBatchTarget
+        return _launch_batched_transition!(_transition_arrays(state), state.batch_values,
+            evaluator.target, update, state.failure_scratch.record.storage, execution)
+    end
     _transition_step_kernel!(backend)(_transition_arrays(state), evaluator, update,
         state.failure_scratch.record.storage; ndrange=length(state.logtargets))
     return nothing
@@ -225,6 +234,17 @@ function _launch_transition_warmup!(backend, state, evaluator, rng, normals, uni
     walk = state.walk
     Random.randn!(rng, view(normals, :, :, 1:steps))
     Random.rand!(rng, view(uniforms, :, 1:steps))
+    if evaluator isa _NativeBatchTarget
+        for step in 1:steps
+            batch = merge(_transition_arrays(walk),
+                (; normals=view(normals, :, :, step), uniforms=view(uniforms, :, step)))
+            update = (direction=state.direction, target_acceptance=state.target_acceptance,
+                gain=eltype(normals)(first_step + step)^(-state.decay))
+            _launch_batched_transition!(batch, walk.batch_values, evaluator.target, update,
+                walk.failure_scratch.record.storage, _ThreadedCPUExecution())
+        end
+        return nothing
+    end
     lanes = min(_TRANSITION_WORKGROUP_SIZE, size(walk.normals, 1))
     _cooperative_transition_warmup_kernel!(backend)(
         _transition_arrays(walk), evaluator, state.direction, normals,
@@ -242,7 +262,7 @@ _preflight_transition(device, state::_RAMState, target) =
 function _preflight_transition(device, state::_RandomWalkState, target, update=nothing)
     backend = KernelAbstractions.get_backend(state.normals)
     L = eltype(state.logtargets)
-    evaluator = _NativeDeviceTarget{L,typeof(target)}(target)
+    evaluator = _native_device_evaluator(target, L)
     kernel = _transition_step_kernel!(backend)
     for argument in (_transition_arrays(state), evaluator, update, state.failure_scratch.record.storage)
         _preflight_kernel_argument(device, kernel, argument)
@@ -256,7 +276,7 @@ function _preflight_accelerator_method(device, target, ::LAIS, state::_PreparedL
     bound = _bind_resolved_target(target, _population_binding_sample(bank))
     _preflight_transition(device, state.run_transition, bound)
     L = eltype(state.workspace.round_logweights)
-    evaluator = _NativeDeviceTarget{L,typeof(bound)}(bound)
+    evaluator = _native_device_evaluator(bound, L)
     backend = KernelAbstractions.get_backend(buffers.normals)
     round = findmax(state.plan.schedule)[2]
     views = _population_round_views(state, round)
@@ -282,5 +302,40 @@ function _preflight_accelerator_method(device, target, ::LAIS, state::_PreparedL
     if use_factor_batch
         _preflight_kernel_argument(device, _factor_batch_mis_draw_target_kernel!(backend), evaluator)
     end
+    return nothing
+end
+
+@inline _batch_failed(storage) = !iszero(storage[1])
+@inline _batch_failed(storage::AbstractMatrix{UInt32}) =
+    !iszero(storage[1, end]) || !iszero(storage[2, end])
+
+@kernel function _transition_candidates_kernel!(batch, failures)
+    chain = @index(Global, Linear)
+    if isfinite(batch.logtargets[chain])
+        reason, failed = _transition_candidate!(batch, chain)
+        failed && _record_native_failure!(failures, chain, 0, reason)
+    end
+end
+
+@kernel function _transition_accept_batch_kernel!(batch, logs, update, failures)
+    chain = @index(Global, Linear)
+    if !_batch_failed(failures) && isfinite(batch.logtargets[chain])
+        reason, failed = _transition_accept!(batch, logs[chain], update, chain)
+        if failed
+            batch.logtargets[chain] = oftype(batch.logtargets[chain], NaN)
+            _record_native_failure!(failures, chain, 0, reason)
+        end
+    end
+end
+
+function _launch_batched_transition!(batch, logs, target, update, failures, execution)
+    backend = KernelAbstractions.get_backend(logs)
+    count = length(logs)
+    workgroupsize = _native_workgroupsize(execution, count)
+    _transition_candidates_kernel!(backend)(batch, failures; ndrange=count, workgroupsize)
+    _invoke_batch_target!(target, logs, batch.candidates, failures, execution)
+    _transition_accept_batch_kernel!(backend)(batch, logs, update, failures; ndrange=count, workgroupsize)
+    KernelAbstractions.synchronize(backend)
+    _check_batch_failure!(target, failures)
     return nothing
 end

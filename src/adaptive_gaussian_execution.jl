@@ -896,7 +896,7 @@ function _importance_sample_cpu!(sampler, committed_state::_PreparedMomentSample
     target = _capture_gaussian_round(algorithm, method_state, transfers, 1, :target, 0) do
         binding_sample = history isa _ScalarProposalHistory ?
                          zero(eltype(history.means)) : view(history.means, :, 1)
-        _bind_resolved_target(sampler.target, binding_sample)
+        _bind_resolved_target(sampler.target, binding_sample, transfers)
     end
     target_evaluator, target_failures = _capture_gaussian_round(
         algorithm, method_state, transfers, 1, :target, 0,

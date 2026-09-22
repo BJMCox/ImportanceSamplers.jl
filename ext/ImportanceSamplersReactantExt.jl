@@ -12,6 +12,38 @@ import LinearAlgebra as LA
 const _ReactantStorage = Union{Reactant.AnyConcreteRArray,
     SubArray{T,N,P} where {T,N,P<:Reactant.AnyConcreteRArray}}
 
+# Retained phases guard callbacks on-device. Host failure snapshots belong
+# after the executable, not inside its trace.
+IS._check_batch_failure!(target, storage::AbstractArray{<:Reactant.TracedRNumber},
+    transform=IS._NoSampleTransform()) = nothing
+IS._check_batch_mapping!(target, storage::AbstractArray{<:Reactant.TracedRNumber}, capture) = nothing
+
+_batch_trace_samples(samples::AbstractArray) = Reactant.TracedUtils.materialize_traced_array(samples)
+_batch_trace_samples(samples::NamedTuple) = map(_batch_trace_samples, samples)
+
+function IS._invoke_batch_target!(target::IS._BoundBatchTarget,
+    logs::AbstractArray{<:Reactant.TracedRNumber}, samples, failures, execution;
+    transform=IS._NoSampleTransform())
+    isempty(logs) && return nothing
+    fill!(logs, eltype(logs)(NaN))
+    batch, context = target.batch, target.context
+    values = Reactant.TracedUtils.materialize_traced_array(logs)
+    samples = _batch_trace_samples(samples)
+    if failures === nothing
+        IS._call_batch_target!(batch, values, samples, context)
+    else
+        Reactant.@trace if iszero(sum(view(failures, 1:1)))
+            IS._call_batch_target!(batch, values, samples, context)
+        end
+    end
+    copyto!(logs, values)
+    if failures !== nothing
+        IS._validate_batch_values_kernel!(KA.get_backend(logs))(logs, failures;
+            ndrange=length(logs))
+    end
+    return nothing
+end
+
 struct _ReactantRNG{R} <: Random.AbstractRNG
     rng::R
 end
@@ -568,6 +600,9 @@ function IS._preflight_accelerator_method(
     device::MLDataDevices.ReactantDevice, target, algorithm::IS.FirstOrderGRAMIS,
     state::IS._PreparedFirstOrderGRAMIS, buffers, factor_execution,
 )
+    # Active-only backtracking changes callback width between trials.
+    IS._has_batch_target(target) &&
+        throw(IS.SamplerDeviceError(device, :reactant_batch_backtracking_unsupported))
     # Unraised cooperative kernels retain NVVM barriers on Reactant's CPU
     # backend. Reject before its compiler aborts the Julia process.
     Reactant.XLA.device_kind(Reactant.XLA.device(state.committed.locations)) == "cpu" &&

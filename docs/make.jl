@@ -501,6 +501,7 @@ makedocs(
         ],
         "Guides" => [
             "Native proposals" => "guide/native_proposals.md",
+            "Batch targets" => "guide/batch_targets.md",
             "Transforms" => "guide/transforms.md",
             "Accelerators" => "guide/accelerators.md",
             "Sampler benchmarks" => "guide/benchmarks.md",

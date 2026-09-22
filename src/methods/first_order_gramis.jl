@@ -988,9 +988,7 @@ function _preflight_accelerator_method(
     binding_sample = view(bank.locations, :, 1)
     bound_target = _bind_resolved_target(target, binding_sample)
     log_type = eltype(workspace.round_logweights)
-    target_argument = _NativeDeviceTarget{log_type,typeof(bound_target)}(
-        bound_target,
-    )
+    target_argument = _native_device_evaluator(bound_target, log_type)
     backend = KernelAbstractions.get_backend(workspace.samples)
 
     sample_kernel = _mis_round_launch_kernel!(backend)

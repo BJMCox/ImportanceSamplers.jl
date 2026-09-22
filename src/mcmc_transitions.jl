@@ -57,7 +57,7 @@ mutable struct _RAMState{W,S,T,D}
     n_tuned::Int
 end
 
-mutable struct _RandomWalkState{C,F,L,N,U,A,E}
+mutable struct _RandomWalkState{C,F,L,N,U,A,E,V}
     centres::C
     factors::F
     logtargets::L
@@ -69,6 +69,7 @@ mutable struct _RandomWalkState{C,F,L,N,U,A,E}
     cache_valid::Bool
     initial_evaluations::Int
     steps::Int
+    batch_values::V
 end
 
 _transition_dimension(::AbstractVector) = 1
@@ -132,6 +133,7 @@ function prepare_transition(transition::RandomWalkMetropolis, centres, target, :
         Matrix{T}(undef, dimension, count), Vector{T}(undef, count),
         zeros(Int, count), _allocate_native_failure_scratch(centres, count),
         false, 0, 0,
+        _has_batch_target(target) ? Vector{L}(undef, count) : nothing,
     )
 end
 
@@ -243,6 +245,7 @@ function Adapt.adapt_structure(to, state::_RandomWalkState)
         normals, Adapt.adapt(to, state.uniforms), Adapt.adapt(to, state.accepted),
         _allocate_native_failure_scratch(normals, length(state.logtargets)),
         state.cache_valid, state.initial_evaluations, state.steps,
+        Adapt.adapt(to, state.batch_values),
     )
 end
 
@@ -353,7 +356,7 @@ _transition_arrays(state::_RandomWalkState) = (
     accepted=state.accepted,
 )
 
-function _transition_step!(batch, evaluator, update, chain)
+function _transition_candidate!(batch, chain)
     dimension = size(batch.normals, 1)
     for row in 1:dimension
         increment = zero(eltype(batch.normals))
@@ -364,8 +367,19 @@ function _transition_step!(batch, evaluator, update, chain)
         isfinite(value) || return _NATIVE_GENERATED_NONFINITE, true
         _store_population_location!(batch.candidates, row, chain, value)
     end
+    return UInt16(0), false
+end
+
+function _transition_step!(batch, evaluator, update, chain)
+    reason, failed = _transition_candidate!(batch, chain)
+    failed && return reason, true
     value, reason, failed = evaluator(_native_sample_at(batch.candidates, chain), chain)
     failed && return reason, true
+    return _transition_accept!(batch, value, update, chain)
+end
+
+function _transition_accept!(batch, value, update, chain)
+    dimension = size(batch.normals, 1)
     logacceptance = min(zero(value), value - batch.logtargets[chain])
     _adapt_transition!(update, batch, chain, exp(logacceptance)) ||
         return _NATIVE_PROPOSAL_INVALID, true
@@ -387,6 +401,15 @@ function _transition_batch!(state::_RandomWalkState, target, rng, execution, tra
 end
 
 function _transition_batch!(::KernelAbstractions.CPU, state, target, rng, execution, transfers, update)
+    if _has_batch_target(target)
+        backend = KernelAbstractions.CPU()
+        evaluator = _initialize_transition_batch!(backend, state, target, transfers)
+        _launch_transition_move!(backend, state, evaluator, rng, update, execution)
+        KernelAbstractions.synchronize(backend)
+        _check_transition_failure!(state, transfers)
+        state.steps += 1
+        return nothing
+    end
     count = length(state.logtargets)
     evaluator, failures = _native_target_evaluator(
         KernelAbstractions.CPU(), target, eltype(state.logtargets), state.failure_scratch.target_failures,

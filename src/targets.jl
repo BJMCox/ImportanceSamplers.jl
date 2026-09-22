@@ -1,7 +1,7 @@
 """
     LogTarget(logdensity)
-    LogTarget(logdensity, adtype; grad=nothing)
-    LogTarget(logdensity; grad=nothing)
+    LogTarget(logdensity, adtype; grad=nothing, batch=nothing)
+    LogTarget(logdensity; grad=nothing, batch=nothing)
 
 Mark `logdensity` as a package callable target.
 
@@ -12,6 +12,24 @@ and must return a `Float32` or `Float64` unnormalized log density. For CUDA,
 use a device-compatible callable and pass numerical arrays through `p`; opaque
 closure captures cannot be transferred reliably.
 
+Pass `batch=batch!` to evaluate independent samples together. The callback is
+`batch!(values, samples)` or `batch!(values, samples, p)` with explicit context.
+Fill every entry of `values` with the corresponding scalar log density. Its
+return value is ignored. Samples are a vector for scalar parameters, a
+dimension-by-count matrix for vector parameters, or a named tuple of batch
+leaves for named parameters. With `transform=`, leaves contain logical values
+and the package adds the Jacobian. Batch widths can change, but never equal zero.
+
+Inputs are borrowed and read-only. Retain neither inputs nor output buffers.
+Each value must be independent of batch width and other samples. `-Inf` is valid,
+but NaN and +Inf fail the run. The callback owns CPU parallelism. On an accelerator,
+inputs, outputs, and `p` stay resident. Use the current task's device stream or
+complete private-stream work before returning. Failure checks can synchronize
+at batch boundaries, never once per sample. Without `batch`, scalar execution remains
+unchanged. Custom MCMC transitions own how they evaluate their target.
+Reactant supports fixed-width batch phases, but rejects explicit-batch
+FirstOrderGRAMIS during device transfer because its backtracking width varies.
+
 An explicit `grad` takes priority over `adtype`. CPU automatic gradients use
 DifferentiationInterface. FirstOrderGRAMIS also supports reverse-mode
 `ADTypes.AutoEnzyme()` on CUDA when Enzyme is loaded. It batches the existing
@@ -20,6 +38,8 @@ The callable and its operations must support Enzyme's device differentiation.
 Structured GPU contexts can require Enzyme's runtime-activity mode; the supplied
 AD mode is preserved, not changed implicitly.
 Other accelerator AD backends and out-of-place explicit gradients are unsupported.
+`batch` changes value evaluation only. Automatic differentiation still uses the
+scalar callable and can evaluate its primal while computing a gradient.
 
 With a named `transform=` layout, the callable receives named logical parameters.
 An explicit gradient differentiates only this logical target. Write scalar
@@ -28,24 +48,31 @@ adds the transform pullback and Jacobian derivative. Borrowed inputs and gradien
 buffers must not escape the callback. CPU automatic gradients use ordinary arrays
 in the composed target through DifferentiationInterface.
 """
-struct LogTarget{F,A<:ADTypes.AbstractADType,G}
+struct LogTarget{F,A<:ADTypes.AbstractADType,G,B}
     logdensity::F
     adtype::A
     grad::G
+    batch::B
 end
 
-LogTarget(f, adtype::ADTypes.AbstractADType; grad=nothing) =
-    LogTarget(f, adtype, grad)
-LogTarget(f; grad=nothing) = LogTarget(f, ADTypes.NoAutoDiff(), grad)
+LogTarget(f, adtype::ADTypes.AbstractADType; grad=nothing, batch=nothing) =
+    LogTarget(f, adtype, grad, batch)
+LogTarget(f; grad=nothing, batch=nothing) =
+    LogTarget(f, ADTypes.NoAutoDiff(), grad, batch)
+LogTarget(f, adtype, grad) = LogTarget(f, adtype, grad, nothing)
 
 struct _NoTargetContext end
 
-struct _PreparedLogTarget{F,P,A<:ADTypes.AbstractADType,G}
+struct _PreparedLogTarget{F,P,A<:ADTypes.AbstractADType,G,B}
     logdensity::F
     context::P
     adtype::A
     gradient::G
+    batch::B
 end
+
+_PreparedLogTarget(f, p, adtype, gradient) =
+    _PreparedLogTarget(f, p, adtype, gradient, nothing)
 
 abstract type _BoundTarget end
 
@@ -66,12 +93,20 @@ struct _BoundDensityInterfaceTarget{T} <: _BoundTarget
     target::T
 end
 
+struct _BoundBatchTarget{T,B,P,C} <: _BoundTarget
+    scalar::T
+    batch::B
+    context::P
+    transfers::C
+end
+
 Adapt.@adapt_structure LogTarget
 Adapt.@adapt_structure _PreparedLogTarget
 Adapt.@adapt_structure _BoundContextFreeTarget
 Adapt.@adapt_structure _BoundContextualTarget
 Adapt.@adapt_structure _BoundLogDensityProblemsTarget
 Adapt.@adapt_structure _BoundDensityInterfaceTarget
+Adapt.@adapt_structure _BoundBatchTarget
 
 @inline (target::_BoundContextFreeTarget)(sample) = target.logdensity(sample)
 @inline (target::_BoundContextualTarget)(sample) = target.logdensity(sample, target.context)
@@ -79,6 +114,11 @@ Adapt.@adapt_structure _BoundDensityInterfaceTarget
     LogDensityProblems.logdensity(target.target, sample)
 @inline (target::_BoundDensityInterfaceTarget)(sample) =
     DensityInterface.logdensityof(target.target, sample)
+@inline (target::_BoundBatchTarget)(sample) = target.scalar(sample)
+
+_bind_batch_target(scalar, ::Nothing, context) = scalar
+_bind_batch_target(scalar, batch, context) =
+    _BoundBatchTarget(scalar, batch, context, _ResultTransferCounter(0, 0))
 
 _bind_resolved_target(target::_BoundTarget, sample) = target
 
@@ -109,6 +149,7 @@ function _transfer_prepared_target(
         _copy_to_device(device, target.context),
         _copy_to_device(device, target.adtype),
         _copy_target_callable(device, target.gradient),
+        _copy_target_callable(device, target.batch),
     )
 end
 
@@ -118,6 +159,7 @@ _transfer_prepared_target(device::MLDataDevices.AbstractDevice, target::_BoundTa
 function _target_has_opaque_host_closure(target::_PreparedLogTarget)
     return _has_opaque_host_closure(target.logdensity) ||
            _has_opaque_host_closure(target.gradient) ||
+           _has_opaque_host_closure(target.batch) ||
            _has_opaque_host_closure(target.context)
 end
 
@@ -127,6 +169,7 @@ function _target_has_opaque_host_closure(
 )
     return _target_callable_has_opaque_host_closure(target.logdensity, device) ||
            _target_callable_has_opaque_host_closure(target.gradient, device) ||
+           _target_callable_has_opaque_host_closure(target.batch, device) ||
            _has_opaque_host_closure(target.context)
 end
 
@@ -157,6 +200,7 @@ _target_has_opaque_host_closure(
 function _target_transfer_rewrites_opaque_closure(target::_PreparedLogTarget)
     return _field_transfer_rewrites_opaque_closure(target.logdensity) ||
            _field_transfer_rewrites_opaque_closure(target.gradient) ||
+           _field_transfer_rewrites_opaque_closure(target.batch) ||
            _field_transfer_rewrites_opaque_closure(target.context)
 end
 
@@ -254,6 +298,7 @@ function _prepare_target(target::LogTarget, proposal)
         _NoTargetContext(),
         target.adtype,
         target.grad,
+        target.batch,
     )
 end
 
@@ -263,6 +308,7 @@ function _prepare_target(target::LogTarget, context, proposal)
         context,
         target.adtype,
         target.grad,
+        target.batch,
     )
 end
 

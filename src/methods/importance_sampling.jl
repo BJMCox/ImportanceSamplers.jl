@@ -154,6 +154,9 @@ function Base.showerror(io::IO, error::SamplerDeviceError)
     elseif error.reason === :reactant_cpu_cooperative_kernels
         "Reactant's CPU backend cannot compile GRAMIS cooperative kernels; " *
         "use CPUDevice() or Reactant on a supported GPU"
+    elseif error.reason === :reactant_batch_backtracking_unsupported
+        "Reactant GRAMIS does not support explicit batch targets with variable-width " *
+        "backtracking. Omit batch or use native CPU, CUDA, or Metal execution"
     elseif error.reason === :prepared_migration_unsupported
         "accelerator-resident prepared samplers cannot be transferred"
     elseif error.reason === :rng_not_cloneable
@@ -176,7 +179,8 @@ end
 Exception wrapping a failure from one logical sample during proposal drawing,
 target evaluation, proposal-density evaluation, or log-weight construction.
 
-The `phase` and `sample_index` fields locate the failure. `captured` preserves
+The `phase` and `sample_index` fields locate the failure. A batch-wide failure
+uses index zero because no particular sample is implicated. `captured` preserves
 the original exception and backtrace. A failed run never returns a partial
 result.
 """
@@ -191,10 +195,9 @@ function Base.showerror(io::IO, error::SamplerExecutionError)
         io,
         "importance-sampler execution failed during ",
         error.phase,
-        " at logical sample ",
-        error.sample_index,
-        ": ",
     )
+    iszero(error.sample_index) || print(io, " at logical sample ", error.sample_index)
+    print(io, ": ")
     showerror(io, error.captured)
 end
 
@@ -945,6 +948,9 @@ function _evaluate_logs_threaded!(
     samples,
     phase::Val,
 ) where {T}
+    if phase isa Val{:target} && _has_batch_target(evaluator)
+        return _evaluate_generic_batch_logs!(logs, evaluator, samples)
+    end
     ntasks = min(Threads.nthreads(:default), length(logs))
     chunk_size = cld(length(logs), ntasks)
     tasks = Task[]
@@ -1070,11 +1076,13 @@ function _bind_resolved_target(
     target::_PreparedLogTarget{F,_NoTargetContext},
     sample,
 ) where {F}
-    return _bind_context_free_callable(target.logdensity, sample)
+    scalar = _bind_context_free_callable(target.logdensity, sample)
+    return _bind_batch_target(scalar, target.batch, target.context)
 end
 
 function _bind_resolved_target(target::_PreparedLogTarget, sample)
-    return _bind_contextual_callable(target.logdensity, target.context, sample)
+    scalar = _bind_contextual_callable(target.logdensity, target.context, sample)
+    return _bind_batch_target(scalar, target.batch, target.context)
 end
 
 function _bind_prepared_target(target, samples)
@@ -1128,6 +1136,7 @@ function _evaluate_logweights(
 end
 
 function _evaluate_target_logs!(target_logs::Vector{T}, target, samples) where {T}
+    _has_batch_target(target) && return _evaluate_generic_batch_logs!(target_logs, target, samples)
     phase = Val(:target)
     for sample_index in eachindex(target_logs)
         _evaluate_log_sample!(target_logs, target, samples, sample_index, phase)

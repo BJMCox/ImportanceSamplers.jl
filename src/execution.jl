@@ -388,6 +388,7 @@ function _importance_sample!(sampler, ::_ThreadedCPUExecution)
 end
 
 function _importance_sample!(sampler, execution::_KernelExecution)
+    transfers = _ResultTransferCounter(0, 0)
     proposal = sampler.algorithm.proposal
     nsamples = sampler.algorithm.nsamples
     buffers = _capture_sampler_failure(:proposal_draw, 1) do
@@ -398,7 +399,7 @@ function _importance_sample!(sampler, execution::_KernelExecution)
     samples = _allocate_native_samples(normal_buffer, proposal, nsamples)
     binding_sample = _native_binding_sample(samples)
     target = _capture_sampler_failure(:target, 1) do
-        _bind_resolved_target(sampler.target, binding_sample)
+        _bind_resolved_target(sampler.target, binding_sample, transfers)
     end
     log_type = _resolve_native_logweight_type(target, base, typeof(binding_sample))
     logweights = similar(normal_buffer, log_type, nsamples)
@@ -420,7 +421,8 @@ function _importance_sample!(sampler, execution::_KernelExecution)
         target_failures,
         transform,
     )
-    return samples, logweights, snapshot.transfers
+    _record_reported_transfer!(transfers, snapshot.transfers.count, snapshot.transfers.bytes, Val(:failure_snapshot))
+    return samples, logweights, (count=transfers.count, bytes=transfers.bytes)
 end
 
 function _launch_native_batch!(samples, logweights, failure_record, buffers, target_evaluator,
@@ -462,6 +464,7 @@ function _native_target_evaluator(
     ::Type{L},
     failures::_NativeCPUTargetFailures,
 ) where {L}
+    _has_batch_target(target) && return _NativeBatchTarget{L,typeof(target)}(target), failures
     return _NativeCPUTarget{L,typeof(target),typeof(failures)}(target, failures), failures
 end
 
@@ -471,6 +474,7 @@ function _native_target_evaluator(
     ::Type{L},
     failures::_NoNativeTargetFailures,
 ) where {L}
+    _has_batch_target(target) && return _NativeBatchTarget{L,typeof(target)}(target), failures
     return _NativeDeviceTarget{L,typeof(target)}(target), failures
 end
 
@@ -490,8 +494,7 @@ function _preflight_native_kernel_target(
         base,
         typeof(binding_sample),
     )
-    target_argument =
-        _NativeDeviceTarget{log_type,typeof(bound_target)}(bound_target)
+    target_argument = _native_device_evaluator(bound_target, log_type)
     backend = KernelAbstractions.get_backend(buffers.normal)
     kernel = _native_fused_kernel!(backend)
     _preflight_kernel_argument(device, kernel, target_argument)
