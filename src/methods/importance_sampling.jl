@@ -152,11 +152,8 @@ function Base.showerror(io::IO, error::SamplerDeviceError)
         "the target or context does not have a supported accelerator kernel " *
         "argument representation"
     elseif error.reason === :reactant_cpu_cooperative_kernels
-        "Reactant's CPU backend cannot compile GRAMIS cooperative kernels; " *
+        "Reactant's CPU backend cannot compile this sampler's cooperative kernels; " *
         "use CPUDevice() or Reactant on a supported GPU"
-    elseif error.reason === :reactant_batch_backtracking_unsupported
-        "Reactant GRAMIS does not support explicit batch targets with variable-width " *
-        "backtracking. Omit batch or use native CPU, CUDA, or Metal execution"
     elseif error.reason === :prepared_migration_unsupported
         "accelerator-resident prepared samplers cannot be transferred"
     elseif error.reason === :rng_not_cloneable

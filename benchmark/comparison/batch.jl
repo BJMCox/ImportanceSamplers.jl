@@ -5,7 +5,8 @@ using .SamplerComparison, BenchmarkTools, Statistics, TOML, Printf
 const SC = SamplerComparison
 const PILOT = (nsamples=4096,scale_limits=(0.25,2.0))
 
-function measure_pair(method,device,model,seed; nsamples,capacity,timing_samples,batch_first)
+function measure_pair(method,device,model,seed; nsamples,capacity,timing_samples,batch_first,
+                      population=SC.DEFAULT_POPULATION)
     gpu = device !== identity
     sampling_device = gpu ? device : nothing
     captured = [Ref{Any}(nothing),Ref{Any}(nothing)]
@@ -15,7 +16,7 @@ function measure_pair(method,device,model,seed; nsamples,capacity,timing_samples
         result,batch_capacity = captured[mode],capacities[mode]
         @benchmarkable begin
             $result[] = SC.run_method($method,$sampling_device,$model,$seed;
-                nsamples=$nsamples,pilot=PILOT,batch_capacity=$batch_capacity)
+                nsamples=$nsamples,pilot=PILOT,batch_capacity=$batch_capacity,population=$population)
             $gpu && SC.CUDA.synchronize()
         end samples=1 evals=1 gctrial=false
     end
@@ -105,7 +106,9 @@ function print_table(report; io=stdout)
         println(io,"Each seed uses the median of up to ",report["timing_samples"]," timed executions and diagnostics from its last same-seed execution.")
     end
     println(io,"Host allocations exclude device allocations. CUDA pools are warm. Raw times, GC times, load and BLAS threads remain in TOML.")
-    println(io,"Accuracy warns at >0.2 posterior-SD mean error or >30% marginal variance error.")
+    mcse = any(haskey(r,"variance_mcse") for m in values(report["models"]) for rows in values(m["runs"]) for r in rows)
+    println(io,"Accuracy warns at >0.2 posterior-SD mean error or >30% marginal variance error",
+        mcse ? " that also exceeds three delta-method standard errors." : ".")
     println(io,"Julia ",report["metadata"]["julia"],", threads ",report["metadata"]["threads"],
         "; ",report["metadata"]["cpu"],". Samples: ",report["nsamples"],"; seeds: ",join(report["seeds"],", "),".")
     println(io,"\nManifest SHA-256: `",report["metadata"]["manifest_sha256"],"`.\n\n| Package | Version |\n|:--|:--|")
@@ -116,7 +119,7 @@ end
 
 function compare(; output=joinpath(@__DIR__,"batch-results.toml"), resume=false,
                   cpu=false,cuda=true,nsamples=2^18,repeats=3,timing_samples=4,capacity=8192,
-                  selected=1:4,methods=SC.IMPORTANCE_METHODS)
+                  selected=1:4,methods=SC.IMPORTANCE_METHODS,settings=SC.LINEAR_POPULATION_SETTINGS)
     ispath(output) && !resume && error("Output already exists: $output")
     nsamples % 64 == 0 || error("Sample budget must divide into four rounds and sixteen proposals")
     capacity > 0 || error("Batch capacity must be positive")
@@ -147,11 +150,12 @@ function compare(; output=joinpath(@__DIR__,"batch-results.toml"), resume=false,
         "seeds"=>collect(9301:9300+repeats),"timing_samples"=>timing_samples,
         "timing_protocol"=>"ABBA/BAAB single executions","executions"=>Dict{String,Any}[],
         "devices"=>first.(devices),"methods"=>collect(String.(methods)),
+        "population_settings"=>settings,
         "model_order"=>[m.name for m in cases],"models"=>Dict{String,Any}(),
         "conditions"=>"Provisional shared-host measurements. CPU contention affects GPU setup too. Do not replace published CPU timings.")
     if resume
         saved = TOML.parsefile(output)
-        for key in ("metadata","nsamples","capacity","seeds","timing_samples","timing_protocol","devices","methods","model_order")
+        for key in ("metadata","nsamples","capacity","seeds","timing_samples","timing_protocol","devices","methods","population_settings","model_order")
             saved[key] == report[key] || error("Resume configuration differs: $key")
         end
         report = saved
@@ -185,8 +189,9 @@ function compare(; output=joinpath(@__DIR__,"batch-results.toml"), resume=false,
                     continue
                 end
                 any(present) && error("Cannot resume an incomplete scalar/batch pair")
+                population = SC.population_settings(settings,model,SC.method_label(method,label))
                 rows,executions = measure_pair(method,device,model,seed;nsamples,capacity,timing_samples,
-                    batch_first=isodd(index+model_index+method_index+device_index))
+                    batch_first=isodd(index+model_index+method_index+device_index),population)
                 for (mode,row,destination) in zip(modes,rows,stored)
                     merge!(row,Dict("method"=>String(method),"device"=>label,"mode"=>mode,
                         "blas_threads"=>label=="CPU" && mode=="batch" ? 16 : 1,

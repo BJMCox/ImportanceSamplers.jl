@@ -114,5 +114,8 @@ source hashes, revision, versions, manifest hash, and host load.
 
 The recorded manifest SHA-256 is
 `e48da7e1ce3825329d34ee837e045c7e262c5a6116c082b56e3143d6870fc663`.
-The committed comparison manifest matches it. The robust reference SHA-256 is
+That is the historical study environment. The committed comparison manifest has
+since changed (SHA-256
+`19b44b29f3a31074ce0faa2bdc57d8948e9739c9f33637bcfe0fa50c88eb8bfa`), so a new
+run records its own manifest hash. The robust reference SHA-256 is
 `b2ad781d7c9f9c71d116f94d1e02f1c69811cae9b753c5e5d2d0cca0150123f3`.

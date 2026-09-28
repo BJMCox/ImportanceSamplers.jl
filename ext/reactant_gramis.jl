@@ -68,9 +68,12 @@ function _prepare_execution(sampler, state::IS._PreparedFirstOrderGRAMIS)
         active_mask=workspace.active_mask, steps=workspace.steps, trials=workspace.backtracking_trials,
         target=target, frozen_values=workspace.frozen_values, locations=state.run.locations,
         moves=workspace.moves, max_trials=state.max_backtracking_trials)
+    # The scalar kernel cannot take a batch target, which holds host state.
+    backtrack, padded_backtracking = IS._has_batch_target(target) ?
+        (nothing, _prepare_padded_backtracking(batch, record, execution)) :
+        (Reactant.@compile(backtrack_phase(batch, record)), nothing)
     reset = Reactant.@compile reset_phase(inputs, record)
     precondition = Reactant.@compile precondition_phase(inputs, record)
-    backtrack = Reactant.@compile backtrack_phase(batch, record)
     add = Reactant.@compile add_phase(state.candidate.locations, workspace.repulsion, record, workspace.candidate_values)
     validate = Reactant.@compile validation_phase(state.candidate, workspace.factor_status, record, workspace.candidate_values)
     copy_normalizers = Reactant.@compile copy_phase(inputs)
@@ -78,10 +81,14 @@ function _prepare_execution(sampler, state::IS._PreparedFirstOrderGRAMIS)
     gradient = _prepare_gramis_gradient(inputs, target, state.serial_gradient, execution, device, record)
     repulsion = isempty(state.active_repulsion_rounds) ? nothing :
         _prepare_gramis_repulsion(state, execution, device, record)
-    phases = (; reset, precondition, backtrack, add, validate, copy_normalizers, clear, gradient, repulsion)
+    phases = (; reset, precondition, backtrack, padded_backtracking, add, validate, copy_normalizers,
+        clear, gradient, repulsion)
     mapper = _prepare_result_map(sampler.target, output.samples, record)
     return _CompiledGRAMISExecution(rounds, phases, mapper)
 end
+
+# A value type read inside a trace is traced, but kernels store plain numbers.
+@inline (::IS._DeferredTargetValues{Reactant.TracedRNumber{T}})(sample) where {T} = zero(T)
 
 function _prepare_gramis_gradient(inputs, target, bound, execution, device, record)
     phase = (inputs, target, bound, record) -> IS._launch_gramis_gradients!(
@@ -135,6 +142,102 @@ IS._launch_gramis_precondition!(plan::_CompiledGRAMISExecution, state, execution
     plan.phases.precondition(_gramis_inputs(state), record)
 IS._launch_gramis_backtracking!(plan::_CompiledGRAMISExecution, batch, execution, device, record) =
     plan.phases.backtrack(batch, record)
+
+# Reactant compiles fixed shapes, so batch backtracking evaluates the full
+# candidate width on every trial and discards inactive results. Inactive
+# columns repeat their accepted candidate, so the callback sees valid points.
+KA.@kernel function _pack_padded_backtracking_kernel!(packed, batch, step)
+    slot = KA.@index(Global, Linear)
+    active = batch.active_mask[slot]
+    for row in axes(packed, 1)
+        packed[row, slot] = active ? batch.locations[row, slot] + step * batch.moves[row, slot] :
+            batch.candidate_locations[row, slot]
+    end
+end
+
+# The callback cannot change the mask, so the mask here matches the pack mask.
+KA.@kernel function _accept_padded_backtracking_kernel!(batch, packed, logs, step, trial, failures)
+    slot = KA.@index(Global, Linear)
+    # Every slot pays for the padded evaluation, so target_trials reports it.
+    batch.trials[slot] = trial
+    if batch.active_mask[slot]
+        value = logs[slot]
+        for row in axes(packed, 1)
+            batch.candidate_locations[row, slot] = packed[row, slot]
+        end
+        batch.candidate_values[slot] = value
+        if !iszero(IS._native_target_reason(value))
+            IS._record_native_failure!(failures, (trial - 1) * length(batch.steps) + slot,
+                0, IS._GRAMIS_CANDIDATE_VALUE_NONFINITE)
+        elseif isfinite(value) && value >= batch.frozen_values[slot]
+            batch.steps[slot] = step
+            batch.active_mask[slot] = false
+        end
+    end
+end
+
+# The callback runs inside the trial trace. A named target maps coordinates and
+# adds Jacobians on device, which would otherwise be eager per-trial operations.
+function _prepare_padded_backtracking(batch, record, execution)
+    count = size(batch.locations, 2)
+    workgroupsize = IS._native_workgroupsize(execution, count)
+    packed = similar(batch.locations)
+    logs = similar(batch.candidate_values)
+    init_phase = function (batch, record)
+        fill!(record.storage, zero(UInt64))
+        arrays = Base.structdiff(batch, (; target=batch.target))
+        IS._initialize_batch_backtracking_kernel!(KA.get_backend(arrays.locations))(arrays;
+            ndrange=count, workgroupsize)
+        return nothing
+    end
+    trial_phase = function (batch, packed, logs, step, trial, record)
+        arrays = Base.structdiff(batch, (; target=batch.target))
+        backend = KA.get_backend(packed)
+        _pack_padded_backtracking_kernel!(backend)(packed, arrays, step; ndrange=count, workgroupsize)
+        # Inactive columns must not report failures, so validation stays in the accept kernel.
+        IS._invoke_batch_target!(batch.target, logs, packed, nothing, execution)
+        _accept_padded_backtracking_kernel!(backend)(arrays, packed, logs, step, trial, record.storage;
+            ndrange=count, workgroupsize)
+        return sum(Int.(arrays.active_mask))
+    end
+    finish_phase = function (batch)
+        arrays = Base.structdiff(batch, (; target=batch.target))
+        IS._finish_batch_backtracking_kernel!(KA.get_backend(arrays.locations))(arrays;
+            ndrange=count, workgroupsize)
+        return nothing
+    end
+    step = _transition_number(logs, one(eltype(batch.steps)))
+    trial = _transition_number(batch.trials, 1)
+    return (; init=Reactant.@compile(init_phase(batch, record)),
+        trial=Reactant.@compile(trial_phase(batch, packed, logs, step, trial, record)),
+        finish=Reactant.@compile(finish_phase(batch)), packed, logs)
+end
+
+IS._backtrack_batch_values!(plan::_CompiledGRAMISExecution, batch, execution, device, record, transfers) =
+    _run_padded_backtracking!(plan.phases.padded_backtracking, batch, device, record, transfers)
+
+# The live preflight runs before the plan exists. The native path would index
+# device arrays on the host, so the preflight compiles its own phases.
+# The first field of `_backtrack_means!`'s batch is `candidate_locations`, so it selects Reactant.
+IS._backtrack_batch_values!(::Nothing, batch::NamedTuple{N,<:Tuple{Reactant.AnyConcreteRArray,Vararg}},
+    execution, device, record, transfers) where {N} = _run_padded_backtracking!(
+    _prepare_padded_backtracking(batch, record, execution), batch, device, record, transfers)
+
+function _run_padded_backtracking!(phases, batch, device, record, transfers)
+    phases.init(batch, record)
+    for trial in 1:batch.max_trials
+        step = ldexp(one(eltype(batch.steps)), 1 - trial)
+        active = Int(phases.trial(batch, phases.packed, phases.logs,
+            _transition_number(phases.logs, step), _transition_number(batch.trials, trial), record))
+        IS._record_device_scalar_transfer!(transfers, batch.active_mask, Int)
+        IS._throw_first_order_gramis_device_backtracking_failure(device, record,
+            batch.candidate_values, size(batch.locations, 2), transfers)
+        iszero(active) && break
+    end
+    phases.finish(batch)
+    return nothing
+end
+
 IS._launch_gramis_add_repulsion!(plan::_CompiledGRAMISExecution, candidate, repulsion, execution, record, values) =
     plan.phases.add(candidate, repulsion, record, values)
 IS._launch_gramis_factor_validation!(plan::_CompiledGRAMISExecution, candidate, status, execution, record, values) =

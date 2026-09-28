@@ -51,8 +51,40 @@ end
 IS._owned_backend_rng(device::MLDataDevices.ReactantDevice, seed::UInt64) =
     _ReactantRNG(device(Random.Xoshiro(seed)))
 
+# `@jit` compiles on every call. Standalone result operations retain one
+# executable per function, argument types, shapes and device. Views keep `@jit`:
+# Reactant traces their indices as constants, so equal shapes can differ.
+# The limit bounds executable memory when sample counts vary across calls.
+const _RETAINED_CALLS = Dict{Any,Any}()
+const _RETAINED_CALLS_LOCK = ReentrantLock()
+const _RETAINED_CALL_LIMIT = 64
+
+_retained_shape(x::Reactant.ConcreteRArray) = (size(x), Reactant.XLA.device(x))
+_retained_shape(::Reactant.ConcreteRNumber) = ()
+_retained_shape(x::Reactant.ReactantRNG{<:Reactant.ConcreteRArray}) = (_retained_shape(x.seed), x.algorithm)
+function _retained_shape(x::NamedTuple)
+    shapes = map(_retained_shape, x)
+    return any(isnothing, shapes) ? nothing : shapes
+end
+_retained_shape(x) = Base.issingletontype(typeof(x)) ? () : nothing
+
+function _retained_call(f, arguments...)
+    shapes = map(_retained_shape, arguments)
+    any(isnothing, shapes) && return Reactant.@jit f(arguments...)
+    key = (f, map(typeof, arguments), shapes)
+    compiled = @lock _RETAINED_CALLS_LOCK begin
+        stored = get(_RETAINED_CALLS, key, nothing)
+        if stored === nothing && length(_RETAINED_CALLS) < _RETAINED_CALL_LIMIT
+            stored = _RETAINED_CALLS[key] = Reactant.@compile f(arguments...)
+        end
+        stored
+    end
+    compiled === nothing && return Reactant.@jit f(arguments...)
+    return compiled(arguments...)
+end
+
 function Random.rand!(rng::_ReactantRNG, values::AbstractArray)
-    iszero(length(values)) || (Reactant.@jit Random.rand!(rng.rng, values))
+    iszero(length(values)) || _retained_call(Random.rand!, rng.rng, values)
     return values
 end
 
@@ -215,8 +247,14 @@ end
 (phase::_PublishMomentPhase)(history, workspace) =
     _store_moment_candidate!(history, phase.slot, workspace)
 
-function _reset_moment_history!(history, record)
-    IS._reset_gaussian_history!(history, length(history.lognormalizers))
+# Reactant cannot trace `fill!` on the one-element view of a two-round history,
+# nor an empty slice of a one-round history.
+function _reset_moment_history!(history::IS._FactorProposalHistory, record)
+    if length(history.lognormalizers) > 1
+        history.means[:, 2:end] = zero.(history.means[:, 2:end])
+        history.factors[:, :, 2:end] = zero.(history.factors[:, :, 2:end])
+        history.lognormalizers[2:end] = zero.(history.lognormalizers[2:end])
+    end
     fill!(record.storage, zero(UInt64))
     return nothing
 end
@@ -600,15 +638,51 @@ function IS._preflight_accelerator_method(
     device::MLDataDevices.ReactantDevice, target, algorithm::IS.FirstOrderGRAMIS,
     state::IS._PreparedFirstOrderGRAMIS, buffers, factor_execution,
 )
-    # Active-only backtracking changes callback width between trials.
-    IS._has_batch_target(target) &&
-        throw(IS.SamplerDeviceError(device, :reactant_batch_backtracking_unsupported))
     # Unraised cooperative kernels retain NVVM barriers on Reactant's CPU
     # backend. Reject before its compiler aborts the Julia process.
     Reactant.XLA.device_kind(Reactant.XLA.device(state.committed.locations)) == "cpu" &&
         throw(IS.SamplerDeviceError(device, :reactant_cpu_cooperative_kernels))
     return invoke(IS._preflight_accelerator_method,
         Tuple{Any,Any,IS.FirstOrderGRAMIS,IS._PreparedFirstOrderGRAMIS,Any,Any},
+        device, target, algorithm, state, buffers, factor_execution)
+end
+
+# APIS, CAIS and locally resampled DM-PMC also launch workgroup kernels whose
+# barriers abort Reactant's CPU compiler. Globally resampled DM-PMC compiles.
+function _reject_reactant_cpu(device, buffers)
+    Reactant.XLA.device_kind(Reactant.XLA.device(buffers.normals)) == "cpu" &&
+        throw(IS.SamplerDeviceError(device, :reactant_cpu_cooperative_kernels))
+    return nothing
+end
+
+function IS._preflight_accelerator_method(
+    device::MLDataDevices.ReactantDevice, target, algorithm::IS.APIS,
+    state::IS._PreparedAPIS, buffers::IS._PopulationNormalBuffers, factor_execution,
+)
+    _reject_reactant_cpu(device, buffers)
+    return invoke(IS._preflight_accelerator_method,
+        Tuple{Any,Any,IS.APIS,IS._PreparedAPIS,IS._PopulationNormalBuffers,Any},
+        device, target, algorithm, state, buffers, factor_execution)
+end
+
+function IS._preflight_accelerator_method(
+    device::MLDataDevices.ReactantDevice, target, algorithm::IS.CAIS,
+    state::IS._PreparedCAIS, buffers::IS._PopulationNormalBuffers, factor_execution,
+)
+    _reject_reactant_cpu(device, buffers)
+    return invoke(IS._preflight_accelerator_method,
+        Tuple{Any,Any,IS.CAIS,IS._PreparedCAIS,IS._PopulationNormalBuffers,Any},
+        device, target, algorithm, state, buffers, factor_execution)
+end
+
+function IS._preflight_accelerator_method(
+    device::MLDataDevices.ReactantDevice, target,
+    algorithm::IS.DeterministicMixturePMC{<:IS.ProposalBank,<:Any,IS.LocalResampling},
+    state::IS._PreparedDMPMC, buffers::IS._DMPMCRandomBuffers, factor_execution,
+)
+    _reject_reactant_cpu(device, buffers)
+    return invoke(IS._preflight_accelerator_method,
+        Tuple{Any,Any,IS.DeterministicMixturePMC,IS._PreparedDMPMC,IS._DMPMCRandomBuffers,Any},
         device, target, algorithm, state, buffers, factor_execution)
 end
 
@@ -756,10 +830,13 @@ end
 
 function IS._logsumexp_accumulator(values::_ReactantStorage)
     # Reactant tensors cannot store the struct-valued reduction used by CUDA.
-    return IS._LogSumExpAccumulator(Array(Reactant.@jit _logsumexp(values))...)
+    return IS._LogSumExpAccumulator(Array(_retained_call(_logsumexp, values))...)
 end
 
 IS._normalized_weights(values::_ReactantStorage, total) = Reactant.@jit IS._normalized_weights(values, total)
+# A retained executable needs the total as an input, not a compile-time constant.
+IS._normalized_weights(values::Reactant.ConcreteRArray, total) =
+    _retained_call(IS._normalized_weights, values, _transition_number(values, total))
 
 function _resampling_cdf!(cdf, logweights)
     moments = _normalize_weights!(cdf, logweights, length(cdf))
@@ -770,12 +847,15 @@ end
 function IS._resampling_cdf!(
     cdf::_ReactantStorage, logweights, transfers::IS._ResultTransferCounter=IS._ResultTransferCounter(0, 0),
 )
-    summary = Array(Reactant.@jit _resampling_cdf!(cdf, logweights))
+    summary = Array(_retained_call(_resampling_cdf!, cdf, logweights))
     # The CDF maximum and sum share one transfer, attributed to cdf_sum.
     IS._record_reported_transfer!(transfers, 1, sizeof(summary), Val(:cdf_sum))
     isfinite(summary[2]) && summary[2] > 0 || throw(IS.AllZeroWeightsError())
     return cdf
 end
+
+IS._resample_and_gather!(cdf::Reactant.ConcreteRArray, uniforms, ancestors, source, destination, execution) =
+    _retained_call(IS._resample_and_gather!, cdf, uniforms, ancestors, source, destination, execution)
 
 _allfinite(values) = all(isfinite.(values))
 IS._local_means_valid(values::Reactant.AnyConcreteRArray) = Bool(Reactant.@jit _allfinite(values))

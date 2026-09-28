@@ -9,9 +9,10 @@ Support claims have three distinct sources:
 - **Hardware results** apply to the recorded source, package versions, device,
   scalar types, and cases. They do not establish AMDGPU or Metal support.
 
-The strict build checks doctests, exported docstrings, and links. Private GitHub
-source links listed in `linkcheck_ignore` are exempt from HTTP checks because
-they require authentication. This exemption is not evidence of link availability.
+The strict build checks doctests, exported docstrings, and links. GitHub source
+links under `blob/main/` are exempt from HTTP checks to avoid repeated source-page
+requests. `docs/make.jl` instead checks that each linked file exists in the local
+checkout. That check does not verify the pushed `main` branch.
 
 ## Current method coverage
 

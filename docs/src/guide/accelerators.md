@@ -155,9 +155,10 @@ callers. Placement is fixed once execution begins.
 
 Device-resident `normalized_weights(result)`, `lognormalizer(result)`,
 `mean(result)`, `var(result)`, `std(result)`, `cov(result)`, and array slicing
-are supported. Array summaries remain on the input device. Scalar summaries
-return a scalar. Function summaries compile the function for that device and
-require one concrete scalar output per sample.
+are supported on CUDA and Metal. Array summaries remain on the input device.
+Scalar summaries return a scalar. Function summaries compile the function for
+that device and require one concrete scalar output per sample. On Reactant,
+`mean`, `var`, `std`, and `cov` are not yet supported; see the Reactant section.
 
 `resample(rng, result, count)` also stays resident. On CUDA it consumes one
 `UInt64` seed from the supplied RNG, fills device random buffers with an
@@ -220,14 +221,19 @@ integration even when Reactant runs on CPU.
 
 Native Base IS, static MIS, scalar/vector AMIS/NPMC, DM-PMC, APIS, CAIS, LAIS
 and first-order GRAMIS retain compiled numerical phases in the prepared sampler.
+Explicit-batch GRAMIS runs on Reactant GPU backends with padded backtracking,
+described in [Batch targets](@ref "Batch target evaluation").
 Device preparation compiles the required phases once. Later runs reuse those
 executables with live RNG state, resident context arrays and adapted proposal
 arrays. Adaptive methods prepare phases for their fixed round schedules.
 Preparation can therefore take seconds or minutes even when warmed sampling is fast.
 LAIS retains execution for `RandomWalkMetropolis`, `RAM` and
-`SampleMetropolisHastings`. Custom LAIS transitions and standalone result
-operations still use eager compile-and-run calls. Their compatibility checks
-do not establish competitive Reactant throughput.
+`SampleMetropolisHastings`. Custom LAIS transitions still use eager
+compile-and-run calls. Their compatibility checks do not establish competitive
+Reactant throughput. `normalized_weights`, `lognormalizer` and `resample`
+compile once for each array type, shape and device, then reuse that executable.
+The extension keeps at most 64 such executables per process; further
+signatures, and views such as `result[2:10]`, compile on every call.
 On the tested NVIDIA A100, GRAMIS also supports
 `LogTarget(logtarget, AutoEnzyme())` with resident array context,
 simplex/positive/identity fields, adaptation, reuse and `retarget`.
@@ -244,7 +250,10 @@ APIS, CAIS and all three LAIS transitions, with reuse, adaptive retargeting and
 resident resampling. This does not establish Student-t GRAMIS support on Reactant.
 
 `normalized_weights`, `lognormalizer` and `resample` support Reactant results
-and their applicable view operations. Result normalization transfers two
+and their applicable view operations. `mean`, `var`, `std` and `cov` throw on
+Reactant results, because their weighted reductions reach BLAS calls that
+Reactant arrays do not support. Transfer the result with `cpu_device()` first.
+Result normalization transfers two
 scalars. CDF construction compiles normalization and cumulative summation
 together, then transfers two summary scalars once. Adaptive weight normalization
 transfers three summary scalars. Moment fitting compiles the weighted mean and
@@ -257,13 +266,22 @@ gradient batch reads one status scalar on the host. Round summaries copy only
 bounded diagnostics; samples and gradient arrays remain on-device.
 
 Reactant's CPU backend supports plain IS and the compiled gradient calculation,
-but cannot compile GRAMIS's cooperative kernels. Device transfer rejects that
-combination before the compiler can abort Julia. Use `CPUDevice()` for CPU
-GRAMIS. Factor-proposal AMIS and NPMC also remain rejected during Reactant CPU
+but cannot compile the cooperative kernels of GRAMIS, APIS, CAIS, or DM-PMC
+with `LocalResampling()`. Device transfer rejects these combinations before the
+compiler can abort Julia. Use `CPUDevice()` for these methods on CPU.
+Factor-proposal AMIS and NPMC also remain rejected during Reactant CPU
 preflight. Their new factorization support applies to GPU execution; it does
-not enable the unvalidated cooperative CPU paths. Other Reactant CPU adaptive
-methods and non-NVIDIA accelerators remain unvalidated. Metal GRAMIS still
-requires an explicit gradient.
+not enable the unvalidated cooperative CPU paths.
+
+A September 28 recheck with Julia 1.13.0, Reactant 0.2.289 and CUDA 6.2.2
+confirmed that plain IS, static MIS, scalar AMIS/NPMC, LAIS, and globally
+resampled DM-PMC run on Reactant CPU, while the unguarded APIS, CAIS, and
+local DM-PMC paths abort during compilation with
+`LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.barrier.cta.sync.aligned.all`.
+The preflight rejections above prevent that abort. The lowering gap remains
+the upstream [CPU lowering issue](https://github.com/EnzymeAD/Reactant.jl/issues/3284).
+Non-NVIDIA accelerators remain unvalidated. Metal GRAMIS still requires an
+explicit gradient.
 
 ## Profile data-heavy GRAMIS targets
 

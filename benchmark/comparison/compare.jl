@@ -73,7 +73,22 @@ function chains(method, target, seed, draws, warmup, nchains; acceptance=0.8)
     return (; values, divergences=sum(r.divergences for r in results))
 end
 
-const DEFAULT_POPULATION = (scale=1.2, count=16, rounds=4)
+const DEFAULT_POPULATION = (scale=1.2, count=16, rounds=4, warmup=1024)
+const METHOD_LABELS = Dict(:is=>"IS",:amis=>"AMIS",:dmpmc=>"DM-PMC",:cais=>"CAIS",
+    :lais=>"LAIS-RAM",:gramis=>"First-order GRAMIS-CAIS")
+method_label(method, device) = "$(METHOD_LABELS[method]) / $device"
+
+# Linear overrides from the September 28 diagnoses. Sixteen fixed-width kernels
+# whose centres reach posterior-typical positions in 32 dimensions form an
+# over-dispersed mixture: LAIS-RAM warmup 1024 and DM-PMC count 16 fail the
+# moment gates on every seed. Warmup 16 and count 256 with two rounds pass the
+# held-out seeds. See reviews/importance-refresh-2026-09-28 for the evidence.
+const LINEAR_POPULATION_SETTINGS = Dict("linear" => Dict(
+    "DM-PMC / CPU" => Dict("scale"=>1.2,"count"=>256,"rounds"=>2),
+    "DM-PMC / CUDA" => Dict("scale"=>1.2,"count"=>256,"rounds"=>2),
+    "LAIS-RAM / CPU" => Dict("scale"=>1.2,"count"=>16,"rounds"=>4,"warmup"=>16),
+    "LAIS-RAM / CUDA" => Dict("scale"=>1.2,"count"=>16,"rounds"=>4,"warmup"=>16),
+))
 
 function population_proposal(family, location, factor; dof=8.0)
     family === :gaussian && return IS.FactorGaussian(location,factor)
@@ -155,7 +170,8 @@ function run_method(method, device, model, seed; nsamples=2^18, warmup=1024, nch
                 IS.FirstOrderGRAMIS(bank; repulsion_strength=0.1, options...)
             else
                 covariance = (2.38^2/model.dimension)*Symmetric(fit.factor*fit.factor')
-                transition = IS.RAM(covariance; tuning=IS.WarmupTuning(warmup))
+                # The population warmup is separate from MCMC chain warmup.
+                transition = IS.RAM(covariance; tuning=IS.WarmupTuning(get(settings,:warmup,warmup)))
                 IS.LAIS(bank; transition, options...)
             end
         end
@@ -191,7 +207,18 @@ end
 diagnostics(::Nothing) = Dict{String,Any}()
 diagnostics(samples::IS.WeightedSamples) =
     Dict("ess"=>inv(sum(abs2,IS.normalized_weights(samples))),
-         "variance"=>Array(var(samples; corrected=false)))
+         "variance"=>Array(var(samples; corrected=false)),
+         "variance_mcse"=>variance_mcse(samples))
+
+# Delta-method standard error of the self-normalized variance, with normalized
+# weights w: se_k^2 = sum_i w_i^2 ((x_ik - mu_k)^2 - v_k)^2. It treats the
+# weights as fixed, so it is low when one weight dominates.
+function variance_mcse(samples::IS.WeightedSamples)
+    w,x = Array(IS.normalized_weights(samples)),Array(samples.samples)
+    squared = x .= abs2.(x .- x*w)
+    squared .= abs2.(squared .- squared*w)
+    return sqrt.(squared*abs2.(w))
+end
 function diagnostics(samples::AbstractArray)
     result = MCMCDiagnosticTools.ess_rhat(samples;
         autocov_method=MCMCDiagnosticTools.FFTAutocovMethod())
@@ -239,7 +266,8 @@ function population_settings(settings, model, label)
     entry = get(get(settings,model.name,Dict()),label,nothing)
     entry === nothing && return DEFAULT_POPULATION
     return (scale=entry["scale"],count=entry["count"],rounds=entry["rounds"],
-            family=Symbol(get(entry,"family","student_t")))
+            family=Symbol(get(entry,"family","student_t")),
+            warmup=get(entry,"warmup",DEFAULT_POPULATION.warmup))
 end
 
 function moment_errors(row, reference)
@@ -249,9 +277,19 @@ function moment_errors(row, reference)
     return (;mean_error,variance_error)
 end
 
+variance_z(row, reference) = haskey(row,"variance_mcse") ?
+    maximum(abs.(row["variance"] .- reference["variance"]) ./ row["variance_mcse"]) : missing
+
+# A coordinate fails only when its variance error exceeds 30% and three
+# standard errors. Rows without a standard error keep the 30% rule.
 function accurate_moments(row, reference)
     error = moment_errors(row,reference)
-    return error.mean_error <= 0.2 && (ismissing(error.variance_error) || error.variance_error <= 0.3)
+    error.mean_error <= 0.2 || return false
+    ismissing(error.variance_error) && return true
+    haskey(row,"variance_mcse") || return error.variance_error <= 0.3
+    difference = abs.(row["variance"] .- reference["variance"])
+    return !any((abs.(row["variance"] ./ reference["variance"] .- 1) .> 0.3) .&
+                (difference .> 3 .* row["variance_mcse"]))
 end
 
 function reference(model; draws=8192, nchains=Threads.nthreads(:default))
@@ -322,6 +360,8 @@ function print_table(report; io=stdout, accuracy=false)
         accuracy || all(name->haskey(first(report["models"][name]["runs"][label]),"ess"),names)
     end
     selection = get(report,"ensemble_selection",Dict())
+    has_mcse = any(haskey(r,"variance_mcse") for model in values(report["models"])
+                   for rows in values(model["runs"]) for r in rows)
     headline = isempty(selection) ? labels :
         [filter(label->!startswith(label,"EnsembleMCMC "),labels); "EnsembleMCMC (selected) / CPU"]
     rows_for(label,name) = get(report["models"][name]["runs"],
@@ -367,7 +407,9 @@ function print_table(report; io=stdout, accuracy=false)
         "\n\\* ESS denotes weight ESS for importance sampling, minimum bulk ESS for independent-chain MCMC, and minimum mean ESS for EnsembleMCMC. Ensemble mean ESS is marginal variance divided by the squared MCSE of the sweep-mean process. These diagnostics do not define an equal-accuracy comparison.")
     println(io,"\nBold denotes the highest measured CPU rate per model. GPU results appear separately.")
     println(io,"\n† At least one retained NUTS transition diverged. ‡ At least one run had maximum R-hat above 1.01. § Weight ESS varied by more than a factor of ten across seeds.")
-    println(io,"\n¶ At least one run exceeded a mean error of 0.2 posterior standard deviations or a marginal variance error of 30%.")
+    println(io,has_mcse ?
+        "\n¶ At least one run exceeded a mean error of 0.2 posterior standard deviations, or a marginal variance error of both 30% and three standard errors. Importance rows use a delta-method variance standard error, which is low when one weight dominates. Rows without it keep the 30% rule. This is a per-run check, not a tail-accuracy guarantee." :
+        "\n¶ At least one run exceeded a mean error of 0.2 posterior standard deviations or a marginal variance error of 30%.")
     println(io,"\nEnsemble R-hat splits the sweep-mean time series, not the walkers. Settings below apply when recorded; archived ensemble runs used 4d walkers and rounded their pooled draw budget to complete sweeps.")
     ensemble_rows = [(name,label,first(report["models"][name]["runs"][label])) for name in names for label in labels
         if haskey(first(report["models"][name]["runs"][label]),"ensemble")]
@@ -424,8 +466,9 @@ function print_table(report; io=stdout, accuracy=false)
         end
     end
     println(io,"\n| Model | Sampler / device | Mean seconds | ",
-        accuracy ? "Accuracy ESS/s, 95% bootstrap interval" : "ESS/s range across seeds | Max R-hat | Max pooled-mean error / posterior SD | Max per-run variance error",
-        " |\n|:--|:--|--:|--:|",accuracy ? "" : "--:|--:|--:|")
+        accuracy ? "Accuracy ESS/s, 95% bootstrap interval" : "ESS/s range across seeds | Max R-hat | Max pooled-mean error / posterior SD | Max per-run variance error" *
+        (has_mcse ? " | Max variance z" : ""),
+        " |\n|:--|:--|--:|--:|",accuracy ? "" : "--:|"^(has_mcse ? 4 : 3))
     for name in names, label in labels
         rows = report["models"][name]["runs"][label]
         ref = report["models"][name]["reference"]
@@ -437,6 +480,8 @@ function print_table(report; io=stdout, accuracy=false)
             variance_error = all(r->haskey(r,"variance"),rows) ?
                 @sprintf("%.3g",maximum(moment_errors(r,ref).variance_error for r in rows)) : "—"
             @printf(io," %s | %.3g | %s |",rhat,error,variance_error)
+            has_mcse && print(io," ",all(r->haskey(r,"variance_mcse"),rows) ?
+                @sprintf("%.3g",maximum(variance_z(r,ref) for r in rows)) : "—"," |")
         end
         println(io)
     end
@@ -469,7 +514,7 @@ end
 """
     compare(; cuda=false, cpu=true, resume=false, repeats=3, timing_samples=3, nsamples=2^18, mcmc_draws=2^14, nchains=16, reference_draws=8192,
               ensemble_sweeps=2^14, ensemble_settings=Dict(), configuration_search=Dict(),
-              references=nothing, settings=Dict(), pilot=nothing, seed_start=1001,
+              references=nothing, settings=LINEAR_POPULATION_SETTINGS, pilot=nothing, seed_start=1001,
               selected=eachindex(models()), only_methods=nothing, reuse=nothing, output="results.toml")
 
 Measure fresh end-to-end runs with BenchmarkTools, then print a Markdown table.
@@ -482,8 +527,12 @@ budget. The median supplies its elapsed time. All raw times remain in the report
 An optional `pilot=(nsamples=4096, scale_limits=(0.25,2.0))` tunes only lower
 proposal widths for DM-PMC and LAIS. Its cost is timed, and its samples and
 settings remain separate from the main sampling budget and round schedule.
-Population settings accept `family="gaussian"` or `"student_t"` (the default).
-Gaussian factors define covariance directly. Student-t factors define scale.
+Population settings accept `family="gaussian"` or `"student_t"` (the default)
+and a LAIS-only `warmup` for the RAM transition (default 1024). Gaussian factors
+define covariance directly. Student-t factors define scale. The default
+`settings` are `LINEAR_POPULATION_SETTINGS`: linear DM-PMC uses 256 proposals
+over two rounds and linear LAIS-RAM uses warmup 16; pass `settings=Dict()` for
+the archived count-16, warmup-1024 defaults.
 Ensembles retain `ensemble_sweeps` time steps per walker, not a pooled draw
 count. `ensemble_settings[model][label]` overrides walkers, sweeps, warmup, and
 move parameters. Every result records the resolved settings. Freeze them before
@@ -496,7 +545,7 @@ sweep diagnostics and are measured anew. Every reused row keeps its source.
 """
 function compare(; cuda=false, cpu=true, resume=false, repeats=3, timing_samples=3, nsamples=2^18, mcmc_draws=2^14, nchains=16, reference_draws=8192,
                   ensemble_sweeps=2^14, ensemble_settings=Dict(), configuration_search=Dict(),
-                  references=nothing, settings=Dict(), pilot=nothing, seed_start=1001,
+                  references=nothing, settings=LINEAR_POPULATION_SETTINGS, pilot=nothing, seed_start=1001,
                   selected=eachindex(models()), only_methods=nothing, reuse=nothing,
                   output=joinpath(@__DIR__,"results.toml"))
     ispath(output) && !resume && error("Output already exists: $output (use --resume)")

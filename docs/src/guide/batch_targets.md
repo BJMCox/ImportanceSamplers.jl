@@ -84,14 +84,24 @@ simplex and positive parameters. The callback's operations must support the
 selected backend. Metal examples use Float32 throughout, including bank masses.
 
 Reactant callbacks must be traceable. Its fixed-width batch phases retain their
-compiled executables. Device transfer rejects explicit-batch GRAMIS because its
-active backtracking width changes between trials. It does not pad callbacks or
-compile new widths during sampling. Scalar GRAMIS remains available on Reactant
-GPU backends, subject to the limits in [Accelerators](@ref).
+compiled executables. GRAMIS backtracking on Reactant therefore evaluates the
+batch callback at the full candidate width on every trial: inactive candidates
+are passed at their accepted location and their results are discarded. This
+does not change the trial law or the random stream, but it costs up to
+`max_backtracking_trials - 1` extra evaluations per candidate, and the reported
+target-evaluation count includes them. Native CPU, CUDA, and Metal backtracking
+evaluate only active candidates. On Reactant, every slot's `backtracking_trials`
+diagnostic reports the number of trials the padded loop ran. It equals the
+native value only for slots still active on the last trial the loop ran.
+Reactant also reports fewer device transfers than native backends for the same
+run, because the padded loop skips the trailing width check and the final
+failure snapshot that native backtracking records.
 
-Reactant 0.2.285 also fails when filling a one-element vector view during
-two-round AMIS/NPMC preparation. This affects scalar and batch targets. The
-batch comparisons used three rounds, which pass. See the
+Reactant 0.2.289 cannot fill a one-element vector view. Two-round AMIS/NPMC
+history resets avoid that operation, so two-round scalar and batch targets
+prepare and sample on Reactant GPU. The batch comparisons used three rounds;
+the September 28 recheck (Julia 1.13.0, CUDA 6.2.2, NVIDIA A100) passed them,
+including a second call on each prepared sampler. See the
 [backend reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/batch_targets.jl)
 for the checked cases.
 

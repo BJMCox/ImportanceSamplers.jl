@@ -128,7 +128,30 @@ saves reference ESS and mean standard errors. Its detailed table averages
 posterior-mean estimates across timed seeds, then reports the largest absolute
 error across parameters, in posterior standard deviations.
 Pilcrows mark any run with a coordinate mean error above 0.2 posterior standard
-deviations or a marginal variance error above 30%. The report retains those runs.
+deviations or a failed marginal variance check. The report retains those runs.
+For importance-sampling rows, a coordinate fails the variance check only when its
+error exceeds both 30% and three Monte Carlo standard errors. With normalized
+weights ``w_i``, weighted mean ``\hat\mu_k``, and weighted variance ``\hat v_k``,
+the delta-method standard error is
+
+```math
+\widehat{\mathrm{se}}_k =
+\Bigl(\sum_{i=1}^n w_i^2\bigl((x_{ik}-\hat\mu_k)^2-\hat v_k\bigr)^2\Bigr)^{1/2}.
+```
+
+The detailed table reports the largest ``|\hat v_k-v_k|/\widehat{\mathrm{se}}_k``
+as the maximum variance z. The estimator treats the weights as fixed and sees
+only the drawn points. It is therefore low under heavy-tailed weights, and it
+tends to zero when one weight dominates. In a 512-draw Gaussian test with
+infinite weight variance, its median was 0.3–0.9 of the spread of the variance
+estimate over repeated runs. A low standard error makes the check
+stricter. It also ignores reference error, so the z value is not a calibrated
+normal score. MCMC and ensemble rows, and every archived report, keep the 30% rule.
+This is a per-run diagnostic, not a tail-accuracy guarantee.
+For tail-dominated coordinates, report failure rates over many seeds instead.
+On signal-background coordinate 3, the September 28 diagnosis found 30%-rule
+failure rates of 5/62 for CAIS on both CPU and CUDA, and 2/62 on CPU and 3/62 on
+CUDA for LAIS-RAM. Three seeds per row cannot resolve rates of this size.
 These checks cover central moments, not tails, modes, or evidence.
 Archived rows retain their mean checks but lack per-run variance estimates.
 A dash in the detailed variance column denotes an unavailable check, not a pass.
@@ -193,6 +216,14 @@ centres, proposal count, masses, degrees of freedom, or main round sizes. Its
 draws are discarded and its entire cost is timed. Later centre adaptation can
 make the fitted initial width unsuitable. This pilot does not guarantee good
 linear-model ESS or accuracy. Failed checks remain visible in the report.
+The linear DM-PMC and LAIS-RAM rows in the published comparison used 16
+proposals and a 1,024-step RAM warmup, which spread the adapted centres into an
+over-dispersed fixed-width mixture. The comparison scripts now default to 256
+proposals over two rounds for linear DM-PMC and a 16-step warmup for linear
+LAIS-RAM; a
+[linear rerun](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/results-2026-09-28-linear-population.md)
+with those settings passes every moment check. The README section "Linear
+population settings" records the diagnosis.
 
 | Method | Retained sample budget | Warmup or adaptation |
 |:--|--:|:--|
@@ -235,9 +266,9 @@ end-to-end timings, not isolated kernel throughput.
 
 ## Scalar and batch targets
 
-The [CPU](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-cpu-2026-09-22-paired.md)
-and [CUDA](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-cuda-2026-09-22-paired.md)
-baseline paired reports compare scalar targets with explicit batch callbacks for AMIS
+The September 28 [CPU](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-cpu-2026-09-28-paired.md)
+and [CUDA](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-cuda-2026-09-28-paired.md)
+paired reports compare scalar targets with explicit batch callbacks for AMIS
 and LAIS-RAM on the four regression models. Each execution retains 262,144
 draws. The three seeds each have four measured executions per mode, arranged
 in balanced ABBA/BAAB blocks after both complete workloads compile.
@@ -260,21 +291,32 @@ Median batch/scalar elapsed-time ratios:
 
 | Model | CPU AMIS | CPU LAIS-RAM | CUDA AMIS | CUDA LAIS-RAM |
 |:--|--:|--:|--:|--:|
-| Linear | 0.479 | 0.507† | 0.915 | 0.211† |
-| Logistic | 9.74 | 8.67 | 1.69 | 0.274 |
-| Poisson | 3.18 | 2.90 | 1.83 | 0.515 |
-| Robust | 8.77 | 7.23 | 1.28 | 0.404 |
+| Linear | 0.264 | 0.340† | 0.675 | 0.190† |
+| Logistic | 0.493 | 0.527 | 0.853 | 0.214 |
+| Poisson | 0.715 | 0.860 | 0.956 | 0.396 |
+| Robust | 0.735 | 0.809 | 1.04 | 0.397 |
 
-† Linear LAIS-RAM fails the moment checks in both target modes on both backends.
-All other rows pass. Matched scalar/batch posterior means differ by at most
-`2.0e-14` on CPU and `1.1e-12` on CUDA. Batching helps CUDA LAIS in these cases,
-but is not a universal speedup. The linked reports retain every timing range.
+† Linear LAIS-RAM fails the moment checks in both target modes on both backends
+with the archived 1,024-step warmup. A
+[rerun](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-linear-2026-09-28-population.md)
+with the 16-step warmup passes both modes on both backends, with ratios 0.285
+(CPU) and 0.428 (CUDA). All other rows pass. Matched scalar/batch posterior means differ by at most
+`1.1e-12`, and variances by at most `4.2e-14`, across both backends. The paired
+ratios favour batching for all measured CPU cases and CUDA LAIS-RAM. CUDA AMIS
+ratios for Poisson (`0.927–1.04`) and robust regression (`0.929–1.10`) span one;
+these cases do not establish a consistent benefit. The linked reports retain
+every timing range and allocation count. CUDA LAIS batching uses about
+421,000–439,000 host allocations per run, versus about 23,000–24,000 for scalar
+targets, despite its lower elapsed time.
 
-These reports predate the profiler-led callback fixes. The current CPU callback
-threads likelihood sums across samples. Both backends skip unused gradient
-calculations, and GPU scratch is allocated directly on-device rather than copied
-from the host. These changes affect the benchmark targets, not the sampler laws
-or package API. The table above remains a record of the earlier implementation.
+These runs use revision `680fc23`. The CPU callback threads likelihood sums
+across samples. Both backends skip unused gradient calculations, and GPU scratch
+is allocated directly on-device. These changes affect benchmark targets, not
+sampler laws or the package API. The earlier
+[CPU](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-cpu-2026-09-22-paired.md)
+and [CUDA](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-cuda-2026-09-22-paired.md)
+reports remain archived. Different timing windows do not establish a
+cross-version speedup.
 
 The [reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/README.md#scalar-and-batch-regression-targets)
 also supports the full six-method comparison.

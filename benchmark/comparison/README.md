@@ -101,21 +101,32 @@ versions and settings in interleaved executions. Scalar/batch comparisons do not
 test whether the original scalar path regressed. Older blocked-timing reports
 remain readable, but cannot resume under this paired protocol.
 
-The September 22 baseline reports cover AMIS and LAIS-RAM on all four regression
-models. They use package revision `29c8fc5`, which fixes CPU LAIS closure boxing.
-The [CPU report](batch-cpu-2026-09-22-paired.md) and
-[CUDA report](batch-cuda-2026-09-22-paired.md) retain every measured time and
+The September 28 reports cover AMIS and LAIS-RAM on all four regression
+models at package revision `680fc23`, including the threaded/value-only callback
+and native device-scratch changes described above.
+The [CPU report](batch-cpu-2026-09-28-paired.md) and
+[CUDA report](batch-cuda-2026-09-28-paired.md) retain every measured time and
 accuracy warning. Their raw TOML files include the execution chronology and
 source hashes. These are separate scalar/batch comparisons, not replacements
-for the cross-package table below. They predate the threaded/value-only callback
-and native device-scratch changes described above. Their source hashes identify
-the measured implementation; rerunning the current script measures the new callbacks.
+for the cross-package table below. The earlier
+[CPU](batch-cpu-2026-09-22-paired.md) and
+[CUDA](batch-cuda-2026-09-22-paired.md) reports remain archived. Do not infer
+cross-version speedups from separate timing windows.
 
-The paired medians favour batching for linear regression on CPU and CUDA, and
-for LAIS-RAM on CUDA. Nonlinear CPU callbacks and nonlinear CUDA AMIS are slower
-in this configuration. Scalar/batch posterior means agree within `2.0e-14` on
-CPU and `1.1e-12` on CUDA. Linear LAIS-RAM fails moment checks in both modes on
-both backends; all other measured cases pass. The reports retain those warnings.
+The paired ratios favour batching for all measured CPU cases and CUDA LAIS-RAM.
+CUDA AMIS ratios for Poisson and robust regression span one across blocks,
+so these cases do not establish a consistent benefit. Scalar/batch posterior
+means agree within `1.1e-12` and variances within `4.2e-14` across both backends.
+Linear LAIS-RAM fails moment checks in both modes on both backends; all other
+measured cases pass. CUDA LAIS batch targets also make substantially more host
+allocations than scalar targets. The reports retain these costs and warnings.
+Those linear rows used the archived 1,024-step RAM warmup. The
+[linear rerun](batch-linear-2026-09-28-population.md) with the diagnosed
+warmup of 16 (see [Linear population settings](#linear-population-settings))
+passes both modes on both backends, with maximum mean error 0.013 posterior SD
+and variance error 0.020, and paired batch/scalar ratios of 0.285 (CPU) and
+0.428 (CUDA). Its host allocations are far lower because the shorter warmup
+makes far fewer dependent steps.
 
 Run this subset with the current callbacks from the repository root in a session launched with
 `--threads=16 --project=benchmark/comparison`:
@@ -324,6 +335,47 @@ or event source labels. The reference used eight independent NUTS chains with
 8,192 retained draws each. Its maximum R-hat was 1.0004 and minimum bulk ESS
 was 23,801. The same reference checks every new-model sampler.
 
+### Variance check
+
+Coordinate 3 of this posterior has kurtosis 14.9. Its importance-sampling
+variance estimate depends on rare tail draws with large weights. Under the
+per-run 30% rule, every importance sampler fails on a few percent of seeds.
+The September 28 diagnosis measured these rates over seeds 8501–8512 and
+8601–8650:
+
+| Sampler | CPU failures | CUDA failures |
+|:--|--:|--:|
+| CAIS | 5/62 | 5/62 |
+| LAIS-RAM | 2/62 | 3/62 |
+
+These are seed variation, not backend differences. Matched random streams give
+the same CPU and CUDA results. Three seeds per row cannot resolve such rates.
+Report failure rates over many seeds for tail-dominated coordinates.
+
+New importance-sampling rows therefore store `variance_mcse`, the delta-method
+standard error of each weighted variance. With normalized weights `w`, it is
+`sqrt(sum(w_i^2 * ((x_ik - mu_k)^2 - v_k)^2))`. A coordinate fails only when its
+variance error exceeds both 30% and three standard errors. The detailed table
+adds the maximum variance z, `|v_k - v_ref,k| / se_k`. MCMC rows and archived
+reports keep the 30% rule, so `--report` output for archived files is unchanged.
+The estimator treats the weights as fixed and sees only the drawn points. It is
+low under heavy-tailed weights and tends to zero when one weight dominates.
+In a 512-draw Gaussian test with infinite weight variance, its median was
+0.3–0.9 of the spread of the variance estimate over repeated runs. A
+low standard error makes the check stricter. This is a per-run diagnostic, not a
+tail-accuracy guarantee. The rule applies to every accuracy check that uses
+`accurate_moments`, including new batch and tuning runs.
+The standard error ignores reference error and misses unsampled tail mass, so
+the maximum variance z is not a calibrated normal score. Passing rows can show
+z values above 10 when their variance error is below 30%.
+
+The [September 28 rerun](signal-background-results-2026-09-28-gates.md) of the
+importance-sampling rows reproduces every September 17 estimate, ESS, and
+variance exactly. Only the gate result changes. LAIS-RAM CUDA seed 8501 now
+passes: its coordinate-3 variance error is 0.44, but only 1.3 standard errors.
+CAIS CPU seeds 8501 and 8502 still fail the mean check. Timings are
+provisional shared-host measurements at load average 114–123.
+
 ## Independent width pilot
 
 The optional pilot tunes one common multiplier for the Gaussian or Student-t bank's existing
@@ -348,11 +400,53 @@ optimizer reads one scalar objective between evaluations.
 
 The pilot improves the initial fixed linear bank in a controlled check, but
 does not resolve its later DM-PMC or LAIS centre adaptation. It remains opt-in.
+The linear population settings below address that adaptation problem.
 This is benchmark code, not a new package tuning API. The objective follows the
 weight-variance criterion discussed by
 [Akyildiz and Miguez](https://arxiv.org/abs/1903.12044).
 Their exponential-family convergence results do not establish a guarantee for
 this finite Student-t mixture pilot.
+
+## Linear population settings
+
+`compare` and `batch.jl` default to `LINEAR_POPULATION_SETTINGS`: linear
+DM-PMC uses 256 proposals over two rounds, and linear LAIS-RAM keeps 16
+proposals over four rounds with a RAM warmup of 16 steps instead of 1,024.
+Every other model and method keeps `DEFAULT_POPULATION`. Pass `settings=Dict()`
+to reproduce the archived count-16, warmup-1,024 rows. The `warmup` key applies
+to LAIS-RAM only; MCMC chain warmup is unchanged.
+
+The September 28 diagnosis established the cause of the archived linear
+failures. With 262,144 draws, the 1,024-step RAM warmup moves the 16 upper
+centres to posterior-typical positions (whitened squared radius per dimension
+about 1), and DM-PMC's first resampling does the same. Sixteen fixed-width
+kernels at such centres in 32 dimensions form an over-dispersed mixture
+(whitened mixture variance about 2.3), so weight ESS collapses to tens and a
+few draws dominate the moments. The LAIS and DM-PMC weight laws were verified
+against independent `Distributions` mixtures to `1e-13`, and DM-PMC resampling
+frequencies passed chi-square checks, so this is a configuration problem, not
+an implementation defect. No lower width from 0.5 to 2.0 times the pilot value
+passes. A static oracle mixture with exact posterior-draw centres needs 256
+components to pass, which sets the DM-PMC count. Warmup 16 passed 10 of 10
+held-out seeds for LAIS-RAM; count 256 with two rounds passed 15 of 15 for
+DM-PMC. Warmup 16 keeps the LAIS centres near the pilot bank, so that
+configuration behaves mostly as static MIS with a light upper chain; it is not
+evidence that adaptation helps on this model.
+
+The [linear rerun](results-2026-09-28-linear-population.md) with these
+settings on seeds 8301–8303 passes every check:
+
+| Sampler / device | Mean seconds | ESS/s range | Max pooled-mean error / SD | Max variance error |
+|:--|--:|--:|--:|--:|
+| DM-PMC / CPU | 8.67 | 49–130 | 0.049 | 0.125 |
+| DM-PMC / CUDA | 0.774 | 740–1,200 | 0.039 | 0.156 |
+| LAIS-RAM / CPU | 3.57 | 11,000–20,000 | 0.004 | 0.019 |
+| LAIS-RAM / CUDA | 0.365 | 71,000–220,000 | 0.007 | 0.024 |
+
+These are shared-host timings at load above 100 on the 128-thread host, taken
+in a separate window from the published comparison; they reuse that
+comparison's reference and are not a cross-version speedup claim. The archived
+linear DM-PMC and LAIS-RAM rows in the published comparison remain as measured.
 
 ## Fixed Gaussian covariances
 
