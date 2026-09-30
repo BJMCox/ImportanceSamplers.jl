@@ -1,5 +1,7 @@
 using ImportanceSamplers, Reactant, CUDA, Random, Test, LinearAlgebra, ADTypes
 
+include("reactant_statistics.jl")
+
 @testset "Reactant sampling and owned results" begin
     device = ImportanceSamplers.MLDataDevices.with_eltype(
         ImportanceSamplers.MLDataDevices.ReactantDevice(), nothing)
@@ -108,6 +110,11 @@ function reactant_boxed_batch!(values, samples, p)
     return nothing
 end
 
+function reactant_boxed_target(theta, p)
+    hit = abs(theta.offset - p.offset) < 1f-3 && abs(theta.scale - p.scale) < 1f-3
+    return hit ? NaN32 : reactant_named_target(theta, p)
+end
+
 @testset "Reactant GRAMIS gradients and backend safety" begin
     device = ImportanceSamplers.MLDataDevices.with_eltype(
         ImportanceSamplers.MLDataDevices.ReactantDevice(), nothing)
@@ -188,21 +195,30 @@ end
             start = fill(0.1f0, 4)
             accepted = current_proposal(ImportanceSamplers.MLDataDevices.cpu_device(), clean).proposals[2].location
             candidate = start .+ (accepted .- start) ./ 2steps[2, 2]
-            boxed = LogTarget(reactant_named_target; grad=reactant_named_gradient!,
-                batch=reactant_boxed_batch!)
             context = (; p.alpha, offset=candidate[4], scale=exp(candidate[3]))
-            sampler = backend(prepare_sampler(Xoshiro(91), boxed, context, wide; transform=layout))
-            try
-                importance_sample!(sampler)
-                nothing
-            catch error
-                error
+            map((nothing, reactant_boxed_batch!)) do callback
+                boxed = LogTarget(reactant_boxed_target; grad=reactant_named_gradient!,
+                    batch=callback)
+                sampler = backend(prepare_sampler(Xoshiro(91), boxed, context, wide; transform=layout))
+                before = current_proposal(ImportanceSamplers.MLDataDevices.cpu_device(), sampler)
+                failure = try
+                    importance_sample!(sampler)
+                    nothing
+                catch error
+                    error
+                end
+                # The error must preserve the GPU context and committed population.
+                after = current_proposal(ImportanceSamplers.MLDataDevices.cpu_device(), sampler)
+                @test all(a.location == b.location && a.scale.factor == b.scale.factor
+                    for (a, b) in zip(before.proposals, after.proposals))
+                failure
             end
         end
+        failures = collect(Iterators.flatten(failures))
         @test all(failures) do failure
             failure isa FirstOrderGRAMISRoundError && failure.round == 2 && failure.phase === :derivative
         end
-        @test isequal(failures[1].diagnostics.derivative, failures[2].diagnostics.derivative)
+        @test all(f -> isequal(f.diagnostics.derivative, failures[1].diagnostics.derivative), failures)
         @test failures[1].diagnostics.derivative.proposal_slot == 2
         @test failures[1].diagnostics.derivative.reason === :candidate_value_nonfinite
         @test isnan(failures[1].diagnostics.derivative.value)

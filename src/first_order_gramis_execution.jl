@@ -1314,6 +1314,15 @@ end
     return nothing
 end
 
+@inline _device_backtracking_value(target, candidate) = target(candidate)
+@inline function _device_backtracking_value(target::_BoundNamedTarget, candidate)
+    logical, logabsjac, reason, _ = _coordinate_to_logical(target.layout, candidate)
+    iszero(reason) || return oftype(logabsjac, NaN)
+    # Host validation throws inside a device kernel. Keep the raw value and
+    # its precision so backtracking records the failure before the host raises it.
+    return target.target(logical) + logabsjac
+end
+
 @inline function _backtracking_trial_slot!(
     candidate_locations,
     candidate_values,
@@ -1327,6 +1336,7 @@ end
     step,
     trial,
     proposal_slot,
+    evaluate=(f, x) -> f(x),
 )
     @inbounds active_mask[proposal_slot] || return nothing
     @inbounds for row in axes(locations, 1)
@@ -1334,7 +1344,7 @@ end
             locations[row, proposal_slot] + step * moves[row, proposal_slot]
     end
     candidate = view(candidate_locations, :, proposal_slot)
-    candidate_value = target(candidate)
+    candidate_value = evaluate(target, candidate)
     @inbounds candidate_values[proposal_slot] = candidate_value
     @inbounds trials[proposal_slot] = trial
     if isfinite(candidate_value) &&
@@ -1540,6 +1550,7 @@ end
             step,
             trial,
             proposal_slot,
+            _device_backtracking_value,
         )
         failure_storage === nothing && continue
         _, reason, _ = _backtracking_candidate_failure(

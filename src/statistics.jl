@@ -139,9 +139,13 @@ function _device_functional_values(
         ArgumentError("device functionals must return one concrete number per sample"),
     )
     values = similar(_functional_prototype(result), value_type, length(result))
+    return _evaluate_functional_values!(values, result.samples, f)
+end
+
+function _evaluate_functional_values!(values, samples, f)
     backend = KernelAbstractions.get_backend(values)
     kernel = _evaluate_functional_kernel!(backend)
-    kernel(values, result.samples, f; ndrange=length(values))
+    kernel(values, samples, f; ndrange=length(values))
     KernelAbstractions.synchronize(backend)
     return values
 end
@@ -305,7 +309,7 @@ function Statistics.mean(f, samples::UnweightedSamples)
             )
             return total / length(samples)
         end
-        return Statistics.mean(_device_functional_values(f, samples))
+        return _unweighted_mean(_device_functional_values(f, samples))
     end
 end
 
@@ -334,10 +338,7 @@ function Statistics.var(f, samples::UnweightedSamples; corrected::Bool=true)
             )
             return total / (length(samples) - Int(corrected))
         end
-        return Statistics.var(
-            _device_functional_values(f, samples);
-            corrected=corrected,
-        )
+        return _unweighted_variance(_device_functional_values(f, samples), corrected)
     end
 end
 
@@ -346,7 +347,7 @@ function Statistics.std(samples::UnweightedSamples; corrected::Bool=true)
 end
 
 function Statistics.std(f, samples::UnweightedSamples; corrected::Bool=true)
-    return sqrt(Statistics.var(f, samples; corrected=corrected))
+    return _sqrt_summary(Statistics.var(f, samples; corrected=corrected))
 end
 
 function Statistics.cov(samples::UnweightedSamples; corrected::Bool=true)

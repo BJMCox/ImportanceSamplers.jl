@@ -155,10 +155,10 @@ callers. Placement is fixed once execution begins.
 
 Device-resident `normalized_weights(result)`, `lognormalizer(result)`,
 `mean(result)`, `var(result)`, `std(result)`, `cov(result)`, and array slicing
-are supported on CUDA and Metal. Array summaries remain on the input device.
+are supported on CUDA, Metal and Reactant. Array summaries remain on the input device.
 Scalar summaries return a scalar. Function summaries compile the function for
-that device and require one concrete scalar output per sample. On Reactant,
-`mean`, `var`, `std`, and `cov` are not yet supported; see the Reactant section.
+that device and require one concrete scalar output per sample. Reactant scalar
+summaries remain Reactant numbers until explicitly converted to a host number.
 
 `resample(rng, result, count)` also stays resident. On CUDA it consumes one
 `UInt64` seed from the supplied RNG, fills device random buffers with an
@@ -230,10 +230,13 @@ Preparation can therefore take seconds or minutes even when warmed sampling is f
 LAIS retains execution for `RandomWalkMetropolis`, `RAM` and
 `SampleMetropolisHastings`. Custom LAIS transitions still use eager
 compile-and-run calls. Their compatibility checks do not establish competitive
-Reactant throughput. `normalized_weights`, `lognormalizer` and `resample`
+Reactant throughput. `normalized_weights`, `lognormalizer`, `resample` and
+the numerical phases of `mean`, `var`, `std` and `cov`
 compile once for each array type, shape and device, then reuse that executable.
 The extension keeps at most 64 such executables per process; further
 signatures, and views such as `result[2:10]`, compile on every call.
+Scalar functionals use the same policy. Functions with captured state use eager
+compilation so changes to that state remain visible.
 On the tested NVIDIA A100, GRAMIS also supports
 `LogTarget(logtarget, AutoEnzyme())` with resident array context,
 simplex/positive/identity fields, adaptation, reuse and `retarget`.
@@ -249,11 +252,12 @@ Float32 factor Student-t checks also cover static MIS, AMIS, NPMC, DM-PMC,
 APIS, CAIS and all three LAIS transitions, with reuse, adaptive retargeting and
 resident resampling. This does not establish Student-t GRAMIS support on Reactant.
 
-`normalized_weights`, `lognormalizer` and `resample` support Reactant results
-and their applicable view operations. `mean`, `var`, `std` and `cov` throw on
-Reactant results, because their weighted reductions reach BLAS calls that
-Reactant arrays do not support. Transfer the result with `cpu_device()` first.
-Result normalization transfers two
+`mean`, `var`, `std` and `cov` support weighted and unweighted Reactant results,
+including their applicable view operations. Named fields support component-wise
+moments. Function forms evaluate one scalar per sample on the device. Covariance
+requires vector-valued samples. Weighted variance is uncorrected; unweighted
+variance retains the usual `corrected=true` default.
+Samples, weights and array summaries stay on-device. Result normalization transfers two
 scalars. CDF construction compiles normalization and cumulative summation
 together, then transfers two summary scalars once. Adaptive weight normalization
 transfers three summary scalars. Moment fitting compiles the weighted mean and

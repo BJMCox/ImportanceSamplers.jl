@@ -60,7 +60,8 @@ const _RETAINED_CALLS_LOCK = ReentrantLock()
 const _RETAINED_CALL_LIMIT = 64
 
 _retained_shape(x::Reactant.ConcreteRArray) = (size(x), Reactant.XLA.device(x))
-_retained_shape(::Reactant.ConcreteRNumber) = ()
+_retained_shape(x::Reactant.ConcreteRNumber) = ((), Reactant.XLA.device(x))
+_retained_shape(x::Bool) = x
 _retained_shape(x::Reactant.ReactantRNG{<:Reactant.ConcreteRArray}) = (_retained_shape(x.seed), x.algorithm)
 function _retained_shape(x::NamedTuple)
     shapes = map(_retained_shape, x)
@@ -837,6 +838,34 @@ IS._normalized_weights(values::_ReactantStorage, total) = Reactant.@jit IS._norm
 # A retained executable needs the total as an input, not a compile-time constant.
 IS._normalized_weights(values::Reactant.ConcreteRArray, total) =
     _retained_call(IS._normalized_weights, values, _transition_number(values, total))
+
+function _materialized_statistic(f, arguments...)
+    value = f(arguments...)
+    # Keep vec/reduction wrappers inside the trace, not in eager result operations.
+    return value isa AbstractArray ? Reactant.materialize_traced_array(value) : value
+end
+
+for N in (1, 2)
+    @eval begin
+        IS._weighted_sum(samples::Reactant.AnyConcreteRArray{T,$N}, weights) where {T} =
+            _retained_call(IS._weighted_sum, samples, weights)
+        IS._weighted_variance(samples::Reactant.AnyConcreteRArray{T,$N}, weights, center) where {T} =
+            _retained_call(_materialized_statistic, IS._weighted_variance, samples, weights, center)
+        IS._unweighted_mean(samples::Reactant.AnyConcreteRArray{T,$N}) where {T} =
+            _retained_call(_materialized_statistic, IS._unweighted_mean, samples)
+        IS._unweighted_variance(samples::Reactant.AnyConcreteRArray{T,$N}, corrected) where {T} =
+            _retained_call(_materialized_statistic, IS._unweighted_variance, samples, corrected)
+    end
+end
+
+IS._weighted_covariance(samples::Reactant.AnyConcreteRArray{T,2}, weights, center) where {T} =
+    _retained_call(IS._weighted_covariance, samples, weights, center)
+IS._unweighted_covariance(samples::Reactant.AnyConcreteRArray{T,2}, corrected) where {T} =
+    _retained_call(IS._unweighted_covariance, samples, corrected)
+IS._sqrt_summary(value::Union{Reactant.AnyConcreteRArray,Reactant.ConcreteRNumber}) =
+    _retained_call(IS._sqrt_summary, value)
+IS._evaluate_functional_values!(values::Reactant.AnyConcreteRArray, samples, f) =
+    _retained_call(IS._evaluate_functional_values!, values, samples, f)
 
 function _resampling_cdf!(cdf, logweights)
     moments = _normalize_weights!(cdf, logweights, length(cdf))
