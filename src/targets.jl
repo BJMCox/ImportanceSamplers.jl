@@ -27,8 +27,9 @@ inputs, outputs, and `p` stay resident. Use the current task's device stream or
 complete private-stream work before returning. Failure checks can synchronize
 at batch boundaries, never once per sample. Without `batch`, scalar execution remains
 unchanged. Custom MCMC transitions own how they evaluate their target.
-Reactant supports fixed-width batch phases, but rejects explicit-batch
-FirstOrderGRAMIS during device transfer because its backtracking width varies.
+Reactant supports fixed-width batch phases, including FirstOrderGRAMIS through
+padded backtracking batches. Inactive candidates keep their accepted locations;
+their new target values are discarded and their evaluation cost is recorded.
 
 An explicit `grad` takes priority over `adtype`. CPU automatic gradients use
 DifferentiationInterface. FirstOrderGRAMIS also supports reverse-mode
@@ -37,7 +38,9 @@ scalar logdensity callable internally; `p` remains constant during differentiati
 The callable and its operations must support Enzyme's device differentiation.
 Structured GPU contexts can require Enzyme's runtime-activity mode; the supplied
 AD mode is preserved, not changed implicitly.
-Other accelerator AD backends and out-of-place explicit gradients are unsupported.
+The Reactant extension also supports compiled gradients for compatible targets.
+Native Metal requires explicit gradients. Out-of-place explicit gradients are
+CPU-only. See the device guide for backend-specific limits.
 `batch` changes value evaluation only. Automatic differentiation still uses the
 scalar callable and can evaluate its primal while computing a gradient.
 

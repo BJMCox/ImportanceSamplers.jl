@@ -1,242 +1,167 @@
-# Transforms
+# [Constraints and named parameters](@id transforms-guide)
 
-Use `transform=` on a prepared sampler to keep adaptation in flat coordinates
-while exposing logical parameters to the target. Alternatively,
-[`TransformedProposal`](@ref) owns the map at the proposal boundary. Its
-normalized density is
+Use `transform=` when the target has constrained or named parameters.
+The sampler works in flat numerical coordinates and presents logical parameters to the target.
 
-```math
-\log q_x(x) = \log q_z(z) - \log |J(z)|.
-```
+## A simplex, a positive value, and an unconstrained value
 
-BAT or Wren integration may keep coordinates and Jacobian ownership in the host
-package, or construct one [`TransformedProposal`](@ref) at the integration
-boundary. Whichever side owns the transform applies its Jacobian; the other side
-must not transform the same parameters or apply that Jacobian again.
+This target has three positive weights that sum to one, a positive rate, and a real offset.
 
-## Scalar constraints
+```@example transforms
+using ImportanceSamplers, Random, Statistics
 
-The built-in scalar transforms are:
+layout = (
+    weights=(1:2 => SimplexTransform(3)),
+    rate=(3 => PositiveTransform()),
+    offset=(4 => IdentityTransform()),
+)
 
-| Logical support | Transform |
-|:--|:--|
-| unconstrained | [`IdentityTransform`](@ref) |
-| positive | [`PositiveTransform`](@ref) or [`SoftplusTransform`](@ref) |
-| lower bounded | [`IntervalTransform`](@ref) with `(lower, nothing)` |
-| upper bounded | [`IntervalTransform`](@ref) with `(nothing, upper)` |
-| bounded | [`IntervalTransform`](@ref) with `(lower, upper)` |
-
-With a Gaussian base, `PositiveTransform` gives a lognormal upper tail, while
-`SoftplusTransform` gives a Gaussian-like upper tail. Proposal tails must cover
-target tails for stable importance weights, so choose between them with the
-target's upper tail in mind. Neither transform alone guarantees finite weight
-variance. Both have the same first-order behavior near zero and can still be
-too light there for targets with substantial boundary mass.
-
-Endpoints are excluded. Transform inputs, outputs, and log Jacobians must remain
-finite. Invalid values from `TransformedProposal` fail the complete estimator
-with a located [`InvalidTransformError`](@ref).
-
-## Named targets with adaptive samplers
-
-Use `transform=` on [`prepare_sampler`](@ref) or [`importance_sample`](@ref) to
-give the target named parameters while the algorithm keeps flat coordinates.
-This works with Base IS, static MIS, AMIS, DM-PMC, APIS, CAIS, NPMC, LAIS, and
-FirstOrderGRAMIS. Names do not imply independent proposals. A full factor can
-capture correlations between fields when the method adapts covariance.
-Location-only methods keep their original covariance rule.
-
-For numerical coordinates `z` and logical parameters `theta = T(z)`, the sampler
-evaluates `logtarget(theta, p) + logabsjac(T, z)`. Its raw log weights subtract
-the numerical proposal denominator from that value. The returned samples contain
-`theta`; mapping results does not change weights or round/proposal provenance.
-
-This example has four sampling coordinates and five logical scalar values:
-three simplex weights, a positive scale, and an unconstrained offset.
-
-```jldoctest named_adaptive
-using ImportanceSamplers, Random, LinearAlgebra
-
-layout = (weights=(1:2=>SimplexTransform(3)),
-          scale=(3=>PositiveTransform()), offset=(4=>IdentityTransform()))
-
-function named_logtarget(theta, p)
-    value = zero(theta.scale)
+function logtarget(theta, p)
+    value = -theta.rate - theta.offset^2 / 2
     for i in eachindex(p.alpha)
         value += (p.alpha[i] - 1) * log(theta.weights[i])
     end
-    return value - theta.scale / p.scale - (theta.offset - p.offset)^2 / 2 +
-        p.coupling * theta.offset * theta.weights[1]
+    return value
 end
 
-p = (alpha=[2.0, 3.0, 4.0], scale=1.0, offset=0.5, coupling=0.2)
-factor = Matrix{Float64}(I, 4, 4)
-algorithm = AMIS(FactorGaussian(zeros(4), factor); rounds=3, round_size=256)
-prepared = prepare_sampler(Xoshiro(7), named_logtarget, p, algorithm; transform=layout)
+p = (; alpha=[2.0, 3.0, 4.0])
+algorithm = AMIS(
+    SphericalGaussian(zeros(4), 1.0);
+    rounds=3, round_size=2_000,
+)
+prepared = prepare_sampler(
+    Xoshiro(42), logtarget, p, algorithm;
+    transform=layout,
+)
 samples = importance_sample!(prepared)
-(size(samples.samples.weights), length(samples.samples.scale), length(samples.logweights))
 
-# output
-
-((3, 768), 768, 768)
+mean(samples)
 ```
 
-An integer selector gives a scalar field. A range with `IdentityTransform()`
-gives a vector field. `SimplexTransform(K)` consumes `K-1` coordinates and
-returns a length-`K` vector. Selectors must cover the numerical dimension exactly,
-without overlap. This explicit flat layout has no inferred or omitted fields.
-Without `transform=`, existing sampling behavior stays unchanged.
-Interval endpoints must match the coordinate precision, for example
-`IntervalTransform(0f0, 1f0)` for `Float32` proposals.
+The target receives a named tuple with `weights`, `rate`, and `offset`.
+The reference means are `[2, 3, 4] / 9`, one, and zero.
 
-`current_proposal(prepared)` returns the learned proposal in numerical coordinates.
-Use `retarget(rng, prepared, new_logtarget, new_p)` to retain the layout and
-learned proposal while rebuilding target-dependent state. Retargeting applies to
-the existing adaptive sampler types, not plain/static IS. Each run owns its
-returned arrays. Changing a later run does not alter earlier samples.
+The proposal has four coordinates, although the logical sample contains five scalar values:
 
-On CUDA, transfer the whole prepared sampler **before its first run**:
+| Numerical coordinates | Logical field | Transform |
+|:--|:--|:--|
+| `1:2` | Three simplex weights | `SimplexTransform(3)` |
+| `3` | Positive rate | `PositiveTransform()` |
+| `4` | Real offset | `IdentityTransform()` |
 
-```julia
-using CUDA, MLDataDevices
+An integer selector gives a scalar field. A range gives a vector field.
+A `K`-component simplex consumes `K - 1` coordinates.
 
-CUDA.allowscalar(false)
-physical = CUDA.device()
-device = MLDataDevices.CUDADevice{typeof(physical),Nothing}(physical)
-prepared = prepare_sampler(Xoshiro(7), named_logtarget, p, algorithm; transform=layout)
-prepared = device(prepared)  # Also transfers p.alpha and the proposal workspaces.
-samples = importance_sample!(prepared)
-host_samples = cpu_device()(samples)  # Explicit transfer, only when needed.
+## Inspect the returned shape
+
+```@example transforms
+(
+    weights=size(samples.samples.weights),
+    rates=length(samples.samples.rate),
+    first=samples[1].sample,
+)
 ```
 
-The named leaf arrays, log weights, and provenance stay on the selected device.
-Target calls use borrowed views or computed simplex values, not a host allocation
-or transfer for each sample. Treat those inputs as read-only `AbstractVector`s.
-Use `current_proposal(cpu_device(), prepared)` for an explicit CPU proposal snapshot.
-On CUDA, an invalid named transform during target evaluation uses the target-failure
-diagnostic. CPU evaluation and result mapping retain located transform errors.
-A failed call does not commit new adaptation state.
+Returned samples use logical coordinates. Weights and provenance remain aligned.
+A full Gaussian or Student-t factor can capture correlations between named fields.
+Names do not impose independence.
 
-### Named gradients
+The flat selectors must cover every numerical coordinate exactly once.
+Use explicit identity fields for unconstrained coordinates.
+Omitting `transform` leaves the whole sample unchanged.
 
-For an explicit gradient, differentiate only the user's logical log target.
-The package applies the transform pullback and the log-Jacobian derivative.
-Vector fields use indexed writes. Scalar gradient fields are writable
-zero-dimensional views and use `[]`:
+## Choose a scalar constraint
 
-```julia
-function named_gradient!(g, theta, p)
-    for i in eachindex(p.alpha)
-        g.weights[i] = (p.alpha[i] - 1) / theta.weights[i]
-    end
-    g.weights[1] += p.coupling * theta.offset
-    g.scale[] = -1 / p.scale
-    g.offset[] = -(theta.offset - p.offset) + p.coupling * theta.weights[1]
-    return nothing
-end
+| Support | Constructor | Map |
+|:--|:--|:--|
+| Real line | `IdentityTransform()` | ``z`` |
+| Positive | `PositiveTransform()` | ``e^z`` |
+| Positive | `SoftplusTransform()` | ``\log(1+e^z)`` |
+| Above `a` | `IntervalTransform(a, nothing)` | ``a+e^z`` |
+| Below `b` | `IntervalTransform(nothing, b)` | ``b-e^z`` |
+| Between `a` and `b` | `IntervalTransform(a, b)` | Scaled logistic |
 
-target = LogTarget(named_logtarget; grad=named_gradient!)
-bank = ProposalBank([
-    FactorGaussian([-0.2, 0.0, 0.0, 0.0], factor),
-    FactorGaussian([ 0.2, 0.0, 0.0, 0.0], factor),
-])
-algorithm = FirstOrderGRAMIS(bank; rounds=3, round_size=256, repulsion_strength=0.0)
-prepared = prepare_sampler(Xoshiro(7), target, p, algorithm; transform=layout)
+Endpoints are excluded. For example, `IntervalTransform(0.0, 10.0)` maps into `(0, 10)`.
+
+Use bounds with the coordinate precision, such as `IntervalTransform(0f0, 1f0)`.
+Nonfinite or rounded boundary values fail instead of being silently clipped.
+
+For a Gaussian base, the exponential map gives a lognormal upper tail.
+Softplus gives a lighter, Gaussian-like upper tail.
+Neither choice guarantees finite importance-weight variance.
+
+## Apply the Jacobian once
+
+For a map ``\theta=T(z)``, the sampler evaluates
+
+```math
+\log\pi(T(z))+\log|\det J_T(z)|.
 ```
 
-The simplex gradient has `K` logical entries, despite its `K-1` sampling
-coordinates. CPU workers and GPU proposal slots own separate gradient scratch.
-Do not retain the borrowed parameters or gradient buffers after the callback.
+Your target returns the log density in logical coordinates.
+Do not add the same Jacobian yourself.
 
-For CPU automatic gradients, use `LogTarget(named_logtarget, adtype)` as usual.
-The package differentiates the composed flat-coordinate target through
-DifferentiationInterface. Its AD path materializes ordinary arrays for broad
-backend compatibility; ordinary sample evaluation keeps the borrowed path.
-ForwardDiff, Zygote, ReverseDiff, and explicit runtime-activity Enzyme have been
-checked independently. The package preserves the supplied backend and mode.
-CPU results do not imply support for Reactant or another GPU AD backend.
+`current_proposal(prepared)` returns the fitted proposal in numerical coordinates.
+Keep the layout when using that proposal in another sampler.
 
-FirstOrderGRAMIS also supports named layouts with reverse-mode `AutoEnzyme` on
-CUDA. It differentiates the composed target in a device batch, without moving
-parameters or gradients to CPU. The target's operations must support Enzyme's
-device differentiation. A target that runs on GPU does not necessarily meet that
-AD contract. Explicit named gradients do not depend on automatic differentiation.
+If another package already supplies an unconstrained target with its Jacobian,
+do not apply the transform again.
 
-Bare LogDensityProblems targets retain their flat-vector convention. A named
-layout with a bare LDP target is ambiguous and is rejected. Use an explicit
-`LogTarget` when a callable accepts the logical named parameters.
+## Transform the proposal instead
 
-## Structured proposals
+`TransformedProposal` owns the change of variables at the proposal boundary.
+This is useful for fixed IS with a constrained proposal:
 
-A named product base can omit identity fields. Here `offset` is unconstrained,
-so its omitted transform is filled in as [`IdentityTransform`](@ref):
-
-```jldoctest structured_transform
-using ImportanceSamplers
-using Random
-
+```@example transforms
 proposal = TransformedProposal(
+    SphericalGaussian(0.0, 1.0),
+    PositiveTransform(),
+)
+positive = importance_sample(
+    Xoshiro(9), x -> -x,
+    ImportanceSampling(proposal; nsamples=5_000),
+)
+
+mean(positive)
+```
+
+The target here is an unnormalized exponential density on the positive line.
+The proposal evaluates its normalized density with the inverse Jacobian.
+Do not also pass the same transformation through `transform=`.
+
+For CPU-only independent named blocks, combine `ProductProposal` and `TransformedProposal`:
+
+```@example transforms
+structured = TransformedProposal(
     ProductProposal((
-        weights=SphericalGaussian(zeros(2), 1.0),
-        rate=SphericalGaussian(0.0, 1.0),
+        scale=SphericalGaussian(0.0, 1.0),
         offset=SphericalGaussian(0.0, 1.0),
     )),
-    (
-        weights=SimplexTransform(3),
-        rate=PositiveTransform(),
-    ),
+    (scale=PositiveTransform(),),
 )
 
-sample = rand(Xoshiro(7), proposal)
-(
-    keys=keys(sample),
-    simplex_length=length(sample.weights),
-    simplex_sum=sum(sample.weights),
-    positive=sample.rate > 0,
-    unconstrained=sample.offset isa Float64,
-)
-
-# output
-
-(keys = (:weights, :rate, :offset), simplex_length = 3, simplex_sum = 1.0, positive = true, unconstrained = true)
+rand(Xoshiro(9), structured)
 ```
 
-Named product layouts are CPU-only. For the CUDA path, use one native vector
-Gaussian and a complete flat selector layout. Flat selectors must be disjoint,
-in bounds, and collectively cover every coordinate; identity blocks are
-explicit:
+An omitted known product field uses identity. Here `offset` stays unconstrained.
+This omission rule applies to named product fields, not to flat selector layouts.
 
-```julia
-using LinearAlgebra
+## Gradients, devices, and the simplex measure
 
-flat = TransformedProposal(
-    FactorGaussian(zeros(4), Matrix{Float64}(I, 4, 4)),
-    (
-        weights=(1:2 => SimplexTransform(3)),
-        rate=(3 => PositiveTransform()),
-        offset=(4 => IdentityTransform()),
-    ),
-)
-```
+Native flat layouts work with adaptive methods and supported devices.
+`ProductProposal` remains CPU-only.
+Explicit named gradients differentiate the logical target.
+The package supplies the transform pullback and Jacobian derivative.
+See [Gradients](@ref gradients-guide).
 
-## Simplex reference measure
-
-`SimplexTransform(K)` maps `K - 1` orthonormal coordinates into the sum-zero
-logit subspace and applies softmax. The logical density is measured against the
-ordinary first-coordinate measure
+A simplex density uses the first-coordinate measure
+``dx_1\cdots dx_{K-1}`` with ``x_K=1-\sum_{i<K}x_i``.
+The orthonormal-logit construction has forward log Jacobian
 
 ```math
-dx_1\,\cdots\,dx_{K-1}, \qquad x_K = 1 - \sum_{k=1}^{K-1}x_k.
+\log|J|=\tfrac12\log K+\sum_{i=1}^K\log x_i.
 ```
 
-Against that measure, the full forward log Jacobian is
-
-```math
-\log |J(z)| = \tfrac{1}{2}\log K + \sum_{k=1}^{K}\log x_k.
-```
-
-The dimension-dependent `sqrt(K)` factor is part of the density. For the
-three-component example it is `sqrt(3)`; dropping it shifts every raw log
-weight and the estimated log normalizer. The runnable
-`validation/reproducers/simplex_transform.jl`
-checks a normalized Dirichlet identity against this exact measure.
+The constant matters for normalizers. It does not disappear from the proposal density.
+The [simplex reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/simplex_transform.jl)
+checks this measure against a normalized Dirichlet density.

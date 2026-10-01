@@ -1,132 +1,83 @@
-# Static multiple importance sampling
+# [Static multiple importance sampling](@id static-mis)
 
-Static multiple importance sampling (MIS) draws from a fixed population of
-normalized proposals and chooses a complete weighting scheme before execution.
-The terminology and denominator families follow Elvira et al.,
-[“Generalized Multiple Importance Sampling”](https://arxiv.org/abs/1511.03095).
+Static MIS samples a fixed bank of proposals.
+A complete scheme selects both the generating proposal and the weight denominator.
 
-## Bank and result contract
+## Cover two modes
 
-For proposals ``q_1,\ldots,q_J`` and normalized nominal masses
-``\alpha_1,\ldots,\alpha_J``, construct an explicit bank:
+```@example static
+using ImportanceSamplers, Random, Statistics
+
+function logtarget(x)
+    a = -abs2(x + 2) / 2 + log(0.3)
+    b = -abs2(x - 2) / 2 + log(0.7)
+    m = max(a, b)
+    return m + log(exp(a - m) + exp(b - m)) - log(2pi) / 2
+end
+
+bank = ProposalBank([
+    SphericalGaussian(-2.0, 1.2),
+    SphericalGaussian( 2.0, 1.2),
+], [0.3, 0.7])
+algorithm = ImportanceSampling(
+    bank; nsamples=10_000, mis_scheme=StratifiedMixture(),
+)
+samples = importance_sample(Xoshiro(42), logtarget, algorithm)
+
+(mean=mean(samples), reference_mean=0.8, lognormalizer=lognormalizer(samples))
+```
+
+The target is a normalized two-mode Gaussian mixture.
+The population's masses match its two mixture masses, while the proposals are wider.
+
+`samples.provenance.proposal_id` identifies the generating bank entry.
+The bank keeps its input order and stable one-based identifiers.
+
+## Choose the scheme
+
+For masses ``\alpha_j``, define
+``\psi(x)=\sum_j\alpha_jq_j(x)``.
+Every raw weight has the form ``\log\pi(x)-\log d_i(x)``.
+
+| Scheme | Proposal assignment | Denominator | Density cost per draw |
+|:--|:--|:--|:--|
+| `StratifiedMixture()` | Stratified masses | Full mixture ``\psi`` | All active proposals |
+| `RandomMixture()` | Independent categorical draws | Full mixture ``\psi`` | All active proposals |
+| `StandardMIS()` | Stratified masses | Generating proposal | One proposal |
+| `PartialDeterministicMixture(groups)` | Stratified masses | Mixture within the generating proposal's group | Group size |
+
+Stratification spreads assignment uniforms across equal strata before applying the mass CDF.
+It does not promise identical component counts in every run.
+
+Partial groups must partition every bank identifier exactly once:
 
 ```julia
-bank = ProposalBank(proposals, masses)
-algorithm = ImportanceSampling(
-    bank;
-    nsamples=10_003,
-    mis_scheme=StratifiedMixture(),
-)
+scheme = PartialDeterministicMixture([[1, 2], [3, 4]])
+algorithm = ImportanceSampling(four_proposal_bank; nsamples=10_000, mis_scheme=scheme)
 ```
 
-The bank copies both vectors and normalizes finite nonnegative masses. A
-zero-mass proposal remains visible at its original one-based index, but is never
-assigned and never enters a denominator. Every run returns exactly `nsamples`
-samples. The aligned generating IDs are in
-`result.provenance.proposal_id`.
+Within a group, nominal masses are renormalized to sum to one.
+Zero-mass proposals keep their identifiers but generate no samples.
 
-A configured positive mass that would become zero during floating conversion or
-normalization is rejected. During preparation, denominator coefficients are
-derived from the finalized floating-point CDF intervals, so assignment and
-weighting use the same effective masses.
+## Weigh cost against coverage
 
-`ProposalBank` is deliberately not a mixture distribution: it defines neither
-`rand` nor `DensityInterface.logdensityof`. Assignment and denominator choice
-are separate parts of an MIS scheme. A distribution package's mixture object
-therefore remains one atomic proposal unless its components are explicitly
-expanded into a bank.
+A full-mixture denominator shares density information across proposals.
+Its cost grows with the number of active proposals.
+A generating-proposal denominator is cheaper but has a stricter support condition.
 
-## Assignment and denominators
+For an unbiased linear normalizer estimate:
 
-Let ``A_i`` be the generating proposal ID and ``d_i`` the scheme denominator.
-The stored canonical weight is always raw and unnormalized:
+- Full-mixture schemes need the aggregate mixture to cover the target.
+- `StandardMIS` needs each active proposal to cover the target.
+- Partial mixtures need each active group mixture to cover the target.
 
-```math
-\log w_i = \log \pi(x_i) - \log d_i(x_i).
-```
+These statements also require integrability.
+They do not imply finite variance or unbiased logarithms.
 
-The complete assignment vector is fixed before any proposal draw. Stratified
-assignment maps one uniform from each of ``N`` equal strata through the nominal
-mass CDF. Random assignment instead draws ``A_i`` independently from that CDF.
+## Sources
 
-| Scheme | Assignment | Denominator ``d_i(x)`` | Proposal-density cost |
-|:--|:--|:--|:--|
-| [`StratifiedMixture`](@ref) | stratified nominal masses | ``\sum_j \alpha_j q_j(x)`` | ``J`` per sample |
-| [`RandomMixture`](@ref) | iid nominal masses | ``\sum_j \alpha_j q_j(x)`` | ``J`` per sample |
-| [`StandardMIS`](@ref) | stratified nominal masses | ``q_{A_i}(x)`` | one per sample |
-| [`PartialDeterministicMixture`](@ref) | stratified nominal masses | nominal mixture within the group containing ``A_i`` | group size per sample |
+- Elvira et al., [*Generalized Multiple Importance Sampling*](https://arxiv.org/abs/1511.03095).
+- [CPU reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/static_mis.jl).
+- [Standalone example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/static_mis.jl).
 
-For a partial group ``G``, the denominator coefficients are normalized within
-the group:
-
-```math
-d_G(x) = \sum_{j\in G}
-\frac{\alpha_j}{\sum_{k\in G}\alpha_k}q_j(x).
-```
-
-`groups` must partition every original proposal ID exactly once. A group that
-contains only zero-mass proposals is valid but inert.
-
-## Support and unbiasedness
-
-The linear estimate
-
-```math
-\widehat Z = \frac{1}{N}\sum_{i=1}^N w_i
-```
-
-is unbiased when the target integral exists and the chosen complete scheme has
-the required support:
-
-- full-mixture schemes require aggregate support from
-  ``\sum_j\alpha_jq_j``;
-- `StandardMIS` requires every positive-mass generating proposal to cover the
-  target support;
-- partial deterministic mixtures require each active group mixture to cover
-  the target support.
-
-Finite variance additionally requires the corresponding squared density ratios
-to be integrable. `lognormalizer(result)` returns ``\log\widehat Z``; the
-logarithm itself is generally biased even when ``\widehat Z`` is unbiased.
-
-Full-mixture denominators use more density evaluations but typically reduce
-weight variance by sharing information across proposals. Singleton denominators
-are cheapest. Partial groups trade between those endpoints. Stratification
-removes most proposal-count variation relative to iid mixture assignment, but
-no strict variance ordering holds for every target and proposal bank.
-
-## Preparation and execution capabilities
-
-Positive-mass proposals must have one logical sample dimension. Packed native
-Gaussian or Student-t banks additionally require one scalar/vector layout and one floating
-type. Mixed dimensions, mixed `Float32`/`Float64`, and scalar mixed with a
-length-one vector are rejected during preparation, before RNG use.
-
-The following matrix is generated during every strict documentation build from
-the metadata also consumed by the CUDA reproducer. Its CPU examples execute all
-four schemes, and its accelerator rejection rows check the typed reason.
-
-```@eval
-Main.STATIC_MIS_CAPABILITY_TABLE
-```
-
-CUDA execution keeps packed bank state, assignments, samples, raw log weights,
-proposal IDs, target context, random buffers, and partial-group state on the
-device. Transfer to CPU is explicit. AMDGPU and Metal remain unclaimed.
-
-## Reproducers, benchmark, and example
-
-The repository provides a deterministic analytic
-[CPU reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/static_mis.jl)
-and the real-hardware
-[CUDA reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_static_mis.jl).
-Run them from the package root with their isolated validation environment:
-
-```text
-julia --project=validation validation/reproducers/static_mis.jl
-julia --project=validation validation/reproducers/cuda_static_mis.jl --correctness-only
-```
-
-`benchmark/static_mis.jl` measures preparation, warmed execution, allocations,
-throughput, proposal-density evaluation counts, and CUDA result transfer. The
-short runnable workflow is in `examples/static_mis.jl`.
+Use [Devices](@ref devices-guide) for backend support and [Proposals](@ref proposals-guide) for bank construction.

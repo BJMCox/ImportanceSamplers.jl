@@ -1,111 +1,117 @@
-# Batch target evaluation
+# [Batch targets](@id batch-guide)
 
-Use [`LogTarget`](@ref) with `batch=batch!` when a whole batch can share matrix
-operations or launch efficient device kernels. The scalar callback remains
-required. Omitting `batch` preserves the existing fused scalar path.
+A scalar target evaluates one draw.
+An optional batch callback evaluates many draws with shared matrix operations or device kernels.
 
-```julia
-using ImportanceSamplers, Random
+## Evaluate a regression model in batches
 
-logtarget(x, p) = -sum(abs2, x .- p.centre) / 2
-function logtarget_batch!(values, samples, p)
-    values .= .-vec(sum(abs2, samples .- p.centre; dims=1)) ./ 2
+```@example batch
+using ImportanceSamplers, Random, Statistics, LinearAlgebra
+
+function logtarget(beta, p)
+    value = -sum(abs2, beta) / 8
+    for row in axes(p.X, 1)
+        residual = -p.y[row]
+        for column in eachindex(beta)
+            residual += p.X[row, column] * beta[column]
+        end
+        value -= residual^2 / 2
+    end
+    return value
+end
+
+function batch!(values, samples, p)
+    residuals = p.X * samples .- p.y
+    values .= .-vec(sum(abs2, residuals; dims=1)) ./ 2 .-
+              vec(sum(abs2, samples; dims=1)) ./ 8
     return nothing
 end
 
-target = LogTarget(logtarget; batch=logtarget_batch!)
-p = (; centre=[0.1, -0.2, 0.3])
-sampler = prepare_sampler(Xoshiro(42), target, p,
-    ImportanceSampling(SphericalGaussian(zeros(3), 1.0); nsamples=10_000))
-samples = importance_sample!(sampler)
+rng = Xoshiro(42)
+X = randn(rng, 80, 3)
+y = X * [-0.4, 1.1, -0.8] + randn(rng, 80)
+p = (; X, y)
+proposal = SphericalGaussian(X \ y, 0.3)
+target = LogTarget(logtarget; batch=batch!)
+samples = importance_sample(
+    rng, target, p,
+    ImportanceSampling(proposal; nsamples=5_000),
+)
+
+mean(samples)
 ```
 
-Without an explicit context, use `logtarget(x)` and
-`logtarget_batch!(values, samples)`.
+The model has unit observation noise and independent `Normal(0, 2)` coefficient priors.
+The scalar and batch functions compute the same unnormalized log posterior.
 
-The runnable [linear regression example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/batched_linear_regression.jl)
-uses one matrix multiplication for all proposed coefficient vectors:
+Each sample is a column.
+The matrix multiplication `p.X * samples` evaluates all proposed coefficient vectors together.
 
-```julia
-include("examples/batched_linear_regression.jl")
-samples = batched_regression_example()
+## Match the callback shape
 
-# Optional CUDA execution, after installing CUDA:
-using CUDA
-device = MLDataDevices.with_eltype(MLDataDevices.CUDADevice(), nothing)
-gpu_samples = batched_regression_example(device; T=Float32)
-cpu_samples = MLDataDevices.CPUDevice()(gpu_samples) # Explicit result transfer.
-```
-
-## Shapes and ownership
-
-| One scalar-call input | Batch input | Output |
+| Scalar target input | Batch input | Output buffer |
 |:--|:--|:--|
 | Scalar | Length-`n` vector | Length-`n` vector |
-| Length-`d` vector | `d × n` matrix, one sample per column | Length-`n` vector |
-| Named parameters | Named tuple of vector/matrix batch leaves | Length-`n` vector |
+| Length-`d` vector | `d × n` matrix | Length-`n` vector |
+| Named parameters | Named tuple of batched leaves | Length-`n` vector |
 
-Accept array views rather than requiring concrete `Matrix` or `Vector` types.
-Fill every output entry. Do not change input arrays or retain borrowed buffers.
-The return value is ignored. Batch widths can vary, and empty batches are skipped.
-Each output must equal the scalar log target for that sample, independently of
-the other samples and the batch width. Missing values, NaN, and +Inf fail the
-run. `-Inf` remains a valid outside-support value.
+With no context, use `batch!(values, samples)`.
+With context, use `batch!(values, samples, p)`.
+The scalar callable remains required.
 
-With a named `transform=`, the callback receives logical named batch leaves.
-The package adds the log Jacobian once. Do not add it in the callback.
+Fill every output entry. Accept array views rather than requiring concrete `Matrix` types.
+Treat inputs as read-only and retain none of the borrowed buffers.
+The return value is ignored.
 
-## Execution and derivatives
+Each output must equal the scalar target for that sample.
+It must not depend on other samples or the batch width.
+Widths may vary. Empty batches are skipped.
 
-The callback owns its CPU parallelism. `threaded=true` does not divide one
-callback into concurrent calls. Proposal and weighting work retain their usual
-threading policy.
+## Control work and memory
 
-Transfer the complete prepared sampler with an explicit MLDataDevices device,
-as described in [Accelerators](@ref). The callback receives resident arrays and
-context. Launch work on the current task's stream, or finish private-stream work
-before returning. No event object or separate executor is required. Validation
-can synchronize at batch boundaries. Samples do not move to the host for evaluation.
+The callback owns CPU parallelism.
+`threaded=true` does not divide one callback into concurrent calls.
+Proposal and weighting work retain their normal execution policy.
 
-Adaptive methods evaluate the current round's samples together. AMIS retains
-previous target values. LAIS batches each dependent MCMC step separately.
-GRAMIS batches frozen-centre values and each backtracking trial's active
-candidates. It does not evaluate future dependent trials in advance.
+The example allocates an observations-by-samples residual matrix.
+For large datasets, use bounded internal blocks or reusable model-specific scratch where appropriate.
+Scratch must remain valid for the callback's actual width and device.
 
-`grad=` and `adtype` remain independent of `batch`. Automatic differentiation
-uses the scalar callable, including any primal evaluations needed by the AD
-backend. An explicit gradient need not evaluate the scalar log target. This API
-does not define a batch-gradient callback.
+Without `batch=`, the package already evaluates independent scalar targets in parallel.
+A batch callback changes how the model computes, not whether the sampler can run in parallel.
 
-## Backend limits
+## Use constraints, gradients, and devices
 
-Native batch paths have been checked on CPU, CUDA, and Metal, including named
-simplex and positive parameters. The callback's operations must support the
-selected backend. Metal examples use Float32 throughout, including bank masses.
+With `transform=`, the callback receives logical named leaves.
+The package adds the Jacobian. Do not add it in the callback.
 
-Reactant callbacks must be traceable. Its fixed-width batch phases retain their
-compiled executables. GRAMIS backtracking on Reactant therefore evaluates the
-batch callback at the full candidate width on every trial: inactive candidates
-are passed at their accepted location and their results are discarded. This
-does not change the trial law or the random stream, but it costs up to
-`max_backtracking_trials - 1` extra evaluations per candidate, and the reported
-target-evaluation count includes them. Native CPU, CUDA, and Metal backtracking
-evaluate only active candidates. On Reactant, every slot's `backtracking_trials`
-diagnostic reports the number of trials the padded loop ran. It equals the
-native value only for slots still active on the last trial the loop ran.
-Reactant also reports fewer device transfers than native backends for the same
-run, because the padded loop skips the trailing width check and the final
-failure snapshot that native backtracking records.
+`grad=` and AD selectors remain independent of `batch=`.
+Automatic differentiation uses the scalar target, not this callback.
+There is no separate batch-gradient callback.
 
-Reactant 0.2.289 cannot fill a one-element vector view. Two-round AMIS/NPMC
-history resets avoid that operation, so two-round scalar and batch targets
-prepare and sample on Reactant GPU. The batch comparisons used three rounds;
-the September 28 recheck (Julia 1.13.0, CUDA 6.2.2, NVIDIA A100) passed them,
-including a second call on each prepared sampler. See the
-[backend reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/batch_targets.jl)
-for the checked cases.
+A device callback receives resident inputs, outputs, and context.
+Use the current task's stream or complete private-stream work before returning.
+Failure checks may synchronize at batch boundaries, not once per sample.
 
-Small, cheap scalar targets can be faster without batching because fusion
-avoids scratch storage and phase boundaries. Benchmark both paths for the
-actual target and device. Batch matrix operations offer more opportunity when
-many observations share the same design matrix.
+## Understand adaptive calls
+
+Adaptive methods batch the current round's samples.
+AMIS caches earlier target values.
+
+LAIS cannot combine dependent future MCMC steps into one target evaluation.
+GRAMIS similarly cannot evaluate future backtracking trials in advance.
+
+Native GRAMIS batches only active backtracking candidates.
+Reactant uses fixed-width padded batches so prepared executables can be reused.
+Inactive candidates retain their accepted locations and their new values are discarded.
+Their extra evaluations appear in the diagnostics.
+
+## Compare both paths
+
+Batching can help data-heavy matrix models.
+Cheap scalar targets can be faster with fused scalar execution.
+Measure both on the intended model and device.
+
+The [standalone example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/batched_linear_regression.jl)
+also shows CUDA transfer.
+The [benchmark guide](@ref benchmarks-guide) links paired scalar/batch measurements.

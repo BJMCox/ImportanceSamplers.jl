@@ -1,176 +1,87 @@
-# DM-PMC, GR-PMC, and LR-PMC
+# [DM-PMC, GR-PMC, and LR-PMC](@id dmpmc-method)
 
-[`DeterministicMixturePMC`](@ref) implements fixed-population DM-PMC with the
-global and local multinomial resampling variants from Elvira et al.,
-[“Improving Population Monte Carlo”](https://victorelvira.github.io/assets/papers/elvira2017improving_pre.pdf).
-[`GlobalResampling`](@ref) is the default. [`LocalResampling`](@ref) changes only
-the ancestor-selection scope; both variants use the same deterministic-mixture
-weights.
+DM-PMC moves proposal centres by resampling completed rounds.
+It preserves each proposal's scale and uses a current-population mixture denominator.
 
-Gaussian and Student-t populations work on CPU and CUDA. Student-t proposals
-retain each supplied positive degrees of freedom and scale while resampling
-changes their locations. The family does not change the spatial-mixture
-weights or ancestor-selection rule. See [Native proposals](@ref).
+## Example
 
-## Minimal prepared execution
+```@example dmpmc
+using ImportanceSamplers, Random, Statistics
 
-```julia
-using ImportanceSamplers
-using Random
-
-logtarget(x) = -0.5 * sum(abs2, x)
+logtarget(x) = -sum(abs2, x) / 2
 bank = ProposalBank([
     FactorGaussian([-2.0, 0.0], [1.0 0.0; 0.4 0.8]),
-    FactorGaussian([ 2.0, 0.0], [1.0 0.0; -0.4 0.8]),
+    FactorGaussian([ 2.0, 0.0], [1.0 0.0; 0.4 0.8]),
 ])
 algorithm = DeterministicMixturePMC(
-    bank;
-    rounds=6,
-    round_size=10_000,
+    bank; rounds=4, round_size=2_000,
     resampling=LocalResampling(),
 )
-sampler = prepare_sampler(Xoshiro(42), logtarget, algorithm)
-samples = importance_sample!(sampler)
+prepared = prepare_sampler(Xoshiro(42), logtarget, algorithm)
+samples = importance_sample!(prepared)
+
+(mean=mean(samples), count=length(samples))
 ```
 
-`round_size` is the number of samples per round. A positive integer repeats
-that size for all `rounds`; a positive `Vector{Int}` supplies one size per
-round. Preparation copies and resolves the complete schedule. The returned
-count is exactly its sum.
+This equal-mass, equal-allocation configuration uses local resampling, the LR-PMC case.
+Replace `LocalResampling()` with `GlobalResampling()` for the GR-PMC case.
+Global resampling is the default.
 
-Prepared execution owns and advances its RNG and adaptive population. Repeated
-calls start new estimator runs from the last learned population and return
-independent, noncumulative results. [`current_proposal`](@ref) returns an
-independent snapshot from a CPU-prepared sampler. The one-argument form rejects
-accelerator-prepared samplers before reading device storage, so there is no
-hidden transfer. Request the host transfer explicitly with
-`current_proposal(MLDataDevices.cpu_device(), sampler)`. This copies only the
-current packed locations and stable proposal IDs under the sampler's selected
-physical-device scope, then reconstructs an independent CPU `ProposalBank` with
-the configured fixed masses, scales or factors, and inert zero-mass proposals.
-It does not migrate the prepared sampler, RNG, target, workspaces, or results.
-Scalar-converting CPU destinations and non-CPU destinations are rejected.
+## Choose the resampling scope
 
-## Round allocation and weighting
+| Policy | Source of the next centre in each slot |
+|:--|:--|
+| `GlobalResampling()` | The complete weighted round |
+| `LocalResampling()` | That proposal's own weighted sample group |
 
-Only positive-mass proposals are active. Each fixed round count is allocated
-among them by largest-remainder rounding, with tied remainders rotated across
-rounds. Every active proposal must receive at least one draw. Zero-mass
-proposals remain in configuration and retain their stable IDs, but contribute
-neither samples nor denominator terms.
+Both policies use the same complete-mixture weights.
+Local resampling preserves one descendant per proposal.
+Global resampling can select duplicate ancestors and reduce population diversity.
 
-If round ``t`` realizes counts ``n_{t,j}`` and total ``N_t``, its spatial
-mixture is fixed before any current sample is drawn:
+The selected sample becomes the next proposal location.
+The original scale or factor remains unchanged.
+Resampling does **not** tune proposal widths.
+
+## Allocation and weights
+
+Equal masses and divisible round sizes give equal allocation.
+For unequal masses, the package uses largest-remainder allocation with rotated ties.
+Every active proposal needs at least one draw.
+
+For realized counts ``n_{t,j}`` and total ``N_t``, the denominator is
 
 ```math
-\psi_t(x) = \sum_j \frac{n_{t,j}}{N_t}q_{t,j}(x), \qquad
-\log w_{t,i} = \log \pi(x_{t,i}) - \log \psi_t(x_{t,i}).
+\psi_t(x)=\sum_j\frac{n_{t,j}}{N_t}q_{t,j}(x),
+\qquad
+\ell_{t,i}=\log\pi(x_{t,i})-\log\psi_t(x_{t,i}).
 ```
 
-The denominator coefficients are therefore the realized count fractions, not
-the nominal masses directly. Equal masses and divisible round sizes recover
-the paper's equal spatial mixture; unequal masses give the documented
-realized-count extension.
+The coefficients are realized count fractions, not nominal masses.
+Unequal allocation is a package extension to the equal-allocation paper cases.
 
-After a complete round has valid weights, global multinomial resampling draws
-one ancestor for each proposal from the whole round. Duplicate ancestors are
-allowed and can reduce population diversity.
+Each sample keeps its own round's weight.
+All rounds contribute to the returned result.
 
-Local multinomial resampling instead draws one ancestor from each proposal's
-own weighted sample group. Every proposal therefore contributes exactly one
-next-round location. The weights still use the complete spatial-mixture
-denominator, so proposals cooperate through weighting even though ancestor
-selection remains local. A group containing only zero weights fails the round.
+## Reuse and limitations
 
-The selected values become the next locations in slot order. Spherical scales,
-diagonal scales, and lower triangular factors remain fixed. Resampling also
-occurs after the final round, and that final population is retained for the
-next prepared call.
+The last resampling step runs after the final returned round.
+Its centres become the starting population for the next prepared call.
 
-The paper's GR-PMC and LR-PMC laws draw the same count ``K`` from every
-proposal. This exact case uses equal bank masses and a `round_size` divisible by
-the active proposal count, giving ``K = round_size / N``. Unequal masses or a
-nondivisible count use the package's documented realized-count extension.
+Gaussian and Student-t proposals retain their original scales and Student-t degrees of freedom.
+Good centres cannot compensate for unsuitable scales.
 
-## Complete results, provenance, and failure
+An all-zero round fails.
+Local resampling also fails when one proposal's sample group has no nonzero weight.
+A failure preserves the pre-call population, but not the old RNG position.
 
-The result contains every sample from every round. Each canonical raw log
-weight keeps its own round's current-mixture denominator. The complete linear
-normalizer assigns every flattened sample the same ``1/N`` estimator
-coefficient:
+The linear normalizer estimate is unbiased for a fixed schedule when each conditional
+mixture covers the integrable target and adaptation uses only completed rounds.
+This does not make the logarithm or normalized expectations unbiased.
 
-```math
-\log \widehat Z = \operatorname{logsumexp}(\log w) - \log N,
-\qquad N=\sum_t N_t.
-```
+## Sources
 
-`samples.provenance.round` and `samples.provenance.proposal_id` identify the
-generating round and stable configured proposal ID. Diagnostics provide the
-resolved round sizes, per-round log normalizers, and per-round normalized-weight
-concentration ESS. This ESS describes weight concentration; it is not a
-variance-equivalent sample count or an automatic stopping rule.
+- Elvira et al., [*Improving Population Monte Carlo: Alternative Weighting and Resampling Schemes*](https://victorelvira.github.io/assets/papers/elvira2017improving_pre.pdf).
+- [Equation reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/dm_pmc_global.jl).
+- [Standalone example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/dm_pmc.jl).
 
-A failed call does not commit its run population. [`DMPMCRoundError`](@ref)
-records its round, phase, cause, and completed-round count. The sampler retains
-its pre-call population while its RNG remains advanced. Earlier returned results
-remain unchanged after both later successes and failures.
-
-## Linear-normalizer guarantee
-
-The linear estimator is conditionally unbiased when every proposal is
-normalized, every conditional spatial mixture covers the target's integrable
-mass, the finite round schedule and allocation are fixed before current draws,
-and each adapted population depends only on completed earlier rounds. Under
-those conditions each round estimates the same integral conditional on its
-past, so the sample-count-weighted flattened average does too.
-
-This statement does not make `lognormalizer` itself unbiased after applying
-`log`, does not imply finite variance without square-integrability, and does
-not give generic finite-sample unbiasedness for nonlinear summaries or for
-adaptive populations outside these conditions.
-
-## CPU, CUDA, and transfer boundary
-
-CPU execution supports serial evaluation and `threaded=true` preparation;
-threaded workers consume prefilled random buffers. Accelerator use is explicit:
-prepare on CPU, then apply a concrete MLDataDevices device to the complete
-prepared sampler before its first execution. Samples, weights, proposal state,
-resampling state, and workspaces remain on that device.
-
-Inspecting the retained accelerator population is a separate, explicit
-operation:
-
-```julia
-host_bank = current_proposal(MLDataDevices.cpu_device(), sampler)
-```
-
-The accessor restores the caller's physical-device selection after copying the
-two packed arrays. The returned bank owns its locations, masses, scales, and
-factors; mutating it cannot change the prepared sampler.
-
-The table below is generated during every strict documentation build from the
-executable rows in `validation/dm_pmc_capabilities.jl`. Each CPU cell performs
-a public run while building these docs; each CUDA claim corresponds to the
-same row exercised by the A100 reproducer.
-
-```@eval
-Main.DM_PMC_CAPABILITY_TABLE
-```
-
-AMDGPU and Metal are unclaimed. Global CUDA resampling reports four small
-explicit transfers per round: a failure snapshot, the CDF maximum and sum,
-and one packed weight summary containing its maximum, scaled sum, and
-scaled-square sum. Local CUDA resampling replaces the two CDF transfers with
-one group-validity transfer, giving three transfers per round. This is
-``O(\text{rounds})`` source-level accounting; it does not instrument hidden
-runtime or library transfers.
-
-## Reproducers, benchmark, and examples
-
-- [Independent CPU equation reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/dm_pmc_global.jl)
-- [A100 CUDA reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_dm_pmc.jl)
-- [CPU/CUDA benchmark harness](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/dm_pmc.jl)
-- [Public bimodal DM-PMC example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/dm_pmc.jl)
-
-The benchmark reports throughput, allocations, device bytes, transfer
-accounting, flattened concentration ESS, and separate per-round diagnostic ESS.
+See [Adaptation and reuse](@ref reuse-guide) and [Devices](@ref devices-guide).

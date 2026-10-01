@@ -1,102 +1,30 @@
-# Public API
+# [API reference](@id api-reference)
 
-## Algorithms and execution
+The tutorials explain complete workflows.
+This section lists signatures and exact contracts for lookup.
 
-```@docs
-AbstractImportanceSampler
-ImportanceSampling
-AMIS
-APIS
-LAIS
-AbstractMCMCTransition
-SampleMetropolisHastings
-RandomWalkMetropolis
-RAM
-WarmupTuning
-ContinuousTuning
-CAIS
-NPMC
-DeterministicMixturePMC
-AbstractPMCResamplingPolicy
-GlobalResampling
-LocalResampling
-FirstOrderGRAMIS
-FusedFactorExecution
-BatchedFactorExecution
-prepare_sampler
-retarget
-importance_sample
-importance_sample!
-current_proposal
-```
+- [Samplers and transitions](@ref sampler-reference)
+- [Proposals and transforms](@ref proposal-reference)
+- [Results and statistics](@ref result-reference)
+- [Errors](@ref error-reference)
 
-## Proposal populations and MIS schemes
+## Targets
 
 ```@docs
-AbstractProposalPopulation
-ProposalBank
-AbstractMISScheme
-StratifiedMixture
-RandomMixture
-StandardMIS
-PartialDeterministicMixture
-```
-
-## Native proposals and transforms
-
-```@docs
-AbstractProposalFamily
-AbstractRadialProposalFamily
-SphericalGaussian
-DiagonalGaussian
-FactorGaussian
-SphericalStudentT
-DiagonalStudentT
-FactorStudentT
-ProductProposal
-TransformedProposal
-AbstractSampleTransform
-IdentityTransform
-PositiveTransform
-SoftplusTransform
-IntervalTransform
-SimplexTransform
 LogTarget
 ```
 
-## Results
+## Preparation and execution
 
 ```@docs
-WeightedSamples
-WeightedSampleView
-UnweightedSamples
-normalized_weights
-lognormalizer
-AbstractResamplingMethod
-MultinomialResampling
-resample
-Statistics.mean
-Statistics.var
-Statistics.std
-Statistics.cov
-Statistics.quantile
-Statistics.median
+prepare_sampler
+importance_sample
+importance_sample!
 ```
 
-## Errors
+## Learned state
 
 ```@docs
-AllZeroWeightsError
-InvalidTransformError
-SamplerBusyError
-SamplerAlreadyExecutedError
-SamplerDeviceError
-SamplerExecutionError
-AMISRoundError
-APISRoundError
-LAISRoundError
-CAISRoundError
-NPMCRoundError
-DMPMCRoundError
-FirstOrderGRAMISRoundError
+current_proposal
+retarget
 ```

@@ -1,102 +1,61 @@
-# Nonlinear population Monte Carlo
+# [Nonlinear population Monte Carlo](@id npmc-method)
 
-[`NPMC`](@ref) learns a native Gaussian or Student-t proposal from clipped importance weights.
-Clipping limits the influence of a few large weights on proposal adaptation.
-Returned samples keep their original importance weights for estimation.
-
-This is an adaptation variant of Koblents and Míguez's
-[N-PMC](https://arxiv.org/abs/1208.5600). The original method also uses transformed
-weights in its reported estimates. This package deliberately uses ordinary
-importance weights instead, and retains samples from every round.
+N-PMC fits one proposal from each round using clipped weights.
+The returned samples keep their original importance weights.
 
 ## Example
 
-```julia
+```@example npmc
 using ImportanceSamplers, Random, Statistics
 
-# Infer a correlated pair. This function returns an unnormalized log density.
-logtarget(x) = -0.5 * (abs2(x[1] - 1) + abs2((x[2] + 1 - 0.8(x[1] - 1)) / 0.6))
-proposal = SphericalGaussian([-2.0, 2.0], 3.0)
-algorithm = NPMC(proposal; rounds=4, round_size=10_000)
+logtarget(x) = -(abs2(x[1] - 1) + abs2((x[2] + 1 - 0.8(x[1] - 1)) / 0.6)) / 2
+algorithm = NPMC(
+    SphericalGaussian(zeros(2), 2.0);
+    rounds=4, round_size=2_000,
+)
 prepared = prepare_sampler(Xoshiro(42), logtarget, algorithm)
 samples = importance_sample!(prepared)
-estimate = mean(samples)
-learned = current_proposal(prepared)
+
+(mean=mean(samples), covariance=cov(samples))
 ```
 
-Scalar proposals retain scalar samples. Vector spherical, diagonal, and factor
-proposals learn a full covariance, including correlations. Student-t fits require
-`nu > 2`, preserve `nu`, and convert the clipped-weight covariance to Student-t
-scale. This extends the existing N-PMC update, not Student-t maximum-likelihood
-fitting. See [Native proposals](@ref).
-Native `Float32` and `Float64` are supported. Loading Distributions.jl also
-allows `Normal` and conventional `MvNormal` inputs through native conversion.
+The reference mean is `[1, -1]`.
+Vector proposals learn full covariance even when their initial scale is spherical or diagonal.
 
-## One round
+## Separate fitting weights from estimator weights
 
-For a round with ``n`` samples from the current proposal ``q_t``, compute
+For each round:
 
-```math
-\ell_i = \log\pi(x_i)-\log q_t(x_i),\qquad
-k=\lfloor\sqrt n\rfloor,\qquad
-c=\text{the }k\text{-th largest }\ell_i.
-```
+1. Draw `n` samples from the current proposal.
+2. Compute raw log weights `logtarget - logproposal`.
+3. Clip fitting weights at the `isqrt(n)`-th largest weight.
+4. Fit a mean and covariance from that round's clipped weights.
+5. Add a scale-relative covariance ridge and retain the fitted proposal.
 
-Normalize ``\exp(\min(\ell_i,c))`` with a stable shift. Use these clipped weights
-to fit the next proposal's mean and covariance from **this round only**.
-Apply a scale-relative covariance ridge and a Cholesky factorization.
-The returned `samples.logweights` contain the unchanged ``\ell_i``.
-No resampling or temporal-mixture denominator is used.
+The estimator uses the original raw weights from every round.
+There is no temporal-mixture denominator or resampling step.
 
-With ``k=1``, clipping leaves all weights unchanged. Ties at the cap remain tied.
-If fewer than ``k`` weights are finite, the cap is ``-\infty`` and adaptation
-fails with [`NPMCRoundError`](@ref), since no normalized clipped weights exist.
-An all-zero round also fails. The sampler does not invent replacement weights.
+`diagnostics.adaptation_ess` describes the clipped fitting weights.
+`diagnostics.round_ess` describes each round's raw estimator weights.
+They answer different questions.
 
-Clipping runs every round. The default count follows the original clipping
-theory's ``k\le\sqrt n`` regime. This does not establish a universal convergence
-rate for adaptive proposals or arbitrary targets.
-[Mean clipping](https://victorelvira.github.io/assets/papers/martino2018comparison_pre.pdf),
-tempering, and ESS gating are separate policies outside this implementation.
+## Scope and failures
 
-## Results and reuse
+This is an adaptation variant of N-PMC.
+The original transformed-weight estimator is not the estimator returned here.
 
-`round_size` accepts a positive integer or a vector with one positive entry per
-round. The result contains exactly the sum of these counts.
-`samples.provenance.round` identifies each sample's generating round.
-`normalized_weights`, `mean`, `var`, and `lognormalizer` use raw importance weights.
+Student-t fits require `nu > 2` and retain `nu`.
+A round with too few nonzero weights can give a zero clipping threshold and fail adaptation.
+A failed fit preserves the proposal committed before the call.
 
-For a fixed schedule and proposals with adequate support, averaging the raw
-weights estimates the target normalizing constant without clipping bias.
-The logarithm of that estimate and self-normalized expectations remain biased
-at finite sample sizes. Concentration ESS does not guarantee estimation accuracy.
+For a fixed schedule, normalized proposals, support coverage, and integrability,
+the raw linear normalizer estimate avoids clipping bias.
+Its logarithm and self-normalized expectations still have finite-sample bias.
 
-A successful call retains its final fitted proposal for the next call.
-Each call returns a new result, without accumulating earlier calls.
-`current_proposal` returns an independent snapshot. `retarget(rng, prepared,
-new_logtarget)` reuses the learned proposal with a new target.
-A failed call retains the last committed proposal and leaves the RNG advanced.
+See [Adaptation and reuse](@ref reuse-guide) and [Devices](@ref devices-guide).
 
-## Devices
+## Sources
 
-Transfer the prepared sampler explicitly, as with the other native methods:
-
-```julia
-using CUDA, MLDataDevices
-physical = CUDA.device()
-device = MLDataDevices.CUDADevice{typeof(physical),Nothing}(physical)
-prepared = device(prepare_sampler(Xoshiro(43), logtarget, algorithm))
-samples = importance_sample!(prepared)
-host_samples = cpu_device()(samples)
-host_proposal = current_proposal(cpu_device(), prepared)
-```
-
-The target must compile for the selected device. Samples, weights, clipping
-scratch, and moment-fitting buffers remain resident during each round.
-Small round summaries return to the host. Clipping needs an order statistic,
-which can cost more than target evaluation for cheap targets.
-CPU execution uses Julia's default thread pool unless `threaded=false`.
-CUDA validation lives in `validation/reproducers/cuda_npmc.jl`.
-AMDGPU and Metal support are not claimed.
-
-The runnable correlated-Gaussian example is `examples/npmc.jl`.
+- Koblents and Míguez, [*A Population Monte Carlo Scheme with Transformed Weights and its Application to Stochastic Kinetic Models*](https://arxiv.org/abs/1208.5600).
+- [Standalone example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/npmc.jl).
+- [CUDA reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_npmc.jl).

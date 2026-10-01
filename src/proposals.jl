@@ -62,8 +62,8 @@ _prepare_proposal_inputs(proposals) = copy(proposals)
 
 Construct a CPU proposal for the product of independent named proposal blocks.
 Blocks are drawn in field order with the supplied RNG, and their normalized log
-densities are summed. `ProductProposal` and transformed named-product layouts
-are not supported on CUDA.
+densities are summed. `ProductProposal` and transforms built on it are CPU-only.
+Native flat `transform=` layouts instead support accelerator execution.
 """
 struct ProductProposal{B<:NamedTuple}
     blocks::B

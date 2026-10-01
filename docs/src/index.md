@@ -1,140 +1,55 @@
 # ImportanceSamplers.jl
 
-ImportanceSamplers provides plain, multiple, and adaptive importance sampling
-on CPU and documented native CUDA paths. Supply a normalized proposal, an RNG, and a target
-that returns an unnormalized **log density**. Results retain samples and the
-canonical raw log weights.
+Importance sampling estimates integrals and expectations using weighted draws.
+ImportanceSamplers provides fixed and adaptive proposals, multiple-proposal methods,
+and explicit CPU or accelerator execution.
 
-## Installation
+You supply a **log target**, a normalized proposal, and a random-number generator.
+The result contains samples and their raw log weights.
 
-Requires Julia 1.10 or later. Until registration, install the public repository:
+## Install
+
+The package requires Julia 1.10 or later. Install the repository in your project:
 
 ```julia
 using Pkg
 Pkg.add(url="https://github.com/BJMCox/ImportanceSamplers.jl.git")
 ```
 
-For a local checkout, use `Pkg.develop(path="/path/to/ImportanceSamplers.jl")`.
-Accelerator packages are optional. Install and load the backend you intend to
-use. See [Accelerators](@ref) for device transfer and supported paths.
+Accelerator and automatic-differentiation packages are optional.
 
-## Minimal CPU example
+## Start with an example
 
-```jldoctest quickstart
-using ImportanceSamplers
-using Random
+[Your first weighted estimate](@ref first-estimate) samples a three-dimensional
+target and computes its mean, covariance, and normalizing constant.
 
-proposal = SphericalGaussian(0.0, 1.0)
-logtarget(x)::Float64 = -0.5 * abs2(x)
+Then follow either worked application:
 
-result = importance_sample(
-    Xoshiro(42),
-    logtarget,
-    ImportanceSampling(proposal; nsamples=32);
-    threaded=false,
-)
+- [Logistic regression](@ref logistic-tutorial): define a posterior, adapt a proposal, and predict a probability.
+- [Numerical integration](@ref integration-tutorial): estimate ordinary integrals, including signed integrands.
 
-expected = 0.5 * log(2pi)
-(
-    length(result),
-    all(w -> isapprox(w, expected; atol=8eps()), result.logweights),
-    isapprox(lognormalizer(result), expected; atol=8eps()),
-)
+Every tutorial defines its data and runs from top to bottom.
 
-# output
+## Find a specific task
 
-(32, true, true)
-```
+| Task | Page |
+|:--|:--|
+| Pass data or use an existing density | [Targets and data](@ref targets-guide) |
+| Choose Gaussian or Student-t proposals | [Proposals](@ref proposals-guide) |
+| Use positive, bounded, or simplex parameters | [Constraints and named parameters](@ref transforms-guide) |
+| Compute expectations, intervals, or resampled draws | [Working with results](@ref results-guide) |
+| Reuse a fitted proposal | [Adaptation and reuse](@ref reuse-guide) |
+| Choose an importance-sampling method | [Choosing a method](@ref choosing-method) |
+| Evaluate many samples with matrix operations | [Batch targets](@ref batch-guide) |
+| Supply gradients or use automatic differentiation | [Gradients](@ref gradients-guide) |
+| Execute on CUDA, Metal, or Reactant | [Devices](@ref devices-guide) |
+| Look up a signature | [API reference](@ref api-reference) |
 
-The target omits the Gaussian normalizing constant, so every raw log weight and
-the estimated log normalizer equal that omitted constant. The sampler does not
-apply `log` to the target. Call [`normalized_weights`](@ref) only when you need
-weights that sum to one.
+## What the weights mean
 
-For data or constants, use `logtarget(sample, p)` and pass `p` between the
-target and algorithm arguments. The proposal alone determines sample shape.
+The target may omit its normalizing constant. The proposal must be normalized
+and cover the regions that contribute to the integral.
 
-## Choose a method
-
-| Method | Proposal input | What adapts | Retained-weight denominator | Count | Execution |
-|:--|:--|:--|:--|:--|:--|
-| Plain IS | one normalized proposal | nothing | generating proposal | `nsamples` | CPU; documented native subset on CUDA |
-| Static MIS | fixed proposal bank | nothing | selected spatial or generating-proposal scheme | `nsamples` | CPU; documented native subset on CUDA |
-| AMIS | one native Gaussian or Student-t | mean and covariance | all-history temporal mixture | `round_size` | CPU and documented native CUDA paths |
-| APIS | native Gaussian or Student-t bank | means | current population mixture | `round_size` | CPU and documented native CUDA paths |
-| LAIS | equal-mass native Gaussian or Student-t bank | centres by independent or interacting upper MCMC; optional upper covariance tuning | equal current population mixture | divisible `round_size` | CPU and documented native CUDA paths |
-| CAIS | native Gaussian or Student-t bank | means and covariances | generating proposal | `round_size` | CPU and documented native CUDA paths |
-| N-PMC | one native Gaussian or Student-t | mean and covariance from clipped adaptation weights | generating proposal | `round_size` | CPU and documented native CUDA paths |
-| DM-PMC | proposal bank | locations by resampling | realized current population mixture | `round_size` | CPU; documented native subset on CUDA |
-| GR-PMC | equal-mass proposal bank | locations by global resampling | equal current population mixture | divisible `round_size` | CPU; documented native subset on CUDA |
-| LR-PMC | equal-mass proposal bank | locations by local resampling | equal current population mixture | divisible `round_size` | CPU; documented native subset on CUDA |
-| First-order GRAMIS-CAIS | native Gaussian or Student-t bank | means by gradient/repulsion; local covariances | realized current population mixture | `round_size` | CPU and documented native CUDA paths |
-
-Use the linked method guide for its support, allocation, adaptation, and failure
-contract; the table is only a starting point.
-Packed banks use one radial family. Student-t degrees of freedom stay fixed;
-covariance-fitting methods require `nu > 2`. See [Native proposals](@ref).
-
-## Where next
-
-- [Plain importance sampling](@ref) covers estimator semantics, generic CPU
-  proposals, prepared reuse, threading, results, and failures.
-- [Static multiple importance sampling](@ref) covers proposal banks, all four
-  complete assignment/denominator schemes, provenance, and CPU/CUDA limits.
-- [Adaptive multiple importance sampling](@ref) covers retrospective temporal
-  mixtures and learned Gaussian or Student-t state.
-- [Adaptive population importance sampling](@ref) covers epoch-local spatial
-  mixtures, proposal-local mean fits, and retained fixed-scale state.
-- [Layered importance sampling](@ref) covers upper RWM/RAM chains, interacting
-  Sample Metropolis-Hastings, fixed lower scales, and all-round
-  deterministic-mixture weights.
-- [Canonical covariance-adaptive importance sampling](@ref) covers standard
-  generating-proposal weights, raw mean fits, and robust covariance replacement.
-- [Nonlinear population Monte Carlo](@ref) covers clipped adaptation and raw
-  importance-weight estimation.
-- [DM-PMC, GR-PMC, and LR-PMC](@ref) covers adaptive spatial
-  mixtures, global and local resampling, retained proposal state, and CPU/CUDA
-  limits.
-- [First-order GRAMIS-CAIS](@ref) covers gradient moves, robust local covariance
-  fitting, repulsion, causal rounds, and CPU/CUDA limits.
-- [Native proposals](@ref) explains Gaussian and Student-t scale/factor contracts.
-- [Transforms](@ref) covers constrained and structured parameters, including
-  the simplex reference measure.
-- [Accelerators](@ref) gives the complete CUDA example, transfer boundary,
-  exact support matrix, and runnable validation.
-- [Public API](@ref) lists every exported binding.
-- [Validation and support](@ref) lists reproducible checks and their evidence limits.
-
-Runnable workflows include the public
-[DM-PMC example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/dm_pmc.jl),
-[APIS example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/apis.jl),
-and [CAIS example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/cais.jl)
-and a plain numerical-integration example for
-[`integral(exp(-x^2)) = sqrt(pi)`](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/numerical_integration.jl).
-
-For mathematical background, see Elvira and Martino's open-access
-[“Advances in Importance Sampling”](https://arxiv.org/abs/2102.05407) and
-Agapiou et al.'s
-[“Importance Sampling: Intrinsic Dimension and Computational Cost”](https://arxiv.org/abs/1511.06196).
-
-## Examples and local documentation
-
-The [logistic regression example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/logistic_regression.jl)
-fits an intercept and two slopes. It uses a prior pilot to fit an inflated
-Gaussian proposal, then draws independent final samples. The
-[CUDA version](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/cuda_logistic_regression.jl)
-transfers results to CPU only between the two stages and for the final summary.
-The [adaptive Student-t example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/adaptive_student_t.jl)
-explains scale versus covariance, weighted functionals, and optional CUDA transfer.
-
-Build this manual from a checkout with:
-
-```sh
-julia --project=docs -e 'using Pkg; Pkg.instantiate()'
-julia --project=docs docs/make.jl
-```
-
-Open `docs/build/index.html`. Documenter checks doctests, exported docstrings,
-and links. CI runs the CPU tests on Linux, macOS, and Windows, and publishes
-this manual from `main`. Accelerator checks remain explicit real-hardware
-validators listed in [Validation and support](@ref).
+Weighted estimates need not resemble unweighted sample averages.
+A large weight ESS does not prove that a proposal found every mode or tail.
+The [results guide](@ref results-guide) explains these distinctions before introducing diagnostics.

@@ -2,8 +2,9 @@
     AbstractSampleTransform
 
 Abstract supertype for transforms from unconstrained coordinates to a logical
-sample value. Forward log Jacobians belong to the proposal's change-of-variables
-density.
+sample value. A `TransformedProposal` subtracts the forward log Jacobian from
+its base proposal density. A sampler's `transform=` adds it to the logical
+target composed with the transform. Apply each change of variables once.
 """
 abstract type AbstractSampleTransform end
 
