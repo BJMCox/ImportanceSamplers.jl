@@ -128,6 +128,7 @@ function _scale_local_weights!(
     return nothing
 end
 
+# Keep local-memory accesses checked here too, including group bounds.
 @kernel function _local_weighted_means_kernel!(
     candidate_locations,
     proposal_maxima,
@@ -146,66 +147,66 @@ end
     group = @localmem Int (4,)
 
     if lane == 1
-        @inbounds group[4] = proposal_group + proposal_offset - 1
+        group[4] = proposal_group + proposal_offset - 1
         first_sample = 1
-        for prior_proposal in 1:(@inbounds(group[4]) - 1)
-            first_sample += @inbounds counts[prior_proposal, round]
+        for prior_proposal in 1:(group[4] - 1)
+            first_sample += counts[prior_proposal, round]
         end
-        @inbounds group[1] = first_sample
-        @inbounds group[2] = first_sample + counts[group[4], round] - 1
-        @inbounds group[3] = 1
+        group[1] = first_sample
+        group[2] = first_sample + counts[group[4], round] - 1
+        group[3] = 1
     end
     @synchronize()
 
     lane_total = zero(eltype(scaled_weights))
-    for sample in (@inbounds(group[1]) + lane - 1):lane_count:(@inbounds(group[2]))
+    for sample in (group[1] + lane - 1):lane_count:group[2]
         lane_total += @inbounds scaled_weights[sample]
     end
-    @inbounds partials[lane] = lane_total
+    partials[lane] = lane_total
     @synchronize()
     for offset in _LOCAL_REDUCTION_OFFSETS
         if lane <= offset
-            @inbounds partials[lane] += partials[lane + offset]
+            partials[lane] += partials[lane + offset]
         end
         @synchronize()
     end
     if lane == 1
-        @inbounds weight_sum[1] = partials[1]
-        @inbounds group[3] = isfinite(weight_sum[1]) &&
-                             weight_sum[1] > zero(eltype(scaled_weights)) ? 1 : 0
+        weight_sum[1] = partials[1]
+        group[3] = isfinite(weight_sum[1]) &&
+                   weight_sum[1] > zero(eltype(scaled_weights)) ? 1 : 0
     end
     @synchronize()
     for coordinate in 1:dimension
         lane_moment = zero(eltype(scaled_weights))
-        for sample in (@inbounds(group[1]) + lane - 1):lane_count:(@inbounds(group[2]))
+        for sample in (group[1] + lane - 1):lane_count:group[2]
             lane_moment += @inbounds(scaled_weights[sample]) *
                            _population_sample_coordinate(samples, coordinate, sample)
         end
-        @inbounds partials[lane] = lane_moment
+        partials[lane] = lane_moment
         @synchronize()
         for offset in _LOCAL_REDUCTION_OFFSETS
             if lane <= offset
-                @inbounds partials[lane] += partials[lane + offset]
+                partials[lane] += partials[lane + offset]
             end
             @synchronize()
         end
-        if lane == 1 && @inbounds(group[3]) == 1
-            value = @inbounds(partials[1]) / @inbounds(weight_sum[1])
+        if lane == 1 && group[3] == 1
+            value = partials[1] / weight_sum[1]
             if isfinite(value)
                 _store_population_location!(
                     candidate_locations,
                     coordinate,
-                    @inbounds(group[4]),
+                    group[4],
                     value,
                 )
             else
-                @inbounds group[3] = 0
+                group[3] = 0
             end
         end
         @synchronize()
     end
-    if lane == 1 && @inbounds(group[3]) == 0
-        @inbounds proposal_maxima[group[4]] = eltype(proposal_maxima)(NaN)
+    if lane == 1 && group[3] == 0
+        proposal_maxima[group[4]] = eltype(proposal_maxima)(NaN)
     end
 end
 
