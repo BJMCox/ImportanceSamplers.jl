@@ -53,6 +53,41 @@ scheduling. The current environment pins `5fcb74c1a7c19bedf95795644fb6296901d25d
 It does not relabel archived measurements or establish a cross-version speedup.
 Each report records its measured revision in addition to the package version.
 
+## Conditional signal-background proposal
+
+`signal_background_conditional.jl` compares LAIS-RAM with a model-specific
+conditional proposal used through ordinary importance sampling:
+
+```sh
+julia --threads=16 --project=benchmark/comparison benchmark/comparison/signal_background_conditional.jl signal-conditional.toml
+julia --threads=16 --project=benchmark/comparison benchmark/comparison/signal_background_conditional.jl --cuda signal-conditional-cuda.toml
+julia --project=benchmark/comparison benchmark/comparison/signal_background_conditional.jl --report signal-conditional-cuda.toml
+```
+
+Use a Git checkout and the committed manifest. Each run returns 262,144 weighted
+draws. The conditional workflow first draws 65,536 CPU LAIS samples, fits a
+proposal, discards the pilot draws, and uses an independent production stream.
+Both workflows retain LAIS's separate 4,096-draw width pilot. All pilot,
+fitting, setup, transfer, production and final-mean costs are timed.
+
+The frozen proposal has three four-dimensional Student-t components, 5% of
+the exact global prior, and five conditionally independent Student-t detector
+effects. All Student-t laws have eight degrees of freedom. The full mixture
+density enters every weight. This does not alter LAIS or the target model.
+The native adapter uses private package hooks and stays in this benchmark.
+
+Six fresh seeds alternate workflow order. BenchmarkTools measures each complete
+run once after compilation. The TOML records elapsed and GC times, host
+allocations, load, moments, weights' ESS, versions, and source/data hashes.
+The script refuses to overwrite a result file and can print partial saved runs.
+CPU and CUDA tables remain separate. Fitting stays on CPU for both paths.
+CUDA production keeps proposal parameters, target data, draws and weights on
+device until the final mean, apart from the fixed-size failure summary.
+
+The moment checks retain the archived NUTS reference and existing tolerances.
+Neither these checks nor weight ESS certify tail accuracy. The new table does
+not replace the repository's headline results or its reference estimates.
+
 ## Scalar and batch regression targets
 
 `batch.jl` compares explicit batch callbacks with the scalar targets on linear,
