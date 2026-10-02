@@ -91,10 +91,29 @@ end
     sample,
     coordinates,
     offset,
+    exponents,
 )
     logabsjac, reason = _native_inverse_sample!(coordinates, offset, sample, transform)
     iszero(reason) || return base.lognormalizer, _NATIVE_PROPOSAL_INVALID
-    return _native_proposal_logdensity!(base, coordinates, offset) - logabsjac, UInt16(0)
+    logdensity = _native_proposal_logdensity!(base, coordinates, offset,
+        () -> _native_range_logradius!(base, transform, sample, coordinates, offset, exponents))
+    return logdensity - logabsjac, UInt16(0)
+end
+
+function _native_range_logradius!(base, transform, sample, coordinates, offset, exponents)
+    # The ordinary in-place solve consumed the base coordinates. Restore only on failure.
+    _native_inverse_sample!(coordinates, offset, sample, transform)
+    dimension = _gaussian_dimension(base.location)
+    sample_at = i -> coordinates[offset + i - 1]
+    location_at = i -> _packed_sample_coordinate(base.location, i)
+    if base.scale isa _FactorGaussianScale
+        indices = offset:(offset + dimension - 1)
+        return _factor_range_logradius!(view(coordinates, indices), view(exponents, indices),
+            dimension, sample_at, location_at, (i,j) -> base.scale.factor[i,j])
+    end
+    scale_at = base.scale isa _SphericalGaussianScale ?
+               (_ -> base.scale.scale) : (i -> base.scale.scales[i])
+    return _diagonal_range_logradius(dimension, sample_at, location_at, scale_at)
 end
 
 struct _ScaledNormals{A,T}
@@ -122,7 +141,8 @@ end
 end
 
 @inline function _student_t_radial_multiplier(dof, normals, uniforms, offset, uniform_offset)
-    if isone(dof)
+    # Cauchy buffers omit uniforms; keep the gamma branch out of device code.
+    if uniforms isa Nothing || isone(dof)
         denominator = abs(@inbounds normals[offset])
         isfinite(denominator) && denominator > zero(dof) ||
             return zero(dof), _NATIVE_PROPOSAL_DRAW_EXHAUSTED
@@ -175,7 +195,8 @@ function _prepare_mis_normals!(normals, radial::NamedTuple, bank, assignments,
     failures, execution)
     backend = KernelAbstractions.get_backend(normals)
     kernel = _scale_mis_normals_kernel!(backend)
-    kernel(normals, radial.normal, radial.uniform, bank.family, assignments,
+    kernel(normals, radial.normal, isempty(radial.uniform) ? nothing : radial.uniform,
+        bank.family, assignments,
         failures, _mis_dimension(bank); ndrange=length(assignments),
         workgroupsize=_native_workgroupsize(execution, length(assignments)))
     KernelAbstractions.synchronize(backend)
@@ -261,10 +282,15 @@ _factor_batch_lognormalizers(history::_FactorProposalHistory) =
     history.lognormalizers
 _factor_batch_lognormalizers(proposal::_GaussianProposal) =
     proposal.lognormalizer
+_factor_batch_exponent_bound(proposal::_GaussianProposal, slot) =
+    _scale_exponent_bound(proposal.scale)
+_factor_batch_exponent_bound(source, slot) =
+    _exponent_bound_at(source.exponent_bounds, slot)
 
-@inline _packed_radial_logdensity(source, slot, squared_radius) =
+@inline _packed_radial_logdensity(source, slot, squared_radius, coordinate_at, logradius_at, range_risk=false) =
     _radial_logdensity(_radial_family_at(source.family, slot),
-        _packed_gaussian_lognormalizer(source, slot), squared_radius, _mis_dimension(source))
+        _packed_gaussian_lognormalizer(source, slot), squared_radius, _mis_dimension(source),
+        coordinate_at, logradius_at, range_risk)
 
 _factor_batch_location(source, proposal_slot) =
     view(_factor_batch_locations(source), :, proposal_slot)
@@ -285,6 +311,11 @@ function _factor_batch_solve!(scratch, samples, source, slot)
     scratch .= samples .- reshape(location, :, 1)
     LinearAlgebra.ldiv!(LinearAlgebra.LowerTriangular(factor), scratch)
     return scratch
+end
+
+function _factor_batch_solve!(scratch::_RangeSolveScratch, samples, source, slot)
+    values = _factor_batch_solve!(scratch.values, samples, source, slot)
+    return _RangeSolveScratch(values, scratch.exponents)
 end
 
 _factor_batch_supported(device) = false
@@ -319,6 +350,7 @@ _use_factor_batch_path(device, source, ::_DefaultFactorExecution) =
     sample_index,
 )
     T = eltype(bank.lognormalizers)
+    values = _solve_values(solve_scratch)
     squared_radius = zero(T)
     for row in 1:_mis_dimension(bank)
         standardized = _packed_sample_coordinate(sample, row) -
@@ -326,7 +358,7 @@ _use_factor_batch_path(device, source, ::_DefaultFactorExecution) =
         for column in 1:(row - 1)
             standardized -= @inbounds(
                 _packed_gaussian_factor(bank, row, column, proposal_slot) *
-                solve_scratch[column, sample_index]
+                values[column, sample_index]
             )
         end
         standardized /= _packed_gaussian_factor(
@@ -335,10 +367,36 @@ _use_factor_batch_path(device, source, ::_DefaultFactorExecution) =
             row,
             proposal_slot,
         )
-        @inbounds solve_scratch[row, sample_index] = standardized
+        @inbounds values[row, sample_index] = standardized
         squared_radius += abs2(standardized)
     end
-    return _packed_radial_logdensity(bank, proposal_slot, squared_radius)
+    return _packed_radial_logdensity(bank, proposal_slot, squared_radius,
+        coordinate -> values[coordinate, sample_index],
+        () -> _packed_factor_range_logradius!(bank, sample, proposal_slot, solve_scratch, sample_index),
+        _factor_range_risk(_exponent_bound_at(bank.exponent_bounds, proposal_slot), eltype(values)))
+end
+
+function _packed_factor_range_logradius!(source, sample, slot, scratch, sample_index)
+    values = _solve_values(scratch)
+    return _factor_range_logradius!(view(values, :, sample_index),
+        view(_solve_exponents(scratch), :, sample_index), size(values, 1),
+        i -> _packed_sample_coordinate(sample, i),
+        i -> _packed_gaussian_location(source, i, slot),
+        (i,j) -> _packed_gaussian_factor(source, i, j, slot))
+end
+
+@inline function _factor_batch_logdensity(::Type{T}, source, samples, scratch, slot, sample_index) where {T}
+    values = _solve_values(scratch)
+    squared_radius = zero(T)
+    for coordinate in axes(values, 1)
+        squared_radius += abs2(values[coordinate, sample_index])
+    end
+    return _radial_logdensity(_radial_family_at(source.family, slot),
+        _factor_batch_slot_value(_factor_batch_lognormalizers(source), slot),
+        squared_radius, size(values, 1), i -> values[i, sample_index],
+        () -> _packed_factor_range_logradius!(source, view(samples, :, sample_index),
+            slot, scratch, sample_index),
+        _factor_range_risk(_factor_batch_exponent_bound(source, slot), eltype(values)))
 end
 
 @inline _packed_gaussian_location(bank::_PackedDiagonalBank, coordinate, slot) =
@@ -368,7 +426,14 @@ end
         ) / _packed_gaussian_scale(bank, coordinate, proposal_slot)
         squared_radius += abs2(standardized)
     end
-    return _packed_radial_logdensity(bank, proposal_slot, squared_radius)
+    return _packed_radial_logdensity(bank, proposal_slot, squared_radius,
+        coordinate -> (_packed_sample_coordinate(sample, coordinate) -
+            _packed_gaussian_location(bank, coordinate, proposal_slot)) /
+            _packed_gaussian_scale(bank, coordinate, proposal_slot),
+        () -> _diagonal_range_logradius(_mis_dimension(bank),
+            i -> _packed_sample_coordinate(sample, i),
+            i -> _packed_gaussian_location(bank, i, proposal_slot),
+            i -> _packed_gaussian_scale(bank, i, proposal_slot)))
 end
 
 @inline _mis_proposal_logdensity(
@@ -668,6 +733,7 @@ end
     target,
     base,
     transform,
+    exponents,
 )
     slot = @index(Global, Linear)
     normal_offset = (slot - 1) * _native_normal_stride(base) + 1
@@ -705,6 +771,7 @@ end
                     sample,
                     normal_buffer,
                     normal_offset,
+                    exponents,
                 )
                 proposal_reason = iszero(density_reason) ?
                                   _native_proposal_reason(proposal_log) : density_reason
@@ -804,10 +871,11 @@ function _launch_native_fused!(
     base,
     transform,
     execution,
+    exponents,
 )
     if target isa _NativeBatchTarget
         _launch_native_fused!(samples, logweights, failure_record, uniform_buffer,
-            normal_buffer, _deferred_target(target), base, transform, execution)
+            normal_buffer, _deferred_target(target), base, transform, execution, exponents)
         return _finish_batch_weights!(logweights, target.target, samples,
             failure_record.storage, execution; transform)
     end
@@ -821,7 +889,8 @@ function _launch_native_fused!(
         normal_buffer,
         target,
         base,
-        transform;
+        transform,
+        exponents;
         ndrange=length(logweights),
         workgroupsize=_native_workgroupsize(execution, length(logweights)),
     )

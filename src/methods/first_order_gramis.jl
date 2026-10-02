@@ -320,6 +320,7 @@ function _first_order_gramis_factor_bank(bank::ProposalBank)
         _copy_packed_gaussian_factor!(factors, proposal, slot)
         lognormalizers[slot] = proposal.lognormalizer
     end
+    family = _packed_family(bank.proposals)
     return _PackedFactorBank(
         locations,
         factors,
@@ -327,7 +328,8 @@ function _first_order_gramis_factor_bank(bank::ProposalBank)
         logmasses,
         cdf,
         proposal_ids,
-        _packed_family(bank.proposals),
+        family,
+        _factor_exponent_bounds(factors, family),
     )
 end
 
@@ -711,7 +713,7 @@ function _allocate_random_buffers(
         normal, capacity; capacity=max(sample_budget, dimension * dimension),
     )
     return _RandomBuffers(uniform, normal, failure_scratch,
-        _allocate_radial_buffers(prototype, method_state.committed.family, capacity))
+        _allocate_radial_buffers(prototype, method_state.committed.family, capacity), nothing)
 end
 
 function _copy_algorithm(device, algorithm::FirstOrderGRAMIS)

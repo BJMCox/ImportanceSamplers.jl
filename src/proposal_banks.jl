@@ -119,7 +119,7 @@ struct _PackedDiagonalBank{L,S,N,M,C,I,R,F}
     family::F
 end
 
-struct _PackedFactorBank{L,F,N,M,C,I,R}
+struct _PackedFactorBank{L,F,N,M,C,I,R,E}
     locations::L
     factors::F
     lognormalizers::N
@@ -127,6 +127,7 @@ struct _PackedFactorBank{L,F,N,M,C,I,R}
     cdf::C
     proposal_ids::I
     family::R
+    exponent_bounds::E
 end
 
 struct _PackedStudentTFamily{D}
@@ -136,7 +137,13 @@ struct _PackedStudentTFamily{D}
     uniform_stride::Int
 end
 
+_exponent_bounds(bank::_PackedFactorBank) = bank.exponent_bounds
+_exponent_bounds(bank::_PackedDiagonalBank) = nothing
+
 Adapt.@adapt_structure _PackedStudentTFamily
+
+_range_exponents(prototype, ::Union{StudentTFamily,_PackedStudentTFamily}, dims...) =
+    similar(prototype, Int, dims...)
 
 function _validate_radial_bank_family(proposals)
     family_type = typeof(first(proposals).family)
@@ -197,6 +204,7 @@ function _population_state_bank(bank::_PackedFactorBank)
         bank.cdf,
         bank.proposal_ids,
         bank.family,
+        isnothing(bank.exponent_bounds) ? nothing : copy(bank.exponent_bounds),
     )
 end
 
@@ -224,6 +232,7 @@ function _copy_packed_bank(device, bank::_PackedFactorBank;
         _copy_to_device(device, bank.cdf),
         _copy_to_device(device, bank.proposal_ids),
         _copy_to_device(device, bank.family),
+        _copy_to_device(device, bank.exponent_bounds),
     )
 end
 
@@ -339,6 +348,7 @@ function _pack_native_radial_storage(
     for (slot, proposal) in pairs(proposals)
         _copy_packed_gaussian_factor!(factors, proposal, slot)
     end
+    family = _packed_family(proposals)
     return _PackedFactorBank(
         locations,
         factors,
@@ -346,7 +356,8 @@ function _pack_native_radial_storage(
         logmasses,
         cdf,
         proposal_ids,
-        _packed_family(proposals),
+        family,
+        _factor_exponent_bounds(factors, family),
     )
 end
 

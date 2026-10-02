@@ -201,7 +201,7 @@ function _resampling_cdf!(
         Val(:cdf_maximum),
     )
     maximum_logweight == -Inf && throw(AllZeroWeightsError())
-    cdf .= exp.(logweights .- maximum_logweight)
+    cdf .= exp.(eltype(cdf).(logweights) .- maximum_logweight)
     total = sum(cdf)
     _record_device_scalar_transfer!(
         transfers,
@@ -254,8 +254,8 @@ end
 function _resample(rng, result, count, ::MultinomialResampling)
     device = _storage_device(result.logweights)
     return _with_backend_device(device) do
-        cdf = similar(result.logweights)
-        uniforms = similar(result.logweights, count)
+        cdf = similar(result.logweights, promote_type(eltype(result.logweights), Float32))
+        uniforms = similar(cdf, count)
         ancestors = similar(result.logweights, Int, count)
         destination = _allocate_resampled_storage(result.samples, count)
         _resampling_cdf!(cdf, result.logweights, _result_transfers(result))

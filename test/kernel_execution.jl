@@ -1019,6 +1019,7 @@ end
         zeros(8),
         ImportanceSamplers._NoNativeFailureScratch(),
         nothing,
+        nothing,
     )
 
     @test ImportanceSamplers._fill_random_buffers!(rng, buffers) === buffers

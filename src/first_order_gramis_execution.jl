@@ -2211,6 +2211,7 @@ function _copy_first_order_gramis_population!(destination, source)
     copyto!(destination.locations, source.locations)
     copyto!(destination.factors, source.factors)
     copyto!(destination.lognormalizers, source.lognormalizers)
+    _copy_exponent_bounds!(destination.exponent_bounds, source.exponent_bounds)
     return nothing
 end
 
@@ -2396,6 +2397,8 @@ function _validate_first_order_gramis_candidate_factors!(
             ),
         )
         candidate.lognormalizers[proposal_slot] = lognormalizer
+        _set_factor_exponent_bound!(candidate.exponent_bounds, proposal_slot,
+            view(candidate.factors, :, :, proposal_slot))
     end
     return nothing
 end
@@ -2407,6 +2410,7 @@ end
     lognormalizers,
     status,
     family,
+    exponent_bounds,
 )
     proposal_slot = @index(Global, Linear)
     ready, reason, value, lognormalizer = _candidate_factor_validation(
@@ -2421,6 +2425,8 @@ end
             _record_native_failure!(failure_storage, proposal_slot, 0, reason)
         else
             @inbounds lognormalizers[proposal_slot] = lognormalizer
+            _set_factor_exponent_bound!(exponent_bounds, proposal_slot,
+                view(factors, :, :, proposal_slot))
         end
     end
 end
@@ -2451,7 +2457,8 @@ function _launch_gramis_factor_validation!(::Nothing, candidate, status, executi
         candidate.factors,
         candidate.lognormalizers,
         status,
-        candidate.family;
+        candidate.family,
+        candidate.exponent_bounds;
         ndrange=proposal_count,
         workgroupsize=_population_workgroupsize(
             execution,
@@ -2620,8 +2627,11 @@ _fit_prepared_gramis_covariances!(::Nothing, state, round, execution) =
     _fit_local_covariances!(state, round, execution)
 _minimum_prepared_gramis_distance(::Nothing, arguments...) =
     _minimum_first_order_gramis_whitened_distance(arguments...)
-_copy_prepared_gramis_lognormalizers!(::Nothing, state) =
+function _copy_prepared_gramis_lognormalizers!(::Nothing, state)
     copyto!(state.candidate.lognormalizers, state.run.lognormalizers)
+    _copy_exponent_bounds!(state.candidate.exponent_bounds, state.run.exponent_bounds)
+    return nothing
+end
 function _clear_prepared_gramis_repulsion!(::Nothing, workspace)
     fill!(workspace.repulsion, zero(eltype(workspace.repulsion)))
     fill!(workspace.collision_counts, _GRAMIS_COLLISIONS_UNAVAILABLE)

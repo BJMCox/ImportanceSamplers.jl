@@ -196,7 +196,8 @@ function (phase::_MomentFitPhase)(workspace, history::IS._FactorProposalHistory,
     IS._scale_covariance_factor!(workspace.candidate_scale, history.family)
     IS._finish_gaussian_factor_candidate_kernel!(backend)(workspace.candidate_mean,
         workspace.candidate_scale, workspace.candidate_lognormalizer, failure_storage,
-        count + 1, history.family; ndrange=length(workspace.candidate_scale))
+        count + 1, history.family, workspace.candidate_exponent_bound;
+        ndrange=length(workspace.candidate_scale))
     return moments, success
 end
 
@@ -255,6 +256,8 @@ function _reset_moment_history!(history::IS._FactorProposalHistory, record)
         history.means[:, 2:end] = zero.(history.means[:, 2:end])
         history.factors[:, :, 2:end] = zero.(history.factors[:, :, 2:end])
         history.lognormalizers[2:end] = zero.(history.lognormalizers[2:end])
+        isnothing(history.exponent_bounds) ||
+            (history.exponent_bounds[2:end] = zero.(history.exponent_bounds[2:end]))
     end
     fill!(record.storage, zero(UInt64))
     return nothing
@@ -757,6 +760,8 @@ function _store_moment_candidate!(history::IS._FactorProposalHistory, slot, work
     history.means[:, slot] = workspace.candidate_mean
     history.factors[:, :, slot] = workspace.candidate_scale
     history.lognormalizers[slot:slot] = workspace.candidate_lognormalizer
+    isnothing(history.exponent_bounds) ||
+        (history.exponent_bounds[slot:slot] = workspace.candidate_exponent_bound)
     return nothing
 end
 
@@ -824,8 +829,9 @@ function IS._logweight_moments(values::_ReactantStorage)
 end
 
 function _logsumexp(values)
-    maximum_logweight = maximum(values; dims=1)
-    shifted = exp.(values .- ifelse.(isfinite.(maximum_logweight), maximum_logweight, zero(eltype(values))))
+    A = promote_type(eltype(values), Float32)
+    maximum_logweight = A.(maximum(values; dims=1))
+    shifted = exp.(A.(values) .- ifelse.(isfinite.(maximum_logweight), maximum_logweight, zero(A)))
     return vcat(maximum_logweight, sum(shifted; dims=1))
 end
 
@@ -834,10 +840,12 @@ function IS._logsumexp_accumulator(values::_ReactantStorage)
     return IS._LogSumExpAccumulator(Array(_retained_call(_logsumexp, values))...)
 end
 
-IS._normalized_weights(values::_ReactantStorage, total) = Reactant.@jit IS._normalized_weights(values, total)
-# A retained executable needs the total as an input, not a compile-time constant.
-IS._normalized_weights(values::Reactant.ConcreteRArray, total) =
-    _retained_call(IS._normalized_weights, values, _transition_number(values, total))
+IS._normalized_weights(values::_ReactantStorage, maximum_logweight, total) =
+    Reactant.@jit IS._normalized_weights(values, maximum_logweight, total)
+# Both scalars must remain live inputs to the retained executable.
+IS._normalized_weights(values::Reactant.ConcreteRArray, maximum_logweight, total) =
+    _retained_call(IS._normalized_weights, values,
+        _transition_number(values, maximum_logweight), _transition_number(values, total))
 
 function _materialized_statistic(f, arguments...)
     value = f(arguments...)

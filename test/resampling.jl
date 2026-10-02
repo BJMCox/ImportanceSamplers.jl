@@ -5,6 +5,12 @@ using Random
 using Statistics
 
 @testset "public multinomial resampling" begin
+    points = Float32.(1:65536)
+    half = WeightedSamples(points, zeros(Float16, length(points)))
+    single = WeightedSamples(points, zeros(Float32, length(points)))
+    @test resample(Random.Xoshiro(1), half, 16).samples ==
+          resample(Random.Xoshiro(1), single, 16).samples
+
     result = WeightedSamples([10.0, 20.0, 30.0], [-Inf, 0.0, -Inf])
 
     draws = resample(Random.Xoshiro(11), result, 5)

@@ -50,14 +50,15 @@ struct _ScalarProposalHistory{M,S,N,R}
     family::R
 end
 
-struct _FactorProposalHistory{M,F,N,R}
+struct _FactorProposalHistory{M,F,N,R,E}
     means::M
     factors::F
     lognormalizers::N
     family::R
+    exponent_bounds::E
 end
 
-struct _MomentWorkspace{S,T,N,W,P,C,V,M,F,L}
+struct _MomentWorkspace{S,T,N,W,P,C,V,M,F,L,E}
     samples::S
     logtargets::T
     lognumerators::N
@@ -68,6 +69,7 @@ struct _MomentWorkspace{S,T,N,W,P,C,V,M,F,L}
     candidate_mean::M
     candidate_scale::F
     candidate_lognormalizer::L
+    candidate_exponent_bound::E
 end
 
 struct _PreparedMomentSampler{S,O,L,H,W}
@@ -103,7 +105,9 @@ function _allocate_gaussian_history(prototype, proposal::_NativeRadialProposal, 
     factors = similar(prototype, T, dimension, dimension, rounds)
     copyto!(view(means, :, 1), location)
     _store_gaussian_factor!(view(factors, :, :, 1), proposal.scale)
-    return _FactorProposalHistory(means, factors, lognormalizers, proposal.family)
+    bounds = _allocate_exponent_bounds(prototype, proposal.family, rounds)
+    _set_factor_exponent_bound!(bounds, 1, view(factors, :, :, 1))
+    return _FactorProposalHistory(means, factors, lognormalizers, proposal.family, bounds)
 end
 
 function _store_gaussian_factor!(factor, scale::_SphericalGaussianScale)
@@ -154,6 +158,8 @@ function _allocate_gaussian_workspace(
         candidate_scale = similar(prototype, T, dimension, dimension)
     end
     candidate_lognormalizer = similar(prototype, T, 1)
+    candidate_exponent_bound = location isa _NativeGaussianFloat ? nothing :
+        _allocate_exponent_bounds(prototype, proposal.family, 1)
     return _MomentWorkspace(
         samples,
         logtargets,
@@ -165,6 +171,7 @@ function _allocate_gaussian_workspace(
         candidate_mean,
         candidate_scale,
         candidate_lognormalizer,
+        candidate_exponent_bound,
     )
 end
 
@@ -252,7 +259,10 @@ function _allocate_random_buffers(
         maximum_round_size; capacity=sample_budget,
     )
     return _RandomBuffers(uniform, normal, failure_scratch,
-        _allocate_radial_buffers(prototype, method_state.history.family, maximum_round_size))
+        _allocate_radial_buffers(prototype, method_state.history.family, maximum_round_size),
+        method_state.history isa _FactorProposalHistory ?
+        _range_exponents(prototype, method_state.history.family,
+            size(method_state.workspace.centered_scaled)...) : nothing)
 end
 
 function _copy_accelerator_algorithm(
@@ -280,6 +290,7 @@ function _copy_gaussian_history(device, history::_FactorProposalHistory)
         _copy_to_device(device, history.factors),
         _copy_to_device(device, history.lognormalizers),
         _convert_radial_family(eltype(means), history.family),
+        _copy_to_device(device, history.exponent_bounds),
     )
 end
 
@@ -295,6 +306,7 @@ function _copy_gaussian_workspace(device, workspace::_MomentWorkspace)
         _copy_to_device(device, workspace.candidate_mean),
         _copy_to_device(device, workspace.candidate_scale),
         _copy_to_device(device, workspace.candidate_lognormalizer),
+        _copy_to_device(device, workspace.candidate_exponent_bound),
     )
 end
 
