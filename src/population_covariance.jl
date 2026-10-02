@@ -116,19 +116,14 @@ end
     local_logweights,
     first_sample,
     last_sample,
+    maximum_logweight,
     power,
     ::Type{T},
 ) where {T}
-    maximum_scaled = T(-Inf)
-    for sample_index in first_sample:last_sample
-        scaled = power * T(@inbounds(local_logweights[sample_index]))
-        maximum_scaled = max(maximum_scaled, scaled)
-    end
     total = zero(T)
     square_total = zero(T)
     for sample_index in first_sample:last_sample
-        scaled = power * T(@inbounds(local_logweights[sample_index]))
-        shifted_weight = exp(scaled - maximum_scaled)
+        shifted_weight = T(exp(power * (@inbounds(local_logweights[sample_index]) - maximum_logweight)))
         total += shifted_weight
         square_total += abs2(shifted_weight)
     end
@@ -204,6 +199,7 @@ function _population_local_weights_slot!(
             local_logweights,
             first_sample,
             last_sample,
+            maximum_logweight,
             power,
             T,
         )
@@ -221,15 +217,9 @@ function _population_local_weights_slot!(
         return nothing
     end
 
-    maximum_scaled = T(-Inf)
-    for sample_index in first_sample:last_sample
-        scaled = feasible_lower * T(@inbounds(local_logweights[sample_index]))
-        maximum_scaled = max(maximum_scaled, scaled)
-    end
     total = zero(T)
     for sample_index in first_sample:last_sample
-        scaled = feasible_lower * T(@inbounds(local_logweights[sample_index]))
-        weight = exp(scaled - maximum_scaled)
+        weight = T(exp(feasible_lower * (@inbounds(local_logweights[sample_index]) - maximum_logweight)))
         @inbounds normalized_weights[sample_index] = weight
         total += weight
     end
@@ -270,8 +260,8 @@ end
     squared_totals = @localmem eltype(normalized_weights) (
         _POPULATION_REDUCTION_WORKGROUP_SIZE,
     )
-    # accepted power, rejected power, accepted ESS, trial power, maximum, total
-    tempering = @localmem eltype(normalized_weights) (6,)
+    # accepted power, rejected power, accepted ESS, trial power, accepted total
+    tempering = @localmem eltype(normalized_weights) (5,)
     group = @localmem eltype(starts) (3,)
     if lane == 1
         @inbounds group[1] = proposal_slot
@@ -357,24 +347,11 @@ end
     for _ in 1:max_iterations
         lane == 1 && (@inbounds tempering[4] = (tempering[1] + tempering[2]) / T(2))
         @synchronize()
-        lane_maximum = T(-Inf)
-        for sample in (@inbounds(group[2]) + lane - 1):lane_count:(@inbounds(group[3]))
-            scaled = @inbounds(tempering[4]) * T(@inbounds(local_logweights[sample]))
-            lane_maximum = max(lane_maximum, scaled)
-        end
-        @inbounds maxima[lane] = lane_maximum
-        @synchronize()
-        for offset in _POPULATION_REDUCTION_OFFSETS
-            if lane <= offset
-                @inbounds maxima[lane] = max(maxima[lane], maxima[lane + offset])
-            end
-            @synchronize()
-        end
         lane_total = zero(T)
         lane_square_total = zero(T)
         for sample in (@inbounds(group[2]) + lane - 1):lane_count:(@inbounds(group[3]))
-            scaled = @inbounds(tempering[4]) * T(@inbounds(local_logweights[sample]))
-            weight = exp(scaled - @inbounds(maxima[1]))
+            relative = @inbounds(local_logweights[sample] - maxima[1])
+            weight = T(exp(@inbounds(tempering[4]) * relative))
             lane_total += weight
             lane_square_total += abs2(weight)
         end
@@ -393,8 +370,7 @@ end
             if ess >= T(@inbounds(thresholds[group[1], round]))
                 @inbounds tempering[1] = tempering[4]
                 @inbounds tempering[3] = ess
-                @inbounds tempering[5] = maxima[1]
-                @inbounds tempering[6] = totals[1]
+                @inbounds tempering[5] = totals[1]
             else
                 @inbounds tempering[2] = tempering[4]
             end
@@ -404,9 +380,9 @@ end
     end
     if @inbounds(tempering[1]) > zero(T)
         for sample in (@inbounds(group[2]) + lane - 1):lane_count:(@inbounds(group[3]))
-            scaled = @inbounds(tempering[1]) * T(@inbounds(local_logweights[sample]))
+            relative = @inbounds(local_logweights[sample] - maxima[1])
             @inbounds normalized_weights[sample] =
-                exp(scaled - @inbounds(tempering[5])) * inv(@inbounds(tempering[6]))
+                T(exp(@inbounds(tempering[1]) * relative)) * inv(@inbounds(tempering[5]))
         end
         if lane == 1
             @inbounds local_ess[group[1]] = tempering[3]

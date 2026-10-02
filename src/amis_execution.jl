@@ -209,7 +209,7 @@ function _launch_prefilled_amis_factor_batch!(
         for proposal_slot in 1:(round - 1)
             _launch_factor_batch_logmixture!(
                 view(lognumerators, new_indices),
-                view(solve_scratch, :, new_indices),
+                _solve_view(solve_scratch, :, new_indices),
                 new_samples,
                 history,
                 proposal_slot,
@@ -228,7 +228,7 @@ function _launch_prefilled_amis_factor_batch!(
         current_round_ids = view(round_ids, current_indices)
         _launch_factor_batch_logmixture!(
             view(lognumerators, current_indices),
-            view(solve_scratch, :, current_indices),
+            _solve_view(solve_scratch, :, current_indices),
             _sample_view(samples, current_indices),
             history,
             round,
@@ -387,8 +387,9 @@ function _preflight_amis_kernels(
     )
     use_factor_batch = history isa _FactorProposalHistory &&
                        _use_factor_batch_path(device, history, factor_execution)
-    solve_scratch = use_factor_batch ? workspace.centered_scaled :
-                    _fused_mis_solve_scratch(workspace.centered_scaled, backend)
+    solve_scratch = _range_scratch(workspace.centered_scaled, buffers.range_exponents)
+    solve_scratch = use_factor_batch ? solve_scratch :
+                    _fused_mis_solve_scratch(solve_scratch, backend)
 
     round_kernel = _gaussian_round_launch_kernel!(backend)
     for argument in (
@@ -456,9 +457,9 @@ function _preflight_amis_kernels(
         append_batch_kernel = _append_factor_batch_logmixture_kernel!(backend)
         for argument in (
             view(workspace.lognumerators, new_indices),
-            view(workspace.centered_scaled, :, new_indices),
-            history.lognormalizers,
-            history.family,
+            _solve_view(solve_scratch, :, new_indices),
+            samples,
+            history,
             method_state.logcounts,
             representative_round,
             buffers.failure_scratch.record.storage,

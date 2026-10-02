@@ -73,6 +73,7 @@ function _copy_cais_bank!(
     copyto!(destination.locations, source.locations)
     copyto!(destination.factors, source.factors)
     copyto!(destination.lognormalizers, source.lognormalizers)
+    _copy_exponent_bounds!(destination.exponent_bounds, source.exponent_bounds)
     return nothing
 end
 
@@ -94,6 +95,7 @@ end
     lognormalizers,
     fitted_factors,
     family,
+    exponent_bounds,
 )
     proposal_slot = @index(Global, Linear)
     T = eltype(lognormalizers)
@@ -103,6 +105,8 @@ end
     end
     @inbounds lognormalizers[proposal_slot] =
         _radial_lognormalizer(_radial_family_at(family, proposal_slot), T, size(fitted_factors, 1), logabsdet)
+    _set_factor_exponent_bound!(exponent_bounds, proposal_slot,
+        view(fitted_factors, :, :, proposal_slot))
 end
 
 function _install_cais_factors!(
@@ -148,6 +152,8 @@ function _update_cais_lognormalizers!(
         end
         candidate.lognormalizers[proposal_slot] =
             _radial_lognormalizer(_radial_family_at(candidate.family, proposal_slot), T, dimension, logabsdet)
+        _set_factor_exponent_bound!(_exponent_bounds(candidate), proposal_slot,
+            view(fitted_factors, :, :, proposal_slot))
     end
     return nothing
 end
@@ -159,7 +165,8 @@ function _update_cais_lognormalizers!(candidate, fitted_factors, execution::_Ker
     kernel(
         candidate.lognormalizers,
         fitted_factors,
-        candidate.family;
+        candidate.family,
+        _exponent_bounds(candidate);
         ndrange=proposal_count,
         workgroupsize=_population_workgroupsize(
             execution,
@@ -377,9 +384,9 @@ function _preflight_accelerator_method(
             _finish_equal_allocation_generating_batch_kernel!(backend)
         for argument in (
             view(output.logweights, group),
-            view(workspace.solve_scratch, :, group),
-            bank.lognormalizers,
-            bank.family,
+            _solve_view(workspace.solve_scratch, :, group),
+            view(views.samples, :, group),
+            bank,
             1,
             view(output.proposal_ids, group),
             buffers.failure_scratch.record.storage,

@@ -195,11 +195,12 @@ end
 struct _NoSampleTransform end
 struct _NoRandomBuffers end
 
-struct _RandomBuffers{U,N,F,R}
+struct _RandomBuffers{U,N,F,R,E}
     uniform::U
     normal::N
     failure_scratch::F
     radial::R
+    range_exponents::E
 end
 
 struct _PackedStaticMISRandomBuffers{U,N,A,S,F,R}
@@ -333,7 +334,14 @@ function _allocate_random_buffers(device, proposal, nsamples)
     uniform = similar(prototype, T, _native_uniform_count(proposal, nsamples))
     normal = similar(prototype, T, _native_normal_count(proposal, nsamples))
     failure_scratch = _allocate_native_failure_scratch(normal, nsamples)
-    return _RandomBuffers(uniform, normal, failure_scratch, nothing)
+    return _RandomBuffers(uniform, normal, failure_scratch, nothing,
+        _native_range_exponents(proposal, normal, length(normal)))
+end
+
+function _native_range_exponents(proposal, prototype, count)
+    base, _ = _native_fused_components(proposal)
+    return base isa _StudentTProposal && base.scale isa _FactorGaussianScale ?
+           similar(prototype, Int, count) : nothing
 end
 
 function _allocate_random_buffers(
@@ -453,6 +461,7 @@ function _launch_native_batch!(samples, logweights, failure_record, buffers, tar
             base,
             transform,
             execution.cpu_execution,
+            buffers.range_exponents,
         )
     end
     return nothing

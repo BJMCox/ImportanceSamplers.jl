@@ -3,6 +3,11 @@ using ImportanceSamplers, Reactant, Statistics, Test
 @testset "Reactant resident statistics" begin
     device = ImportanceSamplers.MLDataDevices.with_eltype(
         ImportanceSamplers.MLDataDevices.ReactantDevice(), nothing)
+    for offset in (0f0, 1f20)
+        shifted = device(WeightedSamples(Float32[1, 3], fill(offset, 2)))
+        @test Array(normalized_weights(shifted)) == Float32[0.5, 0.5]
+        @test Float32(mean(shifted)) == 2f0
+    end
     points = Float32[1 2 4 8; 3 -1 2 0]
     logs = Float32[-Inf, 0, log(2), 0]
     result = device(WeightedSamples(points, logs))

@@ -8,8 +8,10 @@ struct _LogSumExpAccumulator{T<:AbstractFloat}
     scaled_sum::T
 end
 
-@inline _logsumexp_accumulator(value::T) where {T<:AbstractFloat} =
-    _LogSumExpAccumulator(value, value == -Inf ? zero(T) : one(T))
+@inline function _logsumexp_accumulator(value::T) where {T<:AbstractFloat}
+    widened = convert(promote_type(T, Float32), value)
+    return _LogSumExpAccumulator(widened, value == -Inf ? zero(widened) : one(widened))
+end
 
 @inline function _merge_logsumexp_accumulators(
     left::_LogSumExpAccumulator{T},
@@ -559,7 +561,7 @@ function lognormalizer(result::WeightedSamples)
     return _with_backend_device(_storage_device(result.logweights)) do
         logweight_sum = _logweight_sum(result)
         logweight_sum == -Inf && return logweight_sum
-        T = eltype(result.logweights)
+        T = typeof(logweight_sum)
         return logweight_sum - log(T(length(result)))
     end
 end
@@ -582,31 +584,41 @@ The raw `result.logweights` remain unchanged. If every raw log weight is
 `-Inf`, throw [`AllZeroWeightsError`](@ref) rather than inventing uniform
 weights. For a device-resident result, the returned weight array stays on the
 same device.
+Float16 log weights use Float32 accumulation and normalized output.
 """
 function normalized_weights(result::_AbstractWeightedSamples)
     return _with_backend_device(_storage_device(result.logweights)) do
-        logweight_sum = _logweight_sum(result)
-        logweight_sum == -Inf && throw(AllZeroWeightsError())
-        return _normalized_weights(result.logweights, logweight_sum)
+        accumulator = _result_logsumexp_accumulator(result)
+        accumulator.maximum == -Inf && throw(AllZeroWeightsError())
+        return _normalized_weights(result.logweights, accumulator.maximum, accumulator.scaled_sum)
     end
 end
 
-_normalized_weights(logweights, logweight_sum) = exp.(logweights .- logweight_sum)
+_normalized_weights(logweights, maximum_logweight, scaled_sum) =
+    exp.(logweights .- maximum_logweight) .* inv(scaled_sum)
 
-function _logweight_sum(result::_AbstractWeightedSamples)
-    _is_host_storage(result.logweights) &&
-        return LogExpFunctions.logsumexp(result.logweights)
+_logweight_sum(result::_AbstractWeightedSamples) =
+    _finish_logsumexp(_result_logsumexp_accumulator(result))
+
+function _result_logsumexp_accumulator(result::_AbstractWeightedSamples)
     accumulator = _logsumexp_accumulator(result.logweights)
     _record_device_scalar_transfer!(
         _result_transfers(result),
         result.logweights,
         typeof(accumulator),
     )
-    return _finish_logsumexp(accumulator)
+    return accumulator
 end
 
 function _logsumexp_accumulator(logweights::AbstractArray{T}) where {T}
-    neutral = _LogSumExpAccumulator(T(-Inf), zero(T))
+    A = promote_type(T, Float32)
+    neutral = _LogSumExpAccumulator(A(-Inf), zero(A))
+    if _is_host_storage(logweights)
+        maximum_logweight = A(maximum(logweights; init=T(-Inf)))
+        maximum_logweight == -Inf && return neutral
+        total = sum(value -> exp(A(value) - maximum_logweight), logweights)
+        return _LogSumExpAccumulator(maximum_logweight, total)
+    end
     return AcceleratedKernels.mapreduce(
         _logsumexp_accumulator, _merge_logsumexp_accumulators, logweights;
         init=neutral, neutral,

@@ -175,6 +175,7 @@ function _preflight_gaussian_fit_kernels(device, method_state, buffers)
             buffers.failure_scratch.record.storage,
             last_sample + 1,
             history.family,
+            workspace.candidate_exponent_bound,
         )
             _preflight_kernel_argument(device, finish_kernel, argument)
         end
@@ -393,6 +394,7 @@ function _fit_moment_proposal!(
         ),
     )
     workspace.candidate_lognormalizer[1] = candidate_lognormalizer
+    _set_factor_exponent_bound!(workspace.candidate_exponent_bound, 1, candidate_factor)
     return nothing
     catch cause
         _throw_gaussian_stage(phase, cause)
@@ -475,6 +477,7 @@ end
     failure_storage,
     failure_index,
     family,
+    candidate_exponent_bound,
 )
     index = @index(Global, Linear)
     dimension = size(candidate_factor, 1)
@@ -490,6 +493,7 @@ end
         lognormalizer =
             _radial_lognormalizer(family, T, dimension, logabsdet)
         candidate_lognormalizer[1] = lognormalizer
+        _set_factor_exponent_bound!(candidate_exponent_bound, 1, candidate_factor)
         _gaussian_factor_candidate_valid(
             candidate_mean,
             candidate_factor,
@@ -603,7 +607,8 @@ function _fit_moment_proposal!(
         workspace.candidate_lognormalizer,
         failure_storage,
         sample_count + 1,
-        history.family;
+        history.family,
+        workspace.candidate_exponent_bound;
         ndrange=length(workspace.candidate_scale),
     )
     KernelAbstractions.synchronize(backend)
@@ -638,6 +643,8 @@ function _store_gaussian_candidate!(
         view(history.lognormalizers, slot:slot),
         workspace.candidate_lognormalizer,
     )
+    _copy_exponent_bounds!(_exponent_bounds_view(history.exponent_bounds, slot:slot),
+        workspace.candidate_exponent_bound)
     return nothing
 end
 
@@ -660,6 +667,7 @@ function _store_gaussian_proposal!(
     copyto!(view(history.means, :, slot), proposal.location)
     copyto!(view(history.factors, :, :, slot), proposal.scale.factor)
     history.lognormalizers[slot] = proposal.lognormalizer
+    _set_factor_exponent_bound!(history.exponent_bounds, slot, proposal.scale.factor)
     return nothing
 end
 
@@ -694,6 +702,7 @@ function _reset_gaussian_history!(history::_FactorProposalHistory, rounds)
         view(history.lognormalizers, slots),
         zero(eltype(history.lognormalizers)),
     )
+    isnothing(history.exponent_bounds) || fill!(view(history.exponent_bounds, slots), 0)
     return nothing
 end
 
@@ -854,7 +863,8 @@ function _launch_moment_round!(algorithm, state, buffers, target, round_ids,
     _launch_adaptive_gaussian_round!(algorithm, workspace.samples, workspace.logtargets,
         workspace.lognumerators, workspace.logweights, round_ids,
         buffers.failure_scratch.record.storage, buffers.normal, target, state.history,
-        state.logcounts, state.offsets, round, workspace.centered_scaled, execution,
+        state.logcounts, state.offsets, round,
+        _range_scratch(workspace.centered_scaled, buffers.range_exponents), execution,
         device, factor_execution)
     return nothing
 end

@@ -40,6 +40,7 @@ function _gaussian_adaptation_workspace!(algorithm::NPMC, device, state, round)
         workspace.candidate_mean,
         workspace.candidate_scale,
         workspace.candidate_lognormalizer,
+        workspace.candidate_exponent_bound,
     )
 end
 
@@ -66,7 +67,7 @@ function _launch_adaptive_gaussian_round!(
        _use_factor_batch_path(device, history, factor_execution)
         _launch_npmc_factor_batch!(
             new_samples, output, failure_storage, normal_buffer,
-            target, history, _sample_view(solve_scratch, indices), execution,
+            target, history, _solve_view(solve_scratch, :, indices), execution,
         )
     else
         _launch_mis_round!(
@@ -79,16 +80,12 @@ function _launch_adaptive_gaussian_round!(
 end
 
 @kernel function _npmc_factor_weights_kernel!(
-    logweights, logtargets, solved, lognormalizers, family, slot, failure_storage,
+    logweights, logtargets, solved, samples, history, slot, failure_storage,
 )
     sample_index = @index(Global, Linear)
     T = eltype(logweights)
-    square_norm = zero(eltype(solved))
-    @inbounds for coordinate in axes(solved, 1)
-        square_norm += abs2(solved[coordinate, sample_index])
-    end
-    logproposal = convert(T, _radial_logdensity(family, @inbounds(lognormalizers[slot]),
-        square_norm, size(solved, 1)))
+    logproposal = convert(T, _factor_batch_logdensity(eltype(_solve_values(solved)),
+        history, samples, solved, slot, sample_index))
     reason = _native_proposal_reason(logproposal)
     if iszero(reason)
         weight, reason = _subtract_logweight(@inbounds(logtargets[sample_index]), logproposal)
@@ -111,10 +108,10 @@ function _launch_npmc_factor_batch!(
         output.logtargets, output.lognumerators, output.logweights, output.round_ids,
         samples, target, output.round, failure_storage, execution,
     )
-    _factor_batch_solve!(solve_scratch, samples, history, output.round)
+    solve_scratch = _factor_batch_solve!(solve_scratch, samples, history, output.round)
     weight_kernel = _npmc_factor_weights_kernel!(backend)
     weight_kernel(
-        output.logweights, output.logtargets, solve_scratch, history.lognormalizers, history.family,
+        output.logweights, output.logtargets, solve_scratch, samples, history,
         output.round, failure_storage;
         ndrange=count, workgroupsize=_native_workgroupsize(execution, count),
     )
@@ -143,8 +140,9 @@ function _preflight_accelerator_method(
         state.history,
         factor_execution,
     )
-    solve_scratch = use_factor_batch ? workspace.centered_scaled :
-                    _fused_mis_solve_scratch(workspace.centered_scaled, backend)
+    solve_scratch = _range_scratch(workspace.centered_scaled, buffers.range_exponents)
+    solve_scratch = use_factor_batch ? solve_scratch :
+                    _fused_mis_solve_scratch(solve_scratch, backend)
     for argument in (
         samples, view(workspace.logtargets, indices),
         view(workspace.lognumerators, indices), view(workspace.logweights, indices),
@@ -167,7 +165,7 @@ function _preflight_accelerator_method(
         weight_kernel = _npmc_factor_weights_kernel!(backend)
         for argument in (
             view(workspace.logweights, indices), view(workspace.logtargets, indices),
-            view(workspace.centered_scaled, :, indices), state.history.lognormalizers, state.history.family,
+            _solve_view(solve_scratch, :, indices), samples, state.history,
             round, buffers.failure_scratch.record.storage,
         )
             _preflight_kernel_argument(device, weight_kernel, argument)

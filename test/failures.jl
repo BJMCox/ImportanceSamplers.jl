@@ -295,6 +295,7 @@ function amis_result_copy_failure_sampler(sampler)
         old_workspace.candidate_mean,
         old_workspace.candidate_scale,
         old_workspace.candidate_lognormalizer,
+        old_workspace.candidate_exponent_bound,
     )
     state = ImportanceSamplers._PreparedMomentSampler(
         old_state.schedule,
@@ -383,6 +384,7 @@ function amis_publication_failure_sampler(fail_at)
         AMISPublicationFailureArray(old_history.factors, failure, 2),
         AMISPublicationFailureArray(old_history.lognormalizers, failure, 3),
         old_history.family,
+        old_history.exponent_bounds,
     )
     state = ImportanceSamplers._PreparedMomentSampler(
         old_state.schedule,
@@ -1129,6 +1131,7 @@ end
         old_workspace.candidate_mean,
         old_workspace.candidate_scale,
         old_workspace.candidate_lognormalizer,
+        old_workspace.candidate_exponent_bound,
     )
     moment_state = ImportanceSamplers._PreparedMomentSampler(
         moment_base.method_state.schedule,

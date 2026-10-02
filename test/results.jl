@@ -320,6 +320,15 @@ end
 end
 
 @testset "stable weight reductions" begin
+    shifted = WeightedSamples([1.0, 3.0], fill(1e20, 2))
+    @test normalized_weights(shifted) == [0.5, 0.5]
+    @test (mean(shifted), var(shifted)) == (2.0, 1.0)
+
+    half = WeightedSamples(ones(Float32, 65536), zeros(Float16, 65536))
+    @test lognormalizer(half) ≈ 0 atol=eps(Float32)
+    @test sum(Float64, normalized_weights(half)) ≈ 1
+    @test mean(half) ≈ 1
+
     extreme_logs = [1000.0, 999.0, -Inf]
     result = WeightedSamples([1.0, 2.0, 3.0], extreme_logs)
 

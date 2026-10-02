@@ -70,6 +70,8 @@ function _allocate_smh_scratch(proposal, centres, ::Type{L}, capacity) where {L}
     candidates = _allocate_native_samples(normals, proposal, capacity)
     candidate_logweights = similar(centres, L, capacity)
     density_scratch = similar(centres, T, dimension * count)
+    density_scratch = _range_scratch(density_scratch,
+        _native_range_exponents(proposal, centres, max(length(normals), length(density_scratch))))
     decision_uniforms = similar(centres, T, 2, capacity)
     failure_scratch = _allocate_native_failure_scratch(normals, max(count, capacity))
     return (; candidates, candidate_logweights, normals, proposal_uniforms,
@@ -191,7 +193,7 @@ end
         else
             proposal_log, proposal_reason = _native_generated_logdensity(
                 proposal, _NoSampleTransform(), _native_sample_at(centres, slot),
-                scratch, offset)
+                _solve_values(scratch), offset, _solve_exponents(scratch))
             ratio = proposal_log - target_log
             reason = !isfinite(target_log) ? _NATIVE_LOGWEIGHT_INVALID :
                      (!iszero(proposal_reason) || !isfinite(proposal_log)) ?
@@ -461,7 +463,7 @@ function _smh_candidate_batch!(state, target, rng, execution, steps, ::Type{L}=e
         view(state.candidate_logweights, 1:steps), state.failure_scratch.record,
         view(state.proposal_uniforms, 1:uniform_count),
         view(state.normals, 1:normal_count), evaluator, state.proposal,
-        _NoSampleTransform(), execution)
+        _NoSampleTransform(), execution, _solve_exponents(state.density_scratch))
     return nothing
 end
 

@@ -203,6 +203,43 @@ end
 end
 
 @testset "native Student-t analytic densities" begin
+    for (location, scale, point) in ((0., 1e-200, 1e200), (-1e308, 1., 1e308))
+        proposal = SphericalStudentT(1., location, scale)
+        expected = -log(big(pi)) - log(BigFloat(scale)) -
+            log1p(abs2((BigFloat(point) - BigFloat(location)) / BigFloat(scale)))
+        @test DensityInterface.logdensityof(proposal, point) ≈ Float64(expected)
+    end
+
+    factor = Matrix(LinearAlgebra.Diagonal([1., 1e-200, 1e-300, 1e-300]))
+    factor[3, 1] = factor[4, 3] = 1e300
+    eta = nextfloat(0.)
+    for (L, point) in (([1e-200 0.; 1e-200 1.], [1e200, 1e200]),
+        (factor, [1e-300, 1e200, 0., 0.]),
+        ([1e200 0.; 1e300 1e-300], [1e-200, 0.]),
+        ([1. 0.; 2e-124 eta], [1e-200, eta]))
+        location = zeros(length(point))
+        proposal = FactorStudentT(1., location, L)
+        radius = sum(abs2, LinearAlgebra.LowerTriangular(BigFloat.(L)) \ BigFloat.(point))
+        expected = DensityInterface.logdensityof(proposal, location) -
+            (length(point) + 1) / big(2) * log1p(radius)
+        @test DensityInterface.logdensityof(proposal, point) ≈ Float64(expected)
+    end
+
+    for (nu, point) in ((1.0, 1e200), (0.1f0, 8f18), (1e308, 2e154))
+        proposal = SphericalStudentT(nu, zero(point), one(point))
+        expected = DensityInterface.logdensityof(proposal, zero(point)) -
+            (BigFloat(nu) + 1) / 2 * log1p(abs2(BigFloat(point)) / BigFloat(nu))
+        @test DensityInterface.logdensityof(proposal, point) ≈ typeof(point)(expected)
+    end
+
+    point = [1e200, -1e200]
+    for proposal in (SphericalStudentT(1.0, zeros(2), 1.0),
+        DiagonalStudentT(1.0, zeros(2), ones(2)),
+        FactorStudentT(1.0, zeros(2), Matrix{Float64}(LinearAlgebra.I, 2, 2)))
+        expected = -log(big(2pi)) - big(1.5) * log1p(sum(abs2, BigFloat.(point)))
+        @test DensityInterface.logdensityof(proposal, point) ≈ Float64(expected)
+    end
+
     scalar = SphericalStudentT(1.0, 1.25, 2.5)
     scalar_sample = -0.75
     scalar_radius = abs2((scalar_sample - 1.25) / 2.5)
@@ -235,6 +272,30 @@ end
         @test DensityInterface.logdensityof(small_dof, location) ≈
               -log(T(4) * T(pi)) - log(dof) / T(2) rtol=8eps(T)
     end
+end
+
+@testset "Student-t range fallback in factor mixtures" begin
+    proposals = [FactorStudentT(1f0, zeros(Float32, 2), Matrix{Float32}(1f-20 * LinearAlgebra.I, 2, 2)),
+        FactorStudentT(1f0, fill(1f20, 2), Matrix{Float32}(LinearAlgebra.I, 2, 2))]
+    algorithm = ImportanceSampling(ProposalBank(proposals); nsamples=8)
+    for execution in (FusedFactorExecution(), BatchedFactorExecution())
+        result = importance_sample(Random.Xoshiro(8), _ -> 0f0, algorithm; factor_execution=execution)
+        expected = map(eachcol(result.samples)) do point
+            logs = map(q -> DensityInterface.logdensityof(q, point), proposals)
+            maximum_log = maximum(logs)
+            -(maximum_log + log(sum(exp.(logs .- maximum_log))) - log(2f0))
+        end
+        @test result.logweights ≈ expected
+    end
+end
+
+@testset "Student-t transformed native range recovery" begin
+    proposal = TransformedProposal(
+        FactorStudentT(1f0, Float32[15, 0], Float32[1f-40 0; 0 1]),
+        (bounded=1 => IntervalTransform(0f0, 1f0), free=2 => IdentityTransform()))
+    result = importance_sample(Random.Xoshiro(1), _ -> 0f0,
+        ImportanceSampling(proposal; nsamples=2))
+    @test result.logweights ≈ [-DensityInterface.logdensityof(proposal, entry.sample) for entry in result]
 end
 
 @testset "native Student-t validation and draws" begin

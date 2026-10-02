@@ -96,6 +96,10 @@ end
 
 struct _NoMISSolveScratch end
 
+_fused_mis_solve_scratch(scratch::_RangeSolveScratch, backend) =
+    _RangeSolveScratch(_fused_mis_solve_scratch(scratch.values, backend),
+        _fused_mis_solve_scratch(scratch.exponents, backend))
+
 @inline function _fused_mis_solve_scratch(
     solve_scratch,
     backend,
@@ -193,8 +197,8 @@ end
 @kernel function _append_factor_batch_logmixture_kernel!(
     lognumerators,
     standardized,
-    lognormalizers,
-    family,
+    samples,
+    source,
     logcoefficients,
     proposal_slot,
     assignments,
@@ -205,13 +209,7 @@ end
     sample_index = @index(Global, Linear)
     if _factor_batch_sample_valid(valid_samples, sample_index)
         T = eltype(lognumerators)
-        squared_radius = zero(T)
-        @inbounds for coordinate in axes(standardized, 1)
-            squared_radius += abs2(standardized[coordinate, sample_index])
-        end
-        logdensity = _radial_logdensity(_radial_family_at(family, proposal_slot),
-            _factor_batch_slot_value(lognormalizers, proposal_slot),
-            squared_radius, size(standardized, 1))
+        logdensity = _factor_batch_logdensity(T, source, samples, standardized, proposal_slot, sample_index)
         _store_mis_adaptation!(
             adaptation,
             assignments,
@@ -268,8 +266,8 @@ function _launch_factor_batch_logmixture!(
     kernel(
         lognumerators,
         solved,
-        _factor_batch_lognormalizers(factor_source),
-        factor_source.family,
+        samples,
+        factor_source,
         logcoefficients,
         proposal_slot,
         assignments,
@@ -406,8 +404,8 @@ end
 @kernel function _finish_equal_allocation_generating_batch_kernel!(
     logweights,
     standardized,
-    lognormalizers,
-    family,
+    samples,
+    source,
     proposal_slot,
     proposal_ids,
     failure_storage,
@@ -416,12 +414,7 @@ end
     local_index = @index(Global, Linear)
     if !iszero(@inbounds(proposal_ids[local_index]))
         T = eltype(logweights)
-        squared_radius = zero(T)
-        @inbounds for coordinate in axes(standardized, 1)
-            squared_radius += abs2(standardized[coordinate, local_index])
-        end
-        logdensity = _radial_logdensity(_radial_family_at(family, proposal_slot),
-            T(@inbounds(lognormalizers[proposal_slot])), squared_radius, size(standardized, 1))
+        logdensity = _factor_batch_logdensity(T, source, samples, standardized, proposal_slot, local_index)
         reason = _native_proposal_reason(logdensity)
         if iszero(reason)
             value, reason = _subtract_logweight(
@@ -485,8 +478,8 @@ function _launch_factor_batch_mis_round!(
         last_sample = proposal_slot * group_size
         group = first_sample:last_sample
         group_samples = view(samples, :, group)
-        group_scratch = view(solve_scratch, :, group)
-        _factor_batch_solve!(
+        group_scratch = _solve_view(solve_scratch, :, group)
+        group_scratch = _factor_batch_solve!(
             group_scratch,
             group_samples,
             bank,
@@ -497,8 +490,8 @@ function _launch_factor_batch_mis_round!(
         finish_kernel(
             group_logweights,
             group_scratch,
-            bank.lognormalizers,
-            bank.family,
+            group_samples,
+            bank,
             proposal_slot,
             group_proposal_ids,
             failure_storage,
@@ -551,7 +544,7 @@ function _launch_factor_batch_mis_round!(
     fill!(logdenominators, eltype(logdenominators)(-Inf))
     logcoefficients = _factor_batch_logcoefficients(bank, denominator)
     isnothing(logcoefficients) && error("unsupported factor-batch denominator")
-    round_solve_scratch = view(solve_scratch, :, 1:sample_count)
+    round_solve_scratch = _solve_view(solve_scratch, :, 1:sample_count)
     for proposal_slot in axes(bank.locations, 2)
         _launch_factor_batch_logmixture!(
             logdenominators,
@@ -596,12 +589,13 @@ function _allocate_mis_solve_scratch(
     bank::_PackedFactorBank,
     nsamples,
 )
-    return similar(
+    values = similar(
         prototype,
         eltype(bank.locations),
         size(bank.locations, 1),
         nsamples,
     )
+    return _range_scratch(values, _range_exponents(prototype, bank.family, size(values)...))
 end
 
 @inline function _mis_round_values!(

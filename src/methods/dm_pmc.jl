@@ -341,6 +341,7 @@ function _population_with_locations(bank::_PackedFactorBank, locations)
         bank.cdf,
         bank.proposal_ids,
         bank.family,
+        bank.exponent_bounds,
     )
 end
 

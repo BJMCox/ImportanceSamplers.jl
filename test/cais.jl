@@ -137,6 +137,21 @@ end
     @test result.diagnostics.tempering_powers[1, 1] < 1
 end
 
+@testset "CAIS mixed-precision target scale invariance" begin
+    runs = map((0.0, 1e10)) do offset
+        sampler = prepare_sampler(Random.Xoshiro(5),
+            (x, c) -> -100 * (Float64(x) - 2)^2 + c, offset,
+            CAIS(ProposalBank([SphericalGaussian(0f0, 1f0)]); rounds=1, round_size=16))
+        result = importance_sample!(sampler)
+        (; result, proposal=only(current_proposal(sampler).proposals))
+    end
+    base, shifted = runs
+    @test base.result.samples == shifted.result.samples
+    @test base.result.diagnostics.tempering_powers ≈ shifted.result.diagnostics.tempering_powers
+    @test base.result.diagnostics.local_ess ≈ shifted.result.diagnostics.local_ess
+    @test base.proposal.scale.scale ≈ shifted.proposal.scale.scale
+end
+
 @testset "CAIS public scalar m - 1 threshold recurrence" begin
     bank = ProposalBank([SphericalGaussian(0.0, 1.0)])
     algorithm = CAIS(

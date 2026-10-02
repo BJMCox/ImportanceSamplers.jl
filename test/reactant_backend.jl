@@ -60,6 +60,11 @@ end
                 @test lognormalizer(result) ≈ log(2f0*Float32(pi)*0.8f0) atol=0.15
             end
         end
+        # Student-t recovery must not hide sample shape from a target reduction.
+        student = FactorStudentT(5f0, Float32[-1, 0], Float32[2 0; 1f-20 2])
+        sampler = device(prepare_sampler(Xoshiro(44), x -> -4f0*sum(abs2, x),
+            AMIS(student; rounds=3, round_size=1024)))
+        @test lognormalizer(importance_sample!(sampler)) ≈ log(Float32(pi)/4f0) atol=0.15
     else
         for algorithm in (AMIS(proposal; rounds=3, round_size=1024),
             APIS(bank; rounds=3, round_size=1024), CAIS(bank; rounds=3, round_size=1024),

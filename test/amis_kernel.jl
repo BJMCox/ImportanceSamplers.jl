@@ -706,7 +706,7 @@ end
             lognormalizer,
             failures,
             4,
-            AMISKernelIS.GaussianFamily();
+            AMISKernelIS.GaussianFamily(), nothing;
             ndrange=1,
         )
         KernelAbstractions.synchronize(backend)
@@ -732,6 +732,7 @@ end
             reshape(copy(factor), 3, 3, 1),
             T[-T(1.5) * log(T(2pi)) - sum(log, LinearAlgebra.diag(factor))],
             AMISKernelIS.GaussianFamily(),
+            nothing,
         )
         normals = T[1 -2 0.5 3; -1 0.25 2 -0.5; 0.5 1 -1 0.75]
         samples = zeros(T, size(normals))
@@ -791,6 +792,7 @@ end
             reshape(T[wide_factor, one(T)], 1, 1, 2),
             T[-T(0.5) * log(T(2pi)) - log(wide_factor), -T(0.5) * log(T(2pi))],
             AMISKernelIS.GaussianFamily(),
+            nothing,
         )
         samples = zeros(T, 1, 2)
         logtargets = T[zero(T), T(-Inf)]

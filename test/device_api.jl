@@ -1712,6 +1712,7 @@ end
                     buffers.failure_scratch.record.storage,
                     last_sample + 1,
                     history.family,
+                    workspace.candidate_exponent_bound,
                 ),
             )
         end
@@ -1999,6 +2000,7 @@ end
         AMISPublicationSyncArray(old_workspace.candidate_mean),
         old_workspace.candidate_scale,
         old_workspace.candidate_lognormalizer,
+        old_workspace.candidate_exponent_bound,
     )
     state = IS._PreparedMomentSampler(
         old_state.schedule,
@@ -2064,6 +2066,7 @@ end
         base_buffers.normal,
         failure_scratch,
         base_buffers.radial,
+        base_buffers.range_exponents,
     )
     rng = AMISExecutionPrefilledRNG(
         [T[-8, 0, 8], T[-0.25, 0.25, 0.5]],

@@ -19,13 +19,38 @@ struct StudentTFamily{T} <: AbstractRadialProposalFamily
     logconstant::T
 end
 
-@inline _radial_logdensity(::GaussianFamily, lognormalizer, squared_radius, dimension) =
+include("student_t_range.jl")
+
+@inline _radial_logdensity(::GaussianFamily, lognormalizer, squared_radius, dimension, coordinate_at, logradius_at, range_risk=false) =
     lognormalizer - oftype(squared_radius, 0.5) * squared_radius
 
-@inline function _radial_logdensity(family::StudentTFamily, lognormalizer, squared_radius, dimension)
+@inline function _radial_logdensity(family::StudentTFamily, lognormalizer, squared_radius, dimension, coordinate_at, logradius_at, range_risk=false)
     dof = family.dof
+    ratio = squared_radius / dof
+    radial_log = if range_risk
+        LogExpFunctions.log1pexp(logradius_at() - log(dof))
+    elseif isfinite(ratio)
+        log1p(ratio)
+    else
+        _student_t_overflow_logradius(squared_radius, dof, dimension, coordinate_at, logradius_at)
+    end
     return lognormalizer - (dof + oftype(dof, dimension)) / oftype(dof, 2) *
-           log1p(squared_radius / dof)
+           radial_log
+end
+
+# Keep captured sample shapes visible to device compilers.
+@inline function _student_t_overflow_logradius(squared_radius, dof, dimension, coordinate_at, logradius_at)
+    isfinite(squared_radius) && return log(squared_radius) - log(dof)
+    scale = zero(squared_radius)
+    for coordinate in 1:dimension
+        scale = max(scale, abs(coordinate_at(coordinate)))
+    end
+    isfinite(scale) || return LogExpFunctions.log1pexp(logradius_at() - log(dof))
+    scaled_sum = zero(squared_radius)
+    for coordinate in 1:dimension
+        scaled_sum += abs2(coordinate_at(coordinate) / scale)
+    end
+    return LogExpFunctions.log1pexp(oftype(scale, 2) * log(scale) + log(scaled_sum) - log(dof))
 end
 
 # Moment updates use covariance. Student-t proposal storage uses elliptical scale.
@@ -113,7 +138,12 @@ end
 
 struct _FactorGaussianScale{M}
     factor::M
+    exponent_bound::Int
 end
+
+_FactorGaussianScale(factor) = _FactorGaussianScale(factor, _factor_exponent_bound(factor))
+_scale_exponent_bound(scale) = 0
+_scale_exponent_bound(scale::_FactorGaussianScale) = scale.exponent_bound
 
 struct _GaussianProposal{F,L,S,T}
     family::F
@@ -608,10 +638,10 @@ end
            oftype(proposal.lognormalizer, 0.5) * squared_radius
 end
 
-@inline _native_proposal_logdensity!(proposal::_GaussianProposal, coordinates, offset) =
+@inline _native_proposal_logdensity!(proposal::_GaussianProposal, coordinates, offset, logradius_at) =
     _native_gaussian_logdensity!(proposal, coordinates, offset)
 
-@inline function _native_proposal_logdensity!(proposal::_StudentTProposal, coordinates, offset)
+@inline function _native_proposal_logdensity!(proposal::_StudentTProposal, coordinates, offset, logradius_at)
     squared_radius = _native_gaussian_squared_radius!(
         proposal.location,
         proposal.scale,
@@ -619,7 +649,9 @@ end
         offset,
     )
     return _radial_logdensity(proposal.family, proposal.lognormalizer,
-        squared_radius, _gaussian_dimension(proposal.location))
+        squared_radius, _gaussian_dimension(proposal.location),
+        index -> @inbounds(coordinates[offset + index - 1]), logradius_at,
+        _factor_range_risk(_scale_exponent_bound(proposal.scale), eltype(coordinates)))
 end
 
 function _gaussian_from_normal(
@@ -738,16 +770,21 @@ function _check_gaussian_sample_length(location, sample)
     return nothing
 end
 
-function _gaussian_squared_radius(
+function _radial_proposal_logdensity(
+    family,
+    lognormalizer,
     location::T,
     scale::_SphericalGaussianScale{T},
     sample::T,
 ) where {T<:_NativeGaussianFloat}
     standardized = (sample - location) / scale.scale
-    return abs2(standardized)
+    return _radial_logdensity(family, lognormalizer, abs2(standardized), 1, _ -> standardized,
+        () -> _diagonal_range_logradius(1, _ -> sample, _ -> location, _ -> scale.scale))
 end
 
-function _gaussian_squared_radius(
+function _radial_proposal_logdensity(
+    family,
+    lognormalizer,
     location::Vector{T},
     scale::_SphericalGaussianScale{T},
     sample::AbstractVector{T},
@@ -758,10 +795,14 @@ function _gaussian_squared_radius(
         standardized = (sample[index] - location[index]) / scale.scale
         squared_radius += abs2(standardized)
     end
-    return squared_radius
+    return _radial_logdensity(family, lognormalizer, squared_radius, length(location),
+        index -> (sample[index] - location[index]) / scale.scale,
+        () -> _diagonal_range_logradius(length(location), i -> sample[i], i -> location[i], _ -> scale.scale))
 end
 
-function _gaussian_squared_radius(
+function _radial_proposal_logdensity(
+    family,
+    lognormalizer,
     location::Vector{T},
     scale::_DiagonalGaussianScale{Vector{T}},
     sample::AbstractVector{T},
@@ -772,10 +813,14 @@ function _gaussian_squared_radius(
         standardized = (sample[index] - location[index]) / scale.scales[index]
         squared_radius += abs2(standardized)
     end
-    return squared_radius
+    return _radial_logdensity(family, lognormalizer, squared_radius, length(location),
+        index -> (sample[index] - location[index]) / scale.scales[index],
+        () -> _diagonal_range_logradius(length(location), i -> sample[i], i -> location[i], i -> scale.scales[i]))
 end
 
-function _gaussian_squared_radius(
+function _radial_proposal_logdensity(
+    family,
+    lognormalizer,
     location::Vector{T},
     scale::_FactorGaussianScale{Matrix{T}},
     sample::AbstractVector{T},
@@ -786,35 +831,24 @@ function _gaussian_squared_radius(
         standardized[index] -= location[index]
     end
     LinearAlgebra.ldiv!(LinearAlgebra.LowerTriangular(scale.factor), standardized)
-    return sum(abs2, standardized)
+    return _radial_logdensity(family, lognormalizer, sum(abs2, standardized), length(location),
+        index -> standardized[index],
+        () -> _factor_range_logradius!(standardized, Vector{Int}(undef, length(location)),
+            length(location), i -> sample[i], i -> location[i], (i,j) -> scale.factor[i,j]),
+        _factor_range_risk(scale.exponent_bound, T))
 end
 
 function DensityInterface.logdensityof(
-    proposal::_GaussianProposal,
+    proposal::Union{_GaussianProposal,_StudentTProposal},
     sample,
 )
-    squared_radius = _gaussian_squared_radius(
+    return _radial_proposal_logdensity(
+        proposal.family,
+        proposal.lognormalizer,
         proposal.location,
         proposal.scale,
         sample,
     )
-    return proposal.lognormalizer - oftype(proposal.lognormalizer, 0.5) * squared_radius
-end
-
-function DensityInterface.logdensityof(
-    proposal::_StudentTProposal,
-    sample,
-)
-    squared_radius = _gaussian_squared_radius(
-        proposal.location,
-        proposal.scale,
-        sample,
-    )
-    dof = proposal.family.dof
-    dimension = _gaussian_dimension(proposal.location)
-    return proposal.lognormalizer -
-           (dof + typeof(dof)(dimension)) / typeof(dof)(2) *
-           log1p(squared_radius / dof)
 end
 
 @inline DensityInterface.DensityKind(::_GaussianProposal) = DensityInterface.HasDensity()

@@ -398,6 +398,10 @@ function _copy_to_device(device, value)
     return device(deepcopy(value))
 end
 
+_copy_to_device(device, scratch::_RangeSolveScratch) =
+    _RangeSolveScratch(_copy_to_device(device, scratch.values),
+        _copy_to_device(device, scratch.exponents))
+
 function _copy_algorithm(device, algorithm::ImportanceSampling)
     proposal = _copy_to_device(device, algorithm.proposal)
     mis_scheme = _copy_to_device(device, algorithm.mis_scheme)
