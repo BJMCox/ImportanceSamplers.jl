@@ -803,6 +803,13 @@ _native_workgroupsize(::_ThreadedCPUExecution, nsamples) = nothing
 @inline _native_workgroupsize(execution::_KernelExecution, nsamples) =
     _native_workgroupsize(execution.cpu_execution, nsamples)
 
+# Dense Student-t kernels benefit from smaller blocks, without changing other proposals.
+_native_fused_workgroupsize(backend, proposal, execution, nsamples) =
+    _native_workgroupsize(execution, nsamples)
+_native_fused_workgroupsize(
+    ::KernelAbstractions.GPU, ::_StudentTProposal{F,L,<:_FactorGaussianScale}, execution, nsamples,
+) where {F,L} = 128
+
 _native_failure_location(::_NoSampleTransform, block) = nothing
 _native_failure_location(::_NativeScalarTransform, block) = nothing
 _native_failure_location(transform::SimplexTransform, block) = 1:(transform.dimension - 1)
@@ -892,7 +899,7 @@ function _launch_native_fused!(
         transform,
         exponents;
         ndrange=length(logweights),
-        workgroupsize=_native_workgroupsize(execution, length(logweights)),
+        workgroupsize=_native_fused_workgroupsize(backend, base, execution, length(logweights)),
     )
     KernelAbstractions.synchronize(backend)
     return nothing
