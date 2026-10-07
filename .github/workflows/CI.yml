@@ -39,6 +39,13 @@ jobs:
       - uses: julia-actions/julia-runtest@v1
         with:
           coverage: ${{ matrix.julia == '1' && matrix.os == 'ubuntu-latest' }}
+      - name: Test Reactant CPU backend
+        if: matrix.julia == '1' && matrix.os == 'ubuntu-latest'
+        run: >-
+          julia --code-coverage=@. -e
+          'using Pkg; Pkg.activate(; temp=true); Pkg.develop(path=pwd());
+          Pkg.add(["Reactant", "CUDA", "MLDataDevices", "DensityInterface"]);
+          include("test/reactant_cpu.jl")'
       - uses: julia-actions/julia-processcoverage@v1
         if: matrix.julia == '1' && matrix.os == 'ubuntu-latest'
         with:
@@ -51,6 +58,7 @@ jobs:
           if-no-files-found: error
       - uses: codecov/codecov-action@v7
         if: matrix.julia == '1' && matrix.os == 'ubuntu-latest'
+        continue-on-error: true
         with:
           use_oidc: true
           files: lcov.info
