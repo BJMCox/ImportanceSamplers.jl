@@ -21,6 +21,36 @@ IS._check_batch_mapping!(target, storage::AbstractArray{<:Reactant.TracedRNumber
 _batch_trace_samples(samples::AbstractArray) = Reactant.TracedUtils.materialize_traced_array(samples)
 _batch_trace_samples(samples::NamedTuple) = map(_batch_trace_samples, samples)
 
+# Keep target reductions separate from proposal-recovery closures. Combining
+# them can leave unreachable recursive reductions in Reactant's kernel IR.
+_separate_target(target) = target
+_separate_target(target::IS._NativeDeviceTarget{L}) where {L} =
+    IS._NativeBatchTarget{L,typeof(target)}(target)
+
+KA.@kernel function _scalar_target_values_kernel!(logs, samples, target, failures, ready)
+    index = KA.@index(Global, Linear)
+    value = eltype(logs)(-Inf)
+    if ready === nothing || ready[1]
+        value, reason, failed = target(IS._native_sample_at(samples, index), index)
+        if failed
+            value = oftype(value, -Inf)
+            failures === nothing || IS._record_native_failure!(failures, index, 0, reason)
+        end
+    end
+    logs[index] = value
+end
+
+function IS._invoke_batch_target!(target::IS._NativeDeviceTarget,
+    logs::AbstractArray{<:Reactant.TracedRNumber}, samples, failures, execution;
+    transform=IS._NoSampleTransform())
+    isempty(logs) && return nothing
+    # Snapshot before this kernel records target failures, so its threads agree.
+    ready = failures === nothing ? nothing : iszero.(view(failures, 1:1))
+    _scalar_target_values_kernel!(KA.get_backend(logs))(logs, samples, target, failures, ready;
+        ndrange=length(logs))
+    return nothing
+end
+
 function IS._invoke_batch_target!(target::IS._BoundBatchTarget,
     logs::AbstractArray{<:Reactant.TracedRNumber}, samples, failures, execution;
     transform=IS._NoSampleTransform())
@@ -172,7 +202,7 @@ function (phase::_MomentDrawPhase)(rng, workspace, history, logcounts, buffers, 
     Random.randn!(rng, buffers.normal)
     IS._fill_radial_buffers!(rng, buffers.radial)
     state = (; workspace, history, logcounts, phase.schedule, phase.offsets)
-    IS._launch_moment_round!(phase.algorithm, state, buffers, target, round_ids,
+    IS._launch_moment_round!(phase.algorithm, state, buffers, _separate_target(target), round_ids,
         phase.round, phase.execution, phase.device, phase.factor_execution)
     return nothing
 end
