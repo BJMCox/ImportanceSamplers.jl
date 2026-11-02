@@ -218,9 +218,8 @@ IS._backtrack_batch_values!(plan::_CompiledGRAMISExecution, batch, execution, de
 
 # The live preflight runs before the plan exists. The native path would index
 # device arrays on the host, so the preflight compiles its own phases.
-# The first field of `_backtrack_means!`'s batch is `candidate_locations`, so it selects Reactant.
-IS._backtrack_batch_values!(::Nothing, batch::NamedTuple{N,<:Tuple{Reactant.AnyConcreteRArray,Vararg}},
-    execution, device, record, transfers) where {N} = _run_padded_backtracking!(
+IS._backtrack_batch_values!(::Nothing, batch,
+    execution, device::MLDataDevices.ReactantDevice, record, transfers) = _run_padded_backtracking!(
     _prepare_padded_backtracking(batch, record, execution), batch, device, record, transfers)
 
 function _run_padded_backtracking!(phases, batch, device, record, transfers)

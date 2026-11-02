@@ -204,7 +204,8 @@ end
 
 @testset "DM-PMC multinomial selection and gather kernels" begin
     for T in (Float32, Float64)
-        cdf = T[0.2, 0.5, 0.9, 0.9]
+        cdf = T[0.2, 0.5, 0.9, 1]
+        logweights = log.(T[0.2, 0.3, 0.4, 0.1])
         uniforms = T[0.1, 0.2, 0.2001, 0.95]
         samples = reshape(T[1, 2, 3, 4, 11, 12, 13, 14], 2, 4)
         ancestors = zeros(Int, 4)
@@ -216,6 +217,7 @@ end
 
         DMPMCKernelIS._resample_and_gather!(
             cdf,
+            logweights,
             uniforms,
             ancestors,
             samples,
@@ -223,7 +225,6 @@ end
             DMPMCKernelIS._SerialCPUExecution(),
         )
 
-        @test cdf[end] == one(T)
         @test ancestors == expected_ancestors == [1, 2, 2, 4]
         @test candidates == samples[:, expected_ancestors]
         @test count(==(2), ancestors) == 2
@@ -256,6 +257,7 @@ end
 
             DMPMCKernelIS._resample_and_gather!(
                 copy(case.cdf),
+                log.(diff(vcat(zero(T), case.cdf))),
                 case.uniforms,
                 ancestors,
                 samples,

@@ -317,16 +317,27 @@ function reference(model; draws=8192, nchains=Threads.nthreads(:default))
                 "chains"=>nchains)
 end
 
+function source_fingerprint(root)
+    files = [joinpath(root, "Project.toml")]
+    for subtree in ("src", "ext"), (directory, _, names) in walkdir(joinpath(root, subtree))
+        append!(files, (joinpath(directory, name) for name in names if endswith(name, ".jl")))
+    end
+    return Dict(relpath(file, root) => bytes2hex(sha256(read(file))) for file in files)
+end
+
 function metadata()
-    root = normpath(joinpath(@__DIR__,"../.."))
+    root = realpath(joinpath(@__DIR__,"../.."))
+    loaded_root = realpath(dirname(dirname(pathof(IS))))
+    loaded_root == root || error("Benchmark loaded ImportanceSamplers from $loaded_root, expected $root")
     packages = Dict(info.name=>string(info.version) for info in values(Pkg.dependencies())
                     if info.is_direct_dep && info.version !== nothing)
     return Dict("julia"=>string(VERSION), "cpu"=>Sys.cpu_info()[1].model,
         "threads"=>Threads.nthreads(:default), "blas_threads"=>BLAS.get_num_threads(),
         "word_size"=>Sys.WORD_SIZE, "platform"=>Sys.MACHINE,
         "revision"=>readchomp(`git -C $root rev-parse HEAD`),
+        "package_path"=>loaded_root, "package_source_sha256"=>source_fingerprint(loaded_root),
         "benchmark_sha256"=>bytes2hex(sha256(join(read(joinpath(@__DIR__,file),String)
-            for file in ("compare.jl","models.jl","signal_background.jl")))),
+            for file in ("compare.jl","models.jl","batch_targets.jl","signal_background.jl")))),
         "data_sha256"=>Dict(file=>bytes2hex(sha256(read(joinpath(@__DIR__,"data","signal-background",file))))
             for file in ("sample_table.csv","summary_dataset_table.csv")),
         "package_revisions"=>Dict(info.name=>info.git_revision for info in values(Pkg.dependencies())

@@ -386,15 +386,7 @@ function current_proposal(
     destination::MLDataDevices.AbstractCPUDevice,
     sampler::_PreparedImportanceSampler{R,B,T,A,M,D},
 ) where {R,B,T,A<:_MomentAdaptiveSampler,M<:_PreparedMomentSampler,D}
-    if applicable(eltype, destination)
-        policy = eltype(destination)
-        policy in (Missing, Nothing) || throw(
-            ArgumentError(
-                "current_proposal requires a preserving CPU destination; " *
-                "use MLDataDevices.cpu_device() without a scalar conversion",
-            ),
-        )
-    end
+    _preserving_cpu_destination(destination)
     method_state = sampler.method_state
     parameters = _with_backend_device(sampler.device) do
         _copy_gaussian_snapshot_parameters(destination, method_state)

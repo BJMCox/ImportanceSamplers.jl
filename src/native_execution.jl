@@ -370,6 +370,12 @@ _use_factor_batch_path(device, source, ::_DefaultFactorExecution) =
         @inbounds values[row, sample_index] = standardized
         squared_radius += abs2(standardized)
     end
+    if !isfinite(squared_radius)
+        squared_radius = _repair_factor_squared_radius!(view(values, :, sample_index),
+            squared_radius, _mis_dimension(bank), i -> _packed_sample_coordinate(sample, i),
+            i -> _packed_gaussian_location(bank, i, proposal_slot),
+            (i,j) -> _packed_gaussian_factor(bank, i, j, proposal_slot))
+    end
     return _packed_radial_logdensity(bank, proposal_slot, squared_radius,
         coordinate -> values[coordinate, sample_index],
         () -> _packed_factor_range_logradius!(bank, sample, proposal_slot, solve_scratch, sample_index),
@@ -390,6 +396,13 @@ end
     squared_radius = zero(T)
     for coordinate in axes(values, 1)
         squared_radius += abs2(values[coordinate, sample_index])
+    end
+    if !isfinite(squared_radius)
+        location = _factor_batch_location(source, slot)
+        factor = _factor_batch_factor(source, slot)
+        squared_radius = _repair_factor_squared_radius!(view(values, :, sample_index),
+            squared_radius, size(values, 1), i -> samples[i, sample_index],
+            i -> location[i], (i,j) -> factor[i,j])
     end
     return _radial_logdensity(_radial_family_at(source.family, slot),
         _factor_batch_slot_value(_factor_batch_lognormalizers(source), slot),
@@ -427,9 +440,9 @@ end
         squared_radius += abs2(standardized)
     end
     return _packed_radial_logdensity(bank, proposal_slot, squared_radius,
-        coordinate -> (_packed_sample_coordinate(sample, coordinate) -
-            _packed_gaussian_location(bank, coordinate, proposal_slot)) /
-            _packed_gaussian_scale(bank, coordinate, proposal_slot),
+        coordinate -> _standardized_difference(_packed_sample_coordinate(sample, coordinate),
+            _packed_gaussian_location(bank, coordinate, proposal_slot),
+            _packed_gaussian_scale(bank, coordinate, proposal_slot)),
         () -> _diagonal_range_logradius(_mis_dimension(bank),
             i -> _packed_sample_coordinate(sample, i),
             i -> _packed_gaussian_location(bank, i, proposal_slot),

@@ -60,10 +60,10 @@ function _prepare_accelerator_gradient(target::_NamedPreparedTarget, locations, 
     return _BoundNamedGradient(target, scratch)
 end
 
-_named_gradient_scratch(pool::_GradientWorkerPool, slot) = _gradient_workspace(pool)
+_named_gradient_scratch(pool::_GradientWorkerPool, slot) = pool.preparations[slot]
 _named_gradient_scratch(scratch::AbstractMatrix, slot) = view(scratch, :, slot)
 
-# The explicit slot gives each GPU proposal its own logical gradient storage.
+# CPU tasks own worker slots. GPU proposals own columns of logical gradient storage.
 _gradient!(destination, bound, sample, slot) = _gradient!(destination, bound, sample)
 function _gradient!(destination, bound::_BoundNamedGradient, sample, slot=1)
     target = bound.target

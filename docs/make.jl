@@ -70,7 +70,7 @@ makedocs(
     ],
     doctest=true,
     checkdocs=:exports,
-    linkcheck=true,
+    linkcheck=get(ENV, "DOCUMENTER_LINKCHECK", "false") == "true",
     linkcheck_ignore=[
         r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/",
     ],

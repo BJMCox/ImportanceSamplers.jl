@@ -174,18 +174,6 @@ function _prepare_cais_bank(bank::ProposalBank)
     return packed
 end
 
-function _cais_group_starts(counts)
-    starts = similar(counts)
-    for round in axes(counts, 2)
-        first_sample = 1
-        for proposal in axes(counts, 1)
-            starts[proposal, round] = first_sample
-            first_sample += counts[proposal, round]
-        end
-    end
-    return starts
-end
-
 function _resolve_cais_thresholds(algorithm, plan, dimension, ::Type{T}) where {T}
     proposal_count, rounds = size(plan.counts)
     thresholds = Matrix{T}(undef, proposal_count, rounds)
@@ -228,7 +216,7 @@ function _allocate_cais_workspace(bank, plan, ::Type{L}) where {L}
         similar(prototype, Int, capacity),
         similar(prototype, T, capacity),
         _allocate_mis_solve_scratch(prototype, bank, capacity),
-        _cais_group_starts(plan.counts),
+        _population_group_starts(plan.counts),
         similar(prototype, T, dimension, proposal_count),
         similar(prototype, T, dimension, dimension, proposal_count),
         similar(prototype, T, dimension, dimension, proposal_count),

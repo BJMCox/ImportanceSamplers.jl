@@ -166,8 +166,8 @@ end
 
 function _weighted_functional_variance(f, result, weights, center)
     return mapreduce(
-        sample_index -> weights[sample_index] *
-                        abs2(f(_sample_at(result.samples, sample_index)) - center),
+        sample_index -> _weighted_squared_deviation(
+            f(_sample_at(result.samples, sample_index)), center, weights[sample_index]),
         +,
         eachindex(weights),
     )
@@ -181,13 +181,19 @@ function _weighted_sum(samples::NamedTuple, weights)
     return NamedTuple{keys(samples)}(summaries)
 end
 
+function _weighted_squared_deviation(value, center, weight)
+    deviation = value - center
+    contribution = real(conj(deviation) * (weight * deviation))
+    return ifelse(iszero(weight), zero(contribution), contribution)
+end
+
 function _weighted_variance(samples::AbstractVector, weights, center)
-    return LinearAlgebra.dot(weights, abs2.(samples .- center))
+    return sum(_weighted_squared_deviation.(samples, center, weights))
 end
 
 function _weighted_variance(samples::AbstractMatrix, weights, center)
-    centered = samples .- center
-    return vec(sum(abs2.(centered) .* reshape(weights, 1, :); dims=2))
+    return vec(sum(
+        _weighted_squared_deviation.(samples, center, reshape(weights, 1, :)); dims=2))
 end
 
 function _weighted_variance(samples::NamedTuple, weights, center)
@@ -242,7 +248,11 @@ function _weighted_quantile(
         lower_weight = cumulative_weights[lower]
         fraction = (threshold - lower_weight) /
                    (cumulative_weights[upper] - lower_weight)
-        return oftype(zero_value, values[lower] + fraction * (values[upper] - values[lower]))
+        iszero(fraction) && return oftype(zero_value, values[lower])
+        difference = values[upper] - values[lower]
+        interpolated = isfinite(difference) ? values[lower] + fraction * difference :
+            (one(fraction) - fraction) * values[lower] + fraction * values[upper]
+        return oftype(zero_value, interpolated)
     end
 end
 

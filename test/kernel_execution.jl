@@ -1081,6 +1081,24 @@ end
           rand(expected_shared_rng, UInt64)
 end
 
+@testset "task-local RNG accelerator transfer preserves both streams" begin
+    fetch(@async begin
+        Random.seed!(0x9114)
+        source_rng = Random.default_rng()
+        expected_source = copy(source_rng)
+        destination_seed = rand(expected_source, UInt64)
+        algorithm = ImportanceSampling(SphericalGaussian(0.25, 1.5); nsamples=8)
+        target = FusedQuadraticTarget(0.75)
+        source = prepare_sampler(source_rng, target, algorithm)
+        destination = OwnedBufferAccelerator()(source)
+
+        @test importance_sample!(destination).samples ==
+              importance_sample(Random.Xoshiro(destination_seed), target, algorithm).samples
+        @test importance_sample!(source).samples ==
+              importance_sample(expected_source, target, algorithm).samples
+    end)
+end
+
 @testset "accelerator launch policy is independent of host threads" begin
     sampler = OwnedBufferAccelerator()(
         prepare_sampler(

@@ -485,65 +485,6 @@ import ForwardDiff
     end
 end
 
-@testset "generated gradients use one preparation per default worker" begin
-    sample = [0.25, -0.5]
-    proposal = TestVectorProposal(zeros(2))
-    target = ISD._prepare_target(
-        LogTarget(context_free_logtarget, ADTypes.AutoForwardDiff()),
-        proposal,
-    )
-    worker_count = Threads.nthreads(:default)
-    bound = ISD._prepare_bound_gradient(target, sample, worker_count)
-    calls_per_worker = 3
-    destinations = [similar(sample) for _ in 1:worker_count]
-    preparation_calls = [Any[] for _ in 1:worker_count]
-    thread_calls = [Int[] for _ in 1:worker_count]
-
-    Threads.@threads :static for worker in 1:worker_count
-        for _ in 1:calls_per_worker
-            push!(thread_calls[worker], Threads.threadid())
-            push!(
-                preparation_calls[worker],
-                ISD._gradient_workspace(bound.preparation),
-            )
-            ISD._gradient!(destinations[worker], bound, sample)
-        end
-    end
-
-    @test all(==([-0.25, 0.5]), destinations)
-    @test isconcretetype(typeof(bound))
-    @test all(isconcretetype, fieldtypes(typeof(bound)))
-    @test bound.target === target
-    @test length(bound.preparation.preparations) == worker_count
-    @test all(
-        left == right ||
-        bound.preparation.preparations[left] !==
-        bound.preparation.preparations[right]
-        for left in 1:worker_count for right in 1:worker_count
-    )
-    @test bound.preparation.thread_slots[
-        Threads.threadpooltids(:default)
-    ] == collect(1:worker_count)
-    @test sort!(only.(unique.(thread_calls))) ==
-          sort!(collect(Threads.threadpooltids(:default)))
-    for worker in 1:worker_count
-        @test length(preparation_calls[worker]) == calls_per_worker
-        @test all(
-            preparation -> preparation === first(preparation_calls[worker]),
-            preparation_calls[worker],
-        )
-        thread_id = only(unique(thread_calls[worker]))
-        slot = bound.preparation.thread_slots[thread_id]
-        @test first(preparation_calls[worker]) ===
-              bound.preparation.preparations[slot]
-    end
-    @test all(
-        left == right ||
-        first(preparation_calls[left]) !== first(preparation_calls[right])
-        for left in 1:worker_count for right in 1:worker_count
-    )
-end
-
 @testset "Named gradients preserve scalar and simplex change of variables" begin
     layout = (weights=(1:2=>SimplexTransform(3)), positive=(3=>PositiveTransform()),
         soft=(4=>SoftplusTransform()), bounded=(5=>IntervalTransform(-2.0,2.0)),

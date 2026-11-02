@@ -4,6 +4,15 @@ using MLDataDevices
 using Random
 using Statistics
 
+struct BoundaryUniformRNG{T} <: Random.AbstractRNG
+    values::Vector{T}
+end
+
+function Random.rand!(rng::BoundaryUniformRNG, values::AbstractArray)
+    copyto!(values, rng.values)
+    return values
+end
+
 @testset "public multinomial resampling" begin
     points = Float32.(1:65536)
     half = WeightedSamples(points, zeros(Float16, length(points)))
@@ -40,6 +49,20 @@ using Statistics
         Random.Xoshiro(14),
         WeightedSamples([1.0, 2.0], fill(-Inf, 2)),
     )
+end
+
+@testset "resampling preserves exact zero-mass support" begin
+    logweights = vcat(-Inf32, zeros(Float32, 6), -Inf32, zeros(Float32, 6), -Inf32)
+    result = WeightedSamples(collect(eachindex(logweights)), logweights)
+    uniforms = Float32[0, 0.5, prevfloat(1f0)]
+    @test resample(BoundaryUniformRNG(uniforms), result, 3).samples == [2, 9, 14]
+
+    logweights = fill(-Inf32, 259)
+    logweights[1] = 0f0
+    logweights[2] = logweights[66] = Float32(-24log(2))
+    result = WeightedSamples(collect(eachindex(logweights)), logweights)
+    selected = only(resample(BoundaryUniformRNG(Float32[prevfloat(1f0)]), result, 1).samples)
+    @test isfinite(logweights[selected])
 end
 
 @testset "unweighted sample statistics and transfer" begin

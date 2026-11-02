@@ -10,50 +10,32 @@ include("support/first_order_gramis.jl")
 
 const GRAMISIS = ImportanceSamplers
 
-mutable struct FirstOrderGRAMISDITrace
-    next_preparation::Threads.Atomic{Int}
-    lock::ReentrantLock
-    calls::Vector{Tuple{Int,Any}}
-end
+struct FirstOrderGRAMISYieldingAD <: ADTypes.AbstractADType end
 
-FirstOrderGRAMISDITrace() = FirstOrderGRAMISDITrace(
-    Threads.Atomic{Int}(0),
-    ReentrantLock(),
-    Tuple{Int,Any}[],
-)
+ADTypes.mode(::FirstOrderGRAMISYieldingAD) = ADTypes.ForwardMode()
 
-struct FirstOrderGRAMISRecordingAD <: ADTypes.AbstractADType
-    trace::FirstOrderGRAMISDITrace
-end
-
-ADTypes.mode(::FirstOrderGRAMISRecordingAD) = ADTypes.ForwardMode()
-
-mutable struct FirstOrderGRAMISRecordingPreparation
-    id::Int
-    trace::FirstOrderGRAMISDITrace
+struct FirstOrderGRAMISYieldingPreparation{V}
+    scratch::V
 end
 
 function DifferentiationInterface.prepare_gradient(
     target,
-    backend::FirstOrderGRAMISRecordingAD,
+    backend::FirstOrderGRAMISYieldingAD,
     sample,
 )
-    id = Threads.atomic_add!(backend.trace.next_preparation, 1) + 1
-    return FirstOrderGRAMISRecordingPreparation(id, backend.trace)
+    return FirstOrderGRAMISYieldingPreparation(similar(sample))
 end
 
 function DifferentiationInterface.gradient!(
     target,
     destination,
-    preparation::FirstOrderGRAMISRecordingPreparation,
-    backend::FirstOrderGRAMISRecordingAD,
+    preparation::FirstOrderGRAMISYieldingPreparation,
+    backend::FirstOrderGRAMISYieldingAD,
     sample,
 )
-    thread_id = Threads.threadid()
-    lock(preparation.trace.lock) do
-        push!(preparation.trace.calls, (thread_id, preparation))
-    end
-    destination .= -sample
+    preparation.scratch .= -sample
+    sleep(0.001)
+    copyto!(destination, preparation.scratch)
     return destination
 end
 
@@ -483,13 +465,11 @@ end
         repulsion_strength=zero(T),
         covariance_ess_threshold=dimension + 1,
     )
-    serial_trace = FirstOrderGRAMISDITrace()
-    threaded_trace = FirstOrderGRAMISDITrace()
     serial = prepare_sampler(
         FirstOrderGRAMISPrefilledRNG(deepcopy(batches)),
         LogTarget(
             FirstOrderGRAMISTarget{T}(),
-            FirstOrderGRAMISRecordingAD(serial_trace),
+            FirstOrderGRAMISYieldingAD(),
         ),
         algorithm;
         threaded=false,
@@ -498,7 +478,7 @@ end
         FirstOrderGRAMISPrefilledRNG(deepcopy(batches)),
         LogTarget(
             FirstOrderGRAMISTarget{T}(),
-            FirstOrderGRAMISRecordingAD(threaded_trace),
+            FirstOrderGRAMISYieldingAD(),
         ),
         algorithm;
         threaded=true,
@@ -518,30 +498,33 @@ end
         current_proposal(threaded),
     )
 
-    threaded_pool = threaded.method_state.threaded_gradient.preparation
-    serial_only_preparation = only(
-        threaded.method_state.serial_gradient.preparation.preparations,
-    )
-    calls = copy(threaded_trace.calls)
-    observed_thread_ids = sort!(unique(first.(calls)))
-    @test observed_thread_ids == sort!(collect(Threads.threadpooltids(:default)))
-    @test length(threaded_pool.preparations) == worker_count
-    for thread_id in observed_thread_ids
-        preparations = last.(filter(call -> first(call) == thread_id, calls))
-        @test !isempty(preparations)
-        @test all(preparation -> preparation === first(preparations), preparations)
-        slot = threaded_pool.thread_slots[thread_id]
-        expected = worker_count > 1 ? threaded_pool.preparations[slot] : serial_only_preparation
-        @test first(preparations) === expected
+end
+
+@testset "Named gradients retain scratch across task yields" begin
+    count = 4max(Threads.nthreads(:default), 2)
+    bank = ProposalBank([SphericalGaussian([i / count], 1.0) for i in 1:count])
+    algorithm = FirstOrderGRAMIS(bank; rounds=1, round_size=4count,
+        repulsion_strength=0.0, covariance_ess_threshold=2)
+    function yielding_gradient!(g, theta)
+        g.x[] = -theta.x
+        sleep(0.001)
     end
-    used_preparations = [
-        only(unique(last.(filter(call -> first(call) == thread_id, calls)))) for
-        thread_id in observed_thread_ids
-    ]
-    @test all(
-        left == right || used_preparations[left] !== used_preparations[right] for
-        left in eachindex(used_preparations) for right in eachindex(used_preparations)
-    )
+    target = LogTarget(theta -> -abs2(theta.x) / 2; grad=yielding_gradient!)
+    transform = (; x=(1 => IdentityTransform()))
+    serial_sampler = prepare_sampler(Random.Xoshiro(0x3b02), target, algorithm;
+        transform, threaded=false)
+    serial = importance_sample!(serial_sampler)
+    for _ in 1:3
+        threaded_sampler = prepare_sampler(Random.Xoshiro(0x3b02), target, algorithm;
+            transform, threaded=true)
+        threaded = importance_sample!(threaded_sampler)
+        @test threaded.samples == serial.samples
+        @test threaded.logweights == serial.logweights
+        @test all(zip(current_proposal(serial_sampler).proposals,
+            current_proposal(threaded_sampler).proposals)) do (serial_proposal, threaded_proposal)
+            serial_proposal.location == threaded_proposal.location
+        end
+    end
 end
 
 @testset "FirstOrderGRAMIS two-round execution is causal and retains only q3" begin
@@ -849,6 +832,26 @@ end
         expected = (one(T) - rate) * old_covariance + rate * covariance +
                    regularization * old_covariance
         @test abs2(only(fitted.scale.factor)) ≈ expected rtol=32eps(T)
+    end
+end
+
+@testset "FirstOrderGRAMIS full covariance replacement ignores an overflowing old covariance" begin
+    scale = 1f20
+    bank = ProposalBank([SphericalGaussian(Float32[mean], scale) for mean in (-1f0, 1f0)],
+        ones(Float32, 2))
+    target(sample) = abs(only(sample)) < 4f0 ? -log(8f0) : -Inf32
+    sampler = prepare_sampler(
+        FirstOrderGRAMISPrefilledRNG([Float32[-1, 0, 1, -1, 0, 1] ./ scale]),
+        LogTarget(target; grad=first_order_gramis_zero_gradient!),
+        FirstOrderGRAMIS(bank; rounds=1, round_size=6, repulsion_strength=0f0);
+        threaded=false)
+    importance_sample!(sampler)
+
+    ridge = BigFloat(sqrt(eps(Float32))) * BigFloat(scale)^2
+    expected_peak = Float32(-log(2big(pi) * (big(2) / 3 + ridge)) / 2)
+    for proposal in current_proposal(sampler).proposals
+        @test GRAMISIS.DensityInterface.logdensityof(proposal, proposal.location) ≈
+              expected_peak rtol=8eps(Float32)
     end
 end
 

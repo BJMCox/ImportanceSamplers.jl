@@ -84,6 +84,11 @@ jobs:
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         with:
           path: docs/build
+      - name: Check external documentation links
+        continue-on-error: true
+        env:
+          DOCUMENTER_LINKCHECK: 'true'
+        run: julia --project=docs docs/make.jl
 
   deploy-docs:
     name: Deploy documentation

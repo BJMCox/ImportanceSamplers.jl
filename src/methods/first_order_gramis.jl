@@ -476,18 +476,6 @@ function _resolve_first_order_gramis_thresholds(
     return thresholds
 end
 
-function _first_order_gramis_group_starts(counts)
-    starts = similar(counts)
-    for round in axes(counts, 2)
-        first_sample = 1
-        for proposal in axes(counts, 1)
-            starts[proposal, round] = first_sample
-            first_sample += counts[proposal, round]
-        end
-    end
-    return starts
-end
-
 function _allocate_first_order_gramis_workspace(bank, plan, ::Type{L}) where {L}
     T = eltype(bank.locations)
     dimension, proposal_count = size(bank.locations)
@@ -502,7 +490,7 @@ function _allocate_first_order_gramis_workspace(bank, plan, ::Type{L}) where {L}
         similar(prototype, Int, capacity),
         similar(prototype, T, capacity),
         _allocate_mis_solve_scratch(prototype, bank, capacity),
-        _first_order_gramis_group_starts(plan.counts),
+        _population_group_starts(plan.counts),
         similar(prototype, T, dimension, proposal_count),
         similar(prototype, T, dimension, dimension, proposal_count),
         similar(prototype, T, dimension, dimension),

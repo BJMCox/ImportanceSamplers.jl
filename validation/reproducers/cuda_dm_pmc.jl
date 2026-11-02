@@ -135,6 +135,7 @@ function prefilled_trajectory!(sampler, normal_batches, uniform_batches)
         copyto!(buffers.resampling_uniforms, uniform_batches[round])
         IS._resample_and_gather!(
             cdf,
+            round_logweights,
             buffers.resampling_uniforms,
             workspace.ancestors,
             round_samples,
@@ -515,6 +516,7 @@ function strict_resampling_and_ess_case(::Type{T}) where {T}
     candidates = similar(samples)
     IS._resample_and_gather!(
         cdf,
+        CuArray(log.(T[0, 0.2, 0, 0.8])),
         uniforms,
         ancestors,
         samples,

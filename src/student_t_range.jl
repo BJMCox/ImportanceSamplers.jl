@@ -1,4 +1,4 @@
-# Exceptional Student-t solves extend exponent range, not float precision.
+# Exceptional radial solves extend exponent range, not float precision.
 struct _RangeSolveScratch{V,E}
     values::V
     exponents::E
@@ -71,6 +71,49 @@ end
     mantissa, exponent = frexp(divisor)
     quotient, shift = frexp(value[1] / mantissa)
     return quotient, iszero(quotient) ? 0 : value[2] - exponent + shift
+end
+
+@inline function _standardized_difference(sample, location, scale)
+    difference = sample - location
+    if isfinite(difference) || !isfinite(sample) || !isfinite(location)
+        return difference / scale
+    end
+    return sample / scale - location / scale
+end
+
+@inline function _factor_standardized_coordinate(sample, location, row, factor_at, previous_at)
+    standardized = sample - location
+    for column in 1:(row - 1)
+        standardized -= factor_at(column) * previous_at(column)
+    end
+    diagonal = factor_at(row)
+    standardized /= diagonal
+    if isfinite(standardized) || !isfinite(sample) || !isfinite(location)
+        return standardized
+    end
+
+    # A finite solved coordinate need not have a representable unscaled row.
+    value = _range_subtract(frexp(sample), frexp(location))
+    for column in 1:(row - 1)
+        previous = previous_at(column)
+        # Preserve overflow for Gaussian tails and the Student-t full-range retry.
+        isfinite(previous) || return previous
+        value = _range_subtract(value, _range_multiply(frexp(previous), factor_at(column)))
+    end
+    mantissa, exponent = _range_divide(value, diagonal)
+    return ldexp(mantissa, exponent)
+end
+
+function _repair_factor_squared_radius!(values, squared_radius, dimension, sample_at, location_at, factor_at)
+    all(isfinite, values) && return squared_radius
+    squared_radius = zero(squared_radius)
+    for row in 1:dimension
+        standardized = _factor_standardized_coordinate(sample_at(row), location_at(row), row,
+            column -> factor_at(row, column), column -> values[column])
+        values[row] = standardized
+        squared_radius += abs2(standardized)
+    end
+    return squared_radius
 end
 
 @inline function _logabsdiff(left, right)

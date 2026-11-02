@@ -21,14 +21,30 @@ end
 
 include("student_t_range.jl")
 
-@inline _radial_logdensity(::GaussianFamily, lognormalizer, squared_radius, dimension, coordinate_at, logradius_at, range_risk=false) =
-    lognormalizer - oftype(squared_radius, 0.5) * squared_radius
+@inline function _radial_logdensity(::GaussianFamily, lognormalizer, squared_radius, dimension, coordinate_at, logradius_at, range_risk=false)
+    half_radius = oftype(squared_radius, 0.5) * squared_radius
+    if !isfinite(squared_radius)
+        half_radius = zero(squared_radius)
+        for coordinate in 1:dimension
+            value = @inline coordinate_at(coordinate)
+            half_radius += (oftype(value, 0.5) * value) * value
+        end
+    end
+    return lognormalizer - half_radius
+end
 
 @inline function _radial_logdensity(family::StudentTFamily, lognormalizer, squared_radius, dimension, coordinate_at, logradius_at, range_risk=false)
     dof = family.dof
     ratio = squared_radius / dof
     radial_log = if range_risk
         LogExpFunctions.log1pexp(logradius_at() - log(dof))
+    elseif squared_radius < floatmin(typeof(squared_radius))
+        scale = sqrt(dof)
+        scaled_radius = zero(squared_radius)
+        for coordinate in 1:dimension
+            scaled_radius += abs2(coordinate_at(coordinate) / scale)
+        end
+        log1p(scaled_radius)
     elseif isfinite(ratio)
         log1p(ratio)
     else
@@ -564,7 +580,7 @@ end
     coordinates,
     offset,
 ) where {T<:_NativeGaussianFloat}
-    standardized = (@inbounds coordinates[offset] - location) / scale.scale
+    standardized = _standardized_difference(@inbounds(coordinates[offset]), location, scale.scale)
     @inbounds coordinates[offset] = standardized
     return abs2(standardized)
 end
@@ -576,7 +592,8 @@ end
     offset,
     index,
 ) where {T<:_NativeGaussianFloat}
-    return (@inbounds coordinates[offset + index - 1] - location[index]) / scale.scale
+    return _standardized_difference(@inbounds(coordinates[offset + index - 1]),
+        @inbounds(location[index]), scale.scale)
 end
 
 @inline function _native_standardized_coordinate(
@@ -586,8 +603,8 @@ end
     offset,
     index,
 ) where {T<:_NativeGaussianFloat}
-    return (@inbounds coordinates[offset + index - 1] - location[index]) /
-           @inbounds(scale.scales[index])
+    return _standardized_difference(@inbounds(coordinates[offset + index - 1]),
+        @inbounds(location[index]), @inbounds(scale.scales[index]))
 end
 
 @inline function _native_gaussian_squared_radius!(
@@ -615,12 +632,10 @@ end
 ) where {T<:_NativeGaussianFloat}
     squared_radius = zero(T)
     for row in eachindex(location)
-        standardized = @inbounds coordinates[offset + row - 1] - location[row]
-        for column in 1:(row - 1)
-            standardized -= @inbounds(scale.factor[row, column]) *
-                            @inbounds(coordinates[offset + column - 1])
-        end
-        standardized /= @inbounds scale.factor[row, row]
+        standardized = _factor_standardized_coordinate(
+            @inbounds(coordinates[offset + row - 1]), @inbounds(location[row]), row,
+            column -> @inbounds(scale.factor[row, column]),
+            column -> @inbounds(coordinates[offset + column - 1]))
         @inbounds coordinates[offset + row - 1] = standardized
         squared_radius += abs2(standardized)
     end
@@ -634,8 +649,9 @@ end
         coordinates,
         offset,
     )
-    return proposal.lognormalizer -
-           oftype(proposal.lognormalizer, 0.5) * squared_radius
+    return _radial_logdensity(proposal.family, proposal.lognormalizer,
+        squared_radius, _gaussian_dimension(proposal.location),
+        index -> @inbounds(coordinates[offset + index - 1]), nothing)
 end
 
 @inline _native_proposal_logdensity!(proposal::_GaussianProposal, coordinates, offset, logradius_at) =
@@ -777,7 +793,7 @@ function _radial_proposal_logdensity(
     scale::_SphericalGaussianScale{T},
     sample::T,
 ) where {T<:_NativeGaussianFloat}
-    standardized = (sample - location) / scale.scale
+    standardized = _standardized_difference(sample, location, scale.scale)
     return _radial_logdensity(family, lognormalizer, abs2(standardized), 1, _ -> standardized,
         () -> _diagonal_range_logradius(1, _ -> sample, _ -> location, _ -> scale.scale))
 end
@@ -792,11 +808,11 @@ function _radial_proposal_logdensity(
     _check_gaussian_sample_length(location, sample)
     squared_radius = zero(T)
     for index in eachindex(location, sample)
-        standardized = (sample[index] - location[index]) / scale.scale
+        standardized = _standardized_difference(sample[index], location[index], scale.scale)
         squared_radius += abs2(standardized)
     end
     return _radial_logdensity(family, lognormalizer, squared_radius, length(location),
-        index -> (sample[index] - location[index]) / scale.scale,
+        index -> _standardized_difference(sample[index], location[index], scale.scale),
         () -> _diagonal_range_logradius(length(location), i -> sample[i], i -> location[i], _ -> scale.scale))
 end
 
@@ -810,11 +826,11 @@ function _radial_proposal_logdensity(
     _check_gaussian_sample_length(location, sample)
     squared_radius = zero(T)
     for index in eachindex(location, scale.scales, sample)
-        standardized = (sample[index] - location[index]) / scale.scales[index]
+        standardized = _standardized_difference(sample[index], location[index], scale.scales[index])
         squared_radius += abs2(standardized)
     end
     return _radial_logdensity(family, lognormalizer, squared_radius, length(location),
-        index -> (sample[index] - location[index]) / scale.scales[index],
+        index -> _standardized_difference(sample[index], location[index], scale.scales[index]),
         () -> _diagonal_range_logradius(length(location), i -> sample[i], i -> location[i], i -> scale.scales[i]))
 end
 
@@ -831,7 +847,12 @@ function _radial_proposal_logdensity(
         standardized[index] -= location[index]
     end
     LinearAlgebra.ldiv!(LinearAlgebra.LowerTriangular(scale.factor), standardized)
-    return _radial_logdensity(family, lognormalizer, sum(abs2, standardized), length(location),
+    squared_radius = sum(abs2, standardized)
+    if !isfinite(squared_radius)
+        squared_radius = _repair_factor_squared_radius!(standardized, squared_radius,
+            length(location), i -> sample[i], i -> location[i], (i,j) -> scale.factor[i,j])
+    end
+    return _radial_logdensity(family, lognormalizer, squared_radius, length(location),
         index -> standardized[index],
         () -> _factor_range_logradius!(standardized, Vector{Int}(undef, length(location)),
             length(location), i -> sample[i], i -> location[i], (i,j) -> scale.factor[i,j]),

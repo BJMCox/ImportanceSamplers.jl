@@ -75,7 +75,9 @@ Local resampling also fails when one proposal's sample group has no nonzero weig
 A failure preserves the pre-call population, but not the old RNG position.
 
 The linear normalizer estimate is unbiased for a fixed schedule when each conditional
-mixture covers the integrable target and adaptation uses only completed rounds.
+mixture covers the integrable target, adaptation uses only completed rounds, and the run completes almost surely.
+This statement concerns the unconditional sampling law, not runs selected for successful completion.
+Discarding failed runs or retrying until success can bias the estimate.
 This does not make the logarithm or normalized expectations unbiased.
 
 ## Sources

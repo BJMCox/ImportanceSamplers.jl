@@ -1157,6 +1157,17 @@ end
     @test rand(getfield(late_source, :rng), UInt64) ==
           rand(expected_late_rng, UInt64)
 
+    fetch(@async begin
+        Random.seed!(0x221e)
+        task_rng = Random.default_rng()
+        expected_rng = copy(task_rng)
+        source = prepare_sampler(task_rng, static_mis_device_target, (shift=[0.25],),
+            algorithm)
+        caught_device_error(() -> LateFailAccelerator()(source))
+        @test importance_sample!(source).samples == importance_sample(
+            expected_rng, static_mis_device_target, (shift=[0.25],), algorithm).samples
+    end)
+
     generic = ProposalBank([TransferProposal([0.0]), TransferProposal([1.0])])
     factor = ProposalBank([
         FactorGaussian([0.0, 0.0], [1.0 0.0; 0.0 1.0]),
@@ -1357,7 +1368,6 @@ end
         @test all(argument -> argument isa SubArray, representative_arguments)
         backend = KernelAbstractions.get_backend(buffers.normals)
         round_kernel = IS._mis_round_launch_kernel!(backend)
-        finalize_kernel = IS._finalize_resampling_cdf_kernel!(backend)
         select_kernel = IS._select_resampling_ancestors_kernel!(backend)
         gather_kernel = IS._gather_resampled_samples_kernel!(backend)
         for (kernel, argument) in (
@@ -1365,7 +1375,6 @@ end
             (round_kernel, representative_arguments[2]),
             (round_kernel, representative_arguments[3]),
             (round_kernel, representative_arguments[4]),
-            (finalize_kernel, representative_arguments[5]),
             (select_kernel, representative_arguments[5]),
             (gather_kernel, representative_arguments[1]),
         )

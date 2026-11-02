@@ -2,14 +2,19 @@ struct _SerialCPUExecution end
 struct _ThreadedCPUExecution end
 
 function _threaded_foreach(f, indices)
+    return _threaded_foreach_worker((index, _) -> f(index), indices)
+end
+
+# A worker slot belongs to a task for its whole chunk, even if the task migrates.
+function _threaded_foreach_worker(f, indices)
     item_count = length(indices)
     iszero(item_count) && return nothing
     task_count = min(Threads.nthreads(:default), item_count)
     chunk_size = cld(item_count, task_count)
-    @sync for first_position in 1:chunk_size:item_count
+    @sync for (worker, first_position) in enumerate(1:chunk_size:item_count)
         last_position = min(first_position + chunk_size - 1, item_count)
         Threads.@spawn for position in first_position:last_position
-            @inbounds f(indices[position])
+            @inbounds f(indices[position], worker)
         end
     end
     return nothing

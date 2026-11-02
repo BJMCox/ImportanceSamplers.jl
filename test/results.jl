@@ -20,6 +20,7 @@ end
     @test (@inferred std(result)) ≈ sqrt(11.6875)
     @test (@inferred var(abs2, result)) ≈ 1655.6875
     @test (@inferred std(abs2, result)) ≈ sqrt(1655.6875)
+    @test var(x -> complex(zero(x), x), result) ≈ 11.6875
     @test_throws ArgumentError var(result; corrected=true)
     @test_throws ArgumentError std(result; corrected=true)
 end
@@ -46,6 +47,26 @@ end
     @test structured_variance.state.position ≈ [11.6875, 4.75]
 end
 
+@testset "weighted variance range" begin
+    for (T, magnitude, mass) in ((Float32, 1f20, 1f-20), (Float64, 1e200, 1e-200))
+        samples = T[0, magnitude]
+        for logmass in (log(mass), T(-Inf))
+            logweights = T[0, logmass]
+            weights = exp.(BigFloat.(logweights))
+            weights ./= sum(weights)
+            center = sum(weights .* BigFloat.(samples))
+            expected = T(sum(weights .* abs2.(BigFloat.(samples) .- center)))
+            scalar = WeightedSamples(samples, logweights)
+            matrix = WeightedSamples(reshape(samples, 1, :), logweights)
+            named = WeightedSamples((position=samples,), logweights)
+            @test var(scalar) ≈ expected rtol=8eps(T)
+            @test var(identity, scalar) ≈ expected rtol=8eps(T)
+            @test only(var(matrix)) ≈ expected rtol=8eps(T)
+            @test var(named).position ≈ expected rtol=8eps(T)
+        end
+    end
+end
+
 @testset "weighted quantiles" begin
     logweights = 1000 .+ log.([1.0, 2.0, 1.0])
     scalar = WeightedSamples([1.0, 3.0, 10.0], logweights)
@@ -59,6 +80,14 @@ end
 
     structured = WeightedSamples((location=[1.0, 3.0, 10.0],), logweights)
     @test quantile(structured, 0.5).location ≈ 2.5
+end
+
+@testset "weighted quantile range" begin
+    for magnitude in (2f38, 1e308)
+        T = typeof(magnitude)
+        result = WeightedSamples(T[-magnitude, magnitude], zeros(T, 2))
+        @test quantile(result, T[0, 0.5, 1]) == T[-magnitude, 0, magnitude]
+    end
 end
 
 @testset "reported transfer storage" begin

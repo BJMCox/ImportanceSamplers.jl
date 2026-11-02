@@ -1051,11 +1051,12 @@ end
     bound_gradient,
     locations,
     proposal_slot,
+    gradient_slot=proposal_slot,
 )
     location = view(locations, :, proposal_slot)
     gradient = view(gradients, :, proposal_slot)
     @inbounds values[proposal_slot] = target(location)
-    _gradient!(gradient, bound_gradient, location, proposal_slot)
+    _gradient!(gradient, bound_gradient, location, gradient_slot)
     return nothing
 end
 
@@ -1075,6 +1076,7 @@ function _evaluate_frozen_gradients!(
             bound_gradient,
             locations,
             proposal_slot,
+            1,
         )
     end
     _validate_frozen_derivatives!(values, gradients)
@@ -1279,7 +1281,7 @@ function _evaluate_frozen_gradients!(
     locations,
     ::_ThreadedCPUExecution,
 )
-    _threaded_foreach(axes(locations, 2)) do proposal_slot
+    _threaded_foreach_worker(axes(locations, 2)) do proposal_slot, worker
         _evaluate_frozen_gradient_slot!(
             values,
             gradients,
@@ -1287,6 +1289,7 @@ function _evaluate_frozen_gradients!(
             bound_gradient,
             locations,
             proposal_slot,
+            worker,
         )
     end
     _validate_frozen_derivatives!(values, gradients)
@@ -1933,29 +1936,26 @@ end
     if @inbounds(status[proposal_slot]) == _POPULATION_COVARIANCE_READY
         T = eltype(covariances)
         dimension = size(covariances, 1)
-        previous_trace = zero(T)
-        for column in 1:dimension, row in column:dimension
-            previous_trace += abs2(@inbounds factors[row, column, proposal_slot])
-        end
         multiplier = _covariance_multiplier(_radial_family_at(family, proposal_slot), T)
-        ridge = _scale_aware_ridge(
-            previous_trace * multiplier,
-            dimension,
-            regularization,
-        )
+        ridge = _factor_scale_aware_ridge(
+            factors, proposal_slot, _radial_family_at(family, proposal_slot), regularization)
         rate = T(@inbounds covariance_rate[round])
         for column in 1:dimension, row in column:dimension
             estimate = (
                 @inbounds(covariances[row, column, proposal_slot]) +
                 @inbounds(covariances[column, row, proposal_slot])
             ) / T(2)
-            old = _population_factor_covariance(
-                factors,
-                row,
-                column,
-                proposal_slot,
-            )
-            blended = (one(T) - rate) * old * multiplier + rate * estimate
+            blended = if rate == one(T)
+                estimate
+            else
+                old = _population_factor_covariance(
+                    factors,
+                    row,
+                    column,
+                    proposal_slot,
+                )
+                (one(T) - rate) * old * multiplier + rate * estimate
+            end
             row == column && (blended += ridge)
             @inbounds covariances[row, column, proposal_slot] = blended
             @inbounds covariances[column, row, proposal_slot] = blended

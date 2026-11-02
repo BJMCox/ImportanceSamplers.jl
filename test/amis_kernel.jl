@@ -1,5 +1,6 @@
 using Test
 using ImportanceSamplers
+import DensityInterface
 import KernelAbstractions
 import LinearAlgebra
 import LogExpFunctions
@@ -28,6 +29,9 @@ function Random.randn!(rng::AMISPrefilledRNG, destination::AbstractArray)
     rng.index += 1
     return destination
 end
+
+Random.rand!(::AMISPrefilledRNG, destination::AbstractArray) =
+    fill!(destination, 0.5)
 
 mutable struct AMISCountingTarget{T}
     calls::Int
@@ -321,6 +325,64 @@ end
         frozen = Dict(expected)[T]
         @test bitstring(only(scalar_covariance)) == frozen.scalar
         @test bitstring.(dense_covariance) == frozen.dense
+    end
+end
+
+@testset "native Gaussian finite-range generating densities" begin
+    tail = 2f19
+    scalar = SphericalGaussian(0f0, 1f0)
+    factor = FactorGaussian(zeros(Float32, 2), Matrix{Float32}(LinearAlgebra.I, 2, 2))
+    for (proposal, normals) in ((scalar, Float32[tail]), (factor, Float32[tail, 0]))
+        expected = Float32(length(normals) * log(2big(pi)) / 2 + BigFloat(tail)^2 / 2)
+        target(_) = 0f0
+        plain = importance_sample(AMISPrefilledRNG([copy(normals)]), target,
+            ImportanceSampling(proposal; nsamples=1); threaded=false)
+        @test only(plain.logweights) ≈ expected rtol=8eps(Float32)
+
+        executions = proposal === scalar ? (FusedFactorExecution(),) :
+                     (FusedFactorExecution(), BatchedFactorExecution())
+        for execution in executions
+            packed = importance_sample(AMISPrefilledRNG([copy(normals)]), target,
+                ImportanceSampling(ProposalBank([proposal], Float32[1]); nsamples=1);
+                threaded=false, factor_execution=execution)
+            @test only(packed.logweights) ≈ expected rtol=8eps(Float32)
+        end
+    end
+end
+
+@testset "Gaussian mixture subtraction range" begin
+    magnitude = 2f38
+    scalar = [SphericalGaussian(sign * magnitude, magnitude) for sign in (-1f0, 1f0)]
+    factors = [FactorGaussian(Float32[sign * magnitude, 0],
+        Matrix(LinearAlgebra.Diagonal(Float32[magnitude, 1]))) for sign in (-1f0, 1f0)]
+    for (proposals, dimension, executions) in (
+        (scalar, 1, (FusedFactorExecution(),)),
+        (factors, 2, (FusedFactorExecution(), BatchedFactorExecution())))
+        expected = Float32(log(BigFloat(magnitude)) + dimension * log(2big(pi)) / 2 -
+            log((1 + exp(big(-2))) / 2))
+        for execution in executions
+            result = importance_sample(AMISPrefilledRNG([zeros(Float32, 2dimension)]),
+                _ -> 0f0, ImportanceSampling(ProposalBank(proposals, ones(Float32, 2)); nsamples=2);
+                threaded=false, factor_execution=execution)
+            @test result.logweights ≈ fill(expected, 2) rtol=8eps(Float32)
+        end
+    end
+end
+
+@testset "AMIS representable scale-aware ridge" begin
+    for (proposal, scale, dimension) in (
+        (SphericalGaussian(0f0, 1f20), 1f20, 1),
+        (SphericalGaussian(zeros(Float32, 4), 1f19), 1f19, 4))
+        sampler = prepare_sampler(AMISPrefilledRNG([zeros(Float32, dimension)]),
+            (sample, q) -> DensityInterface.logdensityof(q, sample), proposal,
+            AMIS(proposal; rounds=1, round_size=1); threaded=false)
+        result = importance_sample!(sampler)
+        fitted = current_proposal(sampler)
+        ridge = sqrt(BigFloat(eps(Float32))) * BigFloat(scale)^2
+        expected = Float32(-dimension * log(2big(pi) * ridge) / 2)
+        @test DensityInterface.logdensityof(fitted, proposal.location) ≈
+              expected rtol=8eps(Float32)
+        @test iszero(only(result.logweights))
     end
 end
 

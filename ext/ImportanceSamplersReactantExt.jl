@@ -557,14 +557,16 @@ function _prepare_population_adaptation(sampler, state::IS._PreparedDMPMC)
         end
         cdf_phase = function (state)
             views = IS._population_round_views(state, round)
-            moments = _normalize_weights!(views.cdf, views.logweights, views.round_size)
+            moments = _normalize_weights!(views.cdf, views.logweights, views.round_size;
+                normalize=false)
             views.cdf .= cumsum(views.cdf)
+            views.cdf ./= views.cdf[end:end]
             return moments
         end
         select_phase = function (rng, state, buffers)
             views = IS._population_round_views(state, round)
             Random.rand!(rng, buffers.resampling_uniforms)
-            IS._resample_and_gather!(views.cdf, buffers.resampling_uniforms,
+            IS._resample_and_gather!(views.cdf, views.logweights, buffers.resampling_uniforms,
                 state.workspace.ancestors, views.samples, state.workspace.candidate_locations,
                 IS._ThreadedCPUExecution())
             return nothing
@@ -814,14 +816,14 @@ function IS._clip_logweights!(clipped::_ReactantStorage, raw, threshold)
     return clipped
 end
 
-function _normalize_weights!(weights, logweights, count)
+function _normalize_weights!(weights, logweights, count; normalize=true)
     active = view(weights, 1:count)
     values = view(logweights, 1:count)
     maximum_logweight = maximum(values; dims=1)
     active .= exp.(values .- ifelse.(isfinite.(maximum_logweight), maximum_logweight, zero(eltype(values))))
     total = sum(active; dims=1)
     squared_sum = sum(abs2, active; dims=1)
-    active ./= ifelse.(iszero.(total), one(eltype(active)), total)
+    normalize && (active ./= ifelse.(iszero.(total), one(eltype(active)), total))
     return vcat(maximum_logweight, total, squared_sum)
 end
 
@@ -906,8 +908,9 @@ IS._evaluate_functional_values!(values::Reactant.AnyConcreteRArray, samples, f) 
     _retained_call(IS._evaluate_functional_values!, values, samples, f)
 
 function _resampling_cdf!(cdf, logweights)
-    moments = _normalize_weights!(cdf, logweights, length(cdf))
+    moments = _normalize_weights!(cdf, logweights, length(cdf); normalize=false)
     cdf .= cumsum(cdf)
+    cdf ./= cdf[end:end]
     return moments[1:2]
 end
 
@@ -921,8 +924,8 @@ function IS._resampling_cdf!(
     return cdf
 end
 
-IS._resample_and_gather!(cdf::Reactant.ConcreteRArray, uniforms, ancestors, source, destination, execution) =
-    _retained_call(IS._resample_and_gather!, cdf, uniforms, ancestors, source, destination, execution)
+IS._resample_and_gather!(cdf::Reactant.ConcreteRArray, logweights, uniforms, ancestors, source, destination, execution) =
+    _retained_call(IS._resample_and_gather!, cdf, logweights, uniforms, ancestors, source, destination, execution)
 
 _allfinite(values) = all(isfinite.(values))
 IS._local_means_valid(values::Reactant.AnyConcreteRArray) = Bool(Reactant.@jit _allfinite(values))

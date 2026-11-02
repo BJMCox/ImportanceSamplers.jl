@@ -24,7 +24,6 @@ end
 
 struct _GradientWorkerPool{P}
     preparations::Vector{P}
-    thread_slots::Vector{Int}
 end
 
 abstract type _BoundBatchGradient <: _BoundGradient end
@@ -267,21 +266,7 @@ function _prepare_gradient_pool(make_preparation, worker_count)
         preparations[worker] = make_preparation()
     end
 
-    thread_slots = zeros(Int, Threads.maxthreadid())
-    if worker_count == 1
-        fill!(thread_slots, 1)
-    else
-        default_thread_ids = Threads.threadpooltids(:default)
-        worker_count == length(default_thread_ids) || throw(
-            ArgumentError(
-                "threaded gradient worker count must match the default thread pool",
-            ),
-        )
-        for (slot, thread_id) in enumerate(default_thread_ids)
-            thread_slots[thread_id] = slot
-        end
-    end
-    return _GradientWorkerPool(preparations, thread_slots)
+    return _GradientWorkerPool(preparations)
 end
 
 function _prepare_di_gradient(
@@ -372,8 +357,8 @@ end
     return destination
 end
 
-@inline function _gradient!(destination, gradient::_BoundDIGradient, sample)
-    preparation = _gradient_workspace(gradient.preparation)
+@inline function _gradient!(destination, gradient::_BoundDIGradient, sample, slot=1)
+    preparation = gradient.preparation.preparations[slot]
     return _di_gradient!(
         destination,
         gradient.target,
@@ -382,18 +367,6 @@ end
         gradient.target.context,
         sample,
     )
-end
-
-@inline function _gradient_workspace(pool::_GradientWorkerPool)
-    thread_id = Threads.threadid()
-    thread_id <= length(pool.thread_slots) || throw(
-        ArgumentError("gradient evaluation must run on a prepared worker"),
-    )
-    slot = @inbounds pool.thread_slots[thread_id]
-    slot > 0 || throw(
-        ArgumentError("gradient evaluation must run on a default-pool worker"),
-    )
-    return @inbounds pool.preparations[slot]
 end
 
 @inline function _di_gradient!(

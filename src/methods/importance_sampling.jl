@@ -433,6 +433,11 @@ function _clone_rng(device, rng::Random.AbstractRNG)
     return cloned
 end
 
+_commit_rng_snapshot!(_rng, snapshot) = snapshot
+# A TaskLocalRNG copy is a Xoshiro snapshot, not a replacement RNG token.
+_commit_rng_snapshot!(rng::Random.TaskLocalRNG, snapshot::Random.Xoshiro) =
+    copy!(rng, snapshot)
+
 _backend_functional(device) = MLDataDevices.functional(device)
 _with_backend_device(f, device) = f()
 _backend_state_resident(device, state) = true
@@ -620,7 +625,7 @@ function _transfer_prepared_sampler(
             false,
         )
         destination = _prepare_backend_execution(destination)
-        sampler.rng = source_rng
+        sampler.rng = _commit_rng_snapshot!(sampler.rng, source_rng)
         return destination
     end
 end

@@ -284,6 +284,7 @@ function _resample_dm_pmc_population!(
     Random.rand!(rng, uniforms)
     _resample_and_gather!(
         cdf,
+        logweights,
         uniforms,
         ancestors,
         source,

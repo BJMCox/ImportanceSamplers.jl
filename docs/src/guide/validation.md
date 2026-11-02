@@ -71,8 +71,9 @@ julia --project=docs docs/make.jl
 ```
 
 Open `docs/build/index.html`.
-The build executes CPU examples and doctests, checks exported docstrings and internal links,
-and checks external links.
+The build executes CPU examples and doctests and checks exported docstrings and internal links.
+Check external links separately with `DOCUMENTER_LINKCHECK=true julia --project=docs docs/make.jl`.
+CI reports external-link failures without blocking deployment.
 
 Repository source links are checked against local files to avoid repeated GitHub rate limits.
 That check does not verify the remote branch.

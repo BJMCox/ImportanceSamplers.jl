@@ -272,6 +272,34 @@ function _weighted_moments!(mean, covariance, centered, samples, weights)
     return nothing
 end
 
+@inline function _scalar_scale_aware_ridge(scale, family, regularization::T) where {T}
+    multiplier = _covariance_multiplier(family, T)
+    ridge = _scale_aware_ridge(abs2(scale) * multiplier, 1, regularization)
+    isfinite(ridge) && return ridge
+    iszero(regularization) && return zero(T)
+    return abs2(scale * (sqrt(regularization) * sqrt(multiplier)))
+end
+
+@inline function _factor_scale_aware_ridge(factors, slot, family, regularization::T) where {T}
+    dimension = size(factors, 1)
+    previous_trace = zero(T)
+    for column in 1:dimension, row in column:dimension
+        previous_trace += abs2(factors[row, column, slot])
+    end
+    multiplier = _covariance_multiplier(family, T)
+    ridge = _scale_aware_ridge(previous_trace * multiplier, dimension, regularization)
+    isfinite(ridge) && return ridge
+    iszero(regularization) && return zero(T)
+
+    # Apply the ridge coefficient before squaring when the unscaled trace overflows.
+    scale = sqrt(regularization) * sqrt(multiplier / T(dimension))
+    ridge = zero(T)
+    for column in 1:dimension, row in column:dimension
+        ridge += abs2(factors[row, column, slot] * scale)
+    end
+    return ridge
+end
+
 function _fit_moment_proposal!(
     workspace::_MomentWorkspace,
     history::_ScalarProposalHistory,
@@ -296,11 +324,9 @@ function _fit_moment_proposal!(
         centered_scaled[sample_index] = centered
         variance += abs2(centered)
     end
-    previous_variance = abs2(@inbounds(history.scales[previous_slot])) *
-                       _covariance_multiplier(history.family, T)
-    variance += _scale_aware_ridge(
-        previous_variance,
-        1,
+    variance += _scalar_scale_aware_ridge(
+        @inbounds(history.scales[previous_slot]),
+        history.family,
         sqrt(eps(T)),
     )
     workspace.covariance[1] = variance
@@ -356,13 +382,10 @@ function _fit_moment_proposal!(
     centered = view(centered_scaled, :, 1:sample_count)
     LinearAlgebra.mul!(covariance, centered, transpose(centered))
 
-    previous_trace = zero(T)
-    @inbounds for column in 1:dimension, row in column:dimension
-        previous_trace += abs2(history.factors[row, column, previous_slot])
-    end
-    ridge = _scale_aware_ridge(
-        previous_trace * _covariance_multiplier(history.family, T),
-        dimension,
+    ridge = _factor_scale_aware_ridge(
+        history.factors,
+        previous_slot,
+        history.family,
         sqrt(eps(T)),
     )
     @inbounds for coordinate in 1:dimension
@@ -412,9 +435,9 @@ end
 
 @kernel function _add_gaussian_scalar_ridge_kernel!(covariance, scales, family, previous_slot)
     T = eltype(covariance)
-    covariance[1] += _scale_aware_ridge(
-        abs2(scales[previous_slot]) * _covariance_multiplier(family, T),
-        1,
+    covariance[1] += _scalar_scale_aware_ridge(
+        scales[previous_slot],
+        family,
         sqrt(eps(T)),
     )
 end
@@ -427,13 +450,10 @@ end
 )
     T = eltype(covariance)
     dimension = size(covariance, 1)
-    previous_trace = zero(T)
-    for column in 1:dimension, row in column:dimension
-        previous_trace += abs2(factors[row, column, previous_slot])
-    end
-    ridge = _scale_aware_ridge(
-        previous_trace * _covariance_multiplier(family, T),
-        dimension,
+    ridge = _factor_scale_aware_ridge(
+        factors,
+        previous_slot,
+        family,
         sqrt(eps(T)),
     )
     for coordinate in 1:dimension

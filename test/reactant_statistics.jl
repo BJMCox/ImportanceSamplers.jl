@@ -43,3 +43,17 @@ using ImportanceSamplers, Reactant, Statistics, Test
     @test Float32(mean(sum, unweighted)) ≈ mean(totals)
     @test Float32(std(sum, unweighted; corrected=false)) ≈ std(totals; corrected=false)
 end
+
+@testset "Reactant weighted variance range" begin
+    device = ImportanceSamplers.MLDataDevices.with_eltype(
+        ImportanceSamplers.MLDataDevices.ReactantDevice(), nothing)
+    samples = Float32[0, 1f20]
+    for logmass in (log(1f-20), -Inf32)
+        mass = exp(BigFloat(logmass))
+        expected = Float32(mass * BigFloat(samples[2])^2 / (1 + mass)^2)
+        scalar = device(WeightedSamples(samples, Float32[0, logmass]))
+        matrix = device(WeightedSamples(reshape(samples, 1, :), Float32[0, logmass]))
+        @test Float32(var(scalar)) ≈ expected rtol=8eps(Float32)
+        @test only(Array(var(matrix))) ≈ expected rtol=8eps(Float32)
+    end
+end

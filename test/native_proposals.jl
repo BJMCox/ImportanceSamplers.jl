@@ -202,6 +202,37 @@ end
     @test_throws DimensionMismatch DensityInterface.logdensityof(factor, zeros(3))
 end
 
+@testset "native Gaussian representable density range" begin
+    for (T, magnitude, tail) in ((Float32, 2f38, 2f19), (Float64, 1e308, 1.5e154))
+        for (location, scale, point) in ((-magnitude, magnitude, magnitude),
+            (zero(T), one(T), tail))
+            radius = abs2((BigFloat(point) - BigFloat(location)) / BigFloat(scale))
+            scalar_expected = T(-log(BigFloat(scale)) - log(2big(pi)) / 2 - radius / 2)
+            @test DensityInterface.logdensityof(SphericalGaussian(location, scale), point) ≈
+                  scalar_expected rtol=8eps(T)
+
+            proposals = (SphericalGaussian(T[location, 0], scale),
+                DiagonalGaussian(T[location, 0], fill(scale, 2)),
+                FactorGaussian(T[location, 0], Matrix(LinearAlgebra.Diagonal(fill(scale, 2)))))
+            vector_expected = T(-2log(BigFloat(scale)) - log(2big(pi)) - radius / 2)
+            for proposal in proposals
+                @test DensityInterface.logdensityof(proposal, T[point, 0]) ≈
+                      vector_expected rtol=8eps(T)
+            end
+        end
+
+        largest = floatmax(T)
+        factor = FactorGaussian(zeros(T, 2), T[1 0; largest largest])
+        expected = T(-log(BigFloat(largest)) - log(2big(pi)) - 4)
+        @test DensityInterface.logdensityof(factor, T[2, 0]) ≈ expected rtol=8eps(T)
+
+        point = fill(T(0.75) * sqrt(floatmax(T)), 2)
+        expected = T(-log(2big(pi)) - sum(abs2, BigFloat.(point)) / 2)
+        @test DensityInterface.logdensityof(SphericalGaussian(zeros(T, 2), one(T)), point) ≈
+              expected rtol=8eps(T)
+    end
+end
+
 @testset "native Student-t analytic densities" begin
     for (location, scale, point) in ((0., 1e-200, 1e200), (-1e308, 1., 1e308))
         proposal = SphericalStudentT(1., location, scale)
@@ -271,6 +302,23 @@ end
         small_dof = SphericalStudentT(dof, location, one(T))
         @test DensityInterface.logdensityof(small_dof, location) ≈
               -log(T(4) * T(pi)) - log(dof) / T(2) rtol=8eps(T)
+    end
+end
+
+@testset "native Student-t subnormal radial density" begin
+    for T in (Float32, Float64)
+        dof = nextfloat(zero(T))
+        proposals = (SphericalStudentT(dof, zeros(T, 2), one(T)),
+            DiagonalStudentT(dof, zeros(T, 2), ones(T, 2)),
+            FactorStudentT(dof, zeros(T, 2), Matrix{T}(LinearAlgebra.I, 2, 2)))
+        for point in (sqrt(dof) / T(2), T(1.25) * sqrt(dof))
+            expected = T(-log(2big(pi)) - (BigFloat(dof) + 2) / 2 *
+                log1p(abs2(BigFloat(point)) / BigFloat(dof)))
+            for proposal in proposals
+                @test DensityInterface.logdensityof(proposal, T[point, 0]) ≈
+                      expected rtol=8eps(T)
+            end
+        end
     end
 end
 

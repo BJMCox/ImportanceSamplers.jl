@@ -89,11 +89,9 @@ function _allocate_resampled_storage(samples::NamedTuple, count)
     return NamedTuple{keys(samples)}(leaves)
 end
 
-@kernel function _finalize_resampling_cdf_kernel!(cdf, last_index)
-    @inbounds cdf[last_index] = one(eltype(cdf))
-end
-
-@kernel function _select_resampling_ancestors_kernel!(ancestors, uniforms, cdf, last_index)
+@kernel function _select_resampling_ancestors_kernel!(
+    ancestors, uniforms, cdf, logweights, last_index,
+)
     output_index = @index(Global, Linear)
     uniform = @inbounds uniforms[output_index]
     first = 1
@@ -104,6 +102,16 @@ end
             last = middle
         else
             first = middle + 1
+        end
+    end
+    # A parallel scan can round a zero-mass plateau upward. Assign only that
+    # spurious interval to adjacent support; ordinary selections remain unchanged.
+    if logweights[first] == -Inf
+        while first > 1 && logweights[first] == -Inf
+            first -= 1
+        end
+        while first < last_index && logweights[first] == -Inf
+            first += 1
         end
     end
     @inbounds ancestors[output_index] = first
@@ -157,6 +165,7 @@ end
 
 function _resample_and_gather!(
     cdf,
+    logweights,
     uniforms,
     ancestors,
     source,
@@ -165,13 +174,12 @@ function _resample_and_gather!(
 )
     backend = KernelAbstractions.get_backend(cdf)
     last_index = length(cdf)
-    finalize = _finalize_resampling_cdf_kernel!(backend)
-    finalize(cdf, last_index; ndrange=1, workgroupsize=1)
     select = _select_resampling_ancestors_kernel!(backend)
     select(
         ancestors,
         uniforms,
         cdf,
+        logweights,
         last_index;
         ndrange=length(ancestors),
         workgroupsize=_native_workgroupsize(execution, length(ancestors)),
@@ -210,8 +218,9 @@ function _resampling_cdf!(
         Val(:cdf_sum),
     )
     isfinite(total) && total > zero(total) || throw(AllZeroWeightsError())
-    cdf ./= total
     cumsum!(cdf, cdf)
+    # Capture the terminal prefix before the broadcast mutates any CDF entry.
+    cdf ./= cdf[end:end]
     return cdf
 end
 
@@ -262,6 +271,7 @@ function _resample(rng, result, count, ::MultinomialResampling)
         Random.rand!(_resampling_rng(rng, device), uniforms)
         _resample_and_gather!(
             cdf,
+            result.logweights,
             uniforms,
             ancestors,
             result.samples,
