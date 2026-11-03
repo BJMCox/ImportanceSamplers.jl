@@ -50,7 +50,7 @@ Its RNG still advances. Repeating the call is not an exact replay.
 `SamplerDeviceError.reason` identifies the rejected capability.
 Common causes include:
 
-- A generic or product proposal on an accelerator.
+- A generic proposal or product without a native representation on an accelerator.
 - A host array captured by a closure rather than passed through `p`.
 - An unspecified device precision policy.
 - `threaded=false` for accelerator execution.

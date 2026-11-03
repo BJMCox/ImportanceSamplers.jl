@@ -974,7 +974,7 @@ end
     @test rng_limit_error.reason === :accelerator_rng_unavailable
 
     product = ProductProposal((
-        left=SphericalGaussian(0.0, 1.0),
+        left=TestScalarProposal(0.0),
         right=SphericalGaussian(0.0, 1.0),
     ))
     product_sampler = prepare_sampler(
@@ -988,9 +988,6 @@ end
     )
     @test product_error isa SamplerDeviceError
     @test product_error.reason === :product_proposal_cpu_only
-    @test sprint(showerror, product_error) ==
-          "prepared-sampler device transfer failed for FunctionalAccelerator: " *
-          "ProductProposal is CPU-only"
 
     unsupported_error = caught_device_error(
         () -> UnsupportedTestDevice()(make_transfer_sampler(2208)),
@@ -1157,6 +1154,13 @@ end
     @test rand(getfield(late_source, :rng), UInt64) ==
           rand(expected_late_rng, UInt64)
 
+    product_source = prepare_sampler(Random.Xoshiro(0x221f),
+        x -> -sum(abs2, x.position), ImportanceSampling(ProductProposal((
+            position=FactorGaussian(zeros(2), [1.0 0; 0.3 1.0]),)); nsamples=8))
+    product_rng = copy(product_source.rng)
+    @test caught_device_error(() -> LateFailAccelerator()(product_source)) isa SamplerDeviceError
+    @test rand(product_source.rng, UInt64) == rand(product_rng, UInt64)
+
     fetch(@async begin
         Random.seed!(0x221e)
         task_rng = Random.default_rng()
@@ -1178,8 +1182,8 @@ end
         TransformedProposal(SphericalGaussian(1.0, 1.0), PositiveTransform()),
     ])
     product = ProposalBank([
-        ProductProposal((x=SphericalGaussian(0.0, 1.0),)),
-        ProductProposal((x=SphericalGaussian(1.0, 1.0),)),
+        ProductProposal((x=TestScalarProposal(0.0),)),
+        ProductProposal((x=TestScalarProposal(1.0),)),
     ])
     limits = (
         generic => :generic_proposal_cpu_only,

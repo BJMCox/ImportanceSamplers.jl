@@ -885,6 +885,10 @@ function _materialized_statistic(f, arguments...)
     return value isa AbstractArray ? Reactant.materialize_traced_array(value) : value
 end
 
+# XLA otherwise factors out the scale, recreating an overflowing difference or square.
+IS._statistic_rounding_barrier(value::Reactant.TracedRNumber) =
+    only(Reactant.Ops.optimization_barrier(value))
+
 for N in (1, 2)
     @eval begin
         IS._weighted_sum(samples::Reactant.AnyConcreteRArray{T,$N}, weights) where {T} =

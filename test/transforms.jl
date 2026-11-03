@@ -66,6 +66,27 @@ end
     )
     @test DensityInterface.logdensityof(simplex, [0.0, 0.5, 0.5]) === -Inf
     @test DensityInterface.logdensityof(simplex, [0.2, 0.3, 0.6]) === -Inf
+
+    for (T, boundary) in ((Float32, 1f8), (Float64, 1e16))
+        base = SphericalGaussian(T(20), one(T))
+        proposal = TransformedProposal(base, IntervalTransform(boundary, nothing))
+        @test DensityInterface.logdensityof(proposal, boundary) === T(-Inf)
+        @test isfinite(DensityInterface.logdensityof(proposal, boundary + exp(T(20))))
+        named = TransformedProposal(ProductProposal((x=base,)),
+            (x=IntervalTransform(boundary, nothing),))
+        flat = TransformedProposal(SphericalGaussian(T[20], one(T)),
+            (x=1=>IntervalTransform(boundary, nothing),))
+        @test DensityInterface.logdensityof(named, (x=boundary,)) === T(-Inf)
+        @test DensityInterface.logdensityof(flat, (x=boundary,)) === T(-Inf)
+    end
+
+    for transform in (IntervalTransform(-1e308, nothing), IntervalTransform(nothing, 1e308))
+        x = isnothing(transform.lower) ? -1e308 : 1e308
+        z = log(BigFloat(2) * BigFloat(1e308))
+        expected = -z^2 / 2 - log(2big(pi)) / 2 - z
+        proposal = TransformedProposal(SphericalGaussian(0.0, 1.0), transform)
+        @test DensityInterface.logdensityof(proposal, x) ≈ Float64(expected) rtol=8eps()
+    end
 end
 
 end

@@ -3,8 +3,14 @@ using ImportanceSamplers
 import DensityInterface
 import LinearAlgebra
 import Random
+import LogDensityProblems
 
 const IS = ImportanceSamplers
+
+struct NamedProductDensity end
+LogDensityProblems.capabilities(::Type{NamedProductDensity}) = LogDensityProblems.LogDensityOrder{0}()
+LogDensityProblems.dimension(::NamedProductDensity) = 2
+LogDensityProblems.logdensity(::NamedProductDensity, x) = -(abs2(x.a) + abs2(x.b)) / 2
 
 struct FixedProductBlock{T}
     coordinate::T
@@ -89,8 +95,8 @@ end
             ImportanceSampling(proposal; nsamples=8);
             threaded=false,
         )
-        @test result.logweights == zeros(eltype(result.logweights), 8)
-        @test lognormalizer(result) == zero(eltype(result.logweights))
+        @test maximum(abs, result.logweights) <= 16eps(eltype(result.logweights))
+        @test abs(lognormalizer(result)) <= 16eps(eltype(result.logweights))
     end
 end
 
@@ -127,6 +133,57 @@ end
         proposal,
         (first=actual.first, third=actual.third, second=actual.second),
     )
+end
+
+@testset "native products preserve joint laws and named shapes" begin
+    scalar = SphericalGaussian(0.5f0, 1.25f0)
+    singleton = DiagonalGaussian(Float32[1], Float32[0.75])
+    products = map((false, true)) do correlated
+        vector = correlated ?
+            FactorGaussian(Float32[-1, 2], Float32[1 0; 0.4 2]) :
+            DiagonalGaussian(Float32[-1, 2], Float32[1, 2])
+        product = ProductProposal((; scalar, vector, singleton))
+        joint = correlated ?
+            FactorGaussian(Float32[0.5, -1, 2, 1],
+                Float32[1.25 0 0 0; 0 1 0 0; 0 0.4 2 0; 0 0 0 0.75]) :
+            DiagonalGaussian(Float32[0.5, -1, 2, 1], Float32[1.25, 1, 2, 0.75])
+        target(x) = DensityInterface.logdensityof(product, x)
+        sampler = prepare_sampler(Random.Xoshiro(81), target,
+            ImportanceSampling(product; nsamples=64); threaded=false)
+        actual = importance_sample!(sampler)
+        expected = importance_sample(Random.Xoshiro(81), target,
+            ImportanceSampling(joint; nsamples=64);
+            transform=(scalar=1, vector=2:3, singleton=4:4), threaded=false)
+        correlated || @test actual.samples == expected.samples
+        @test map(size, actual.samples) == (scalar=(64,), vector=(2, 64), singleton=(1, 64))
+        @test maximum(abs, actual.logweights) <= 32eps(Float32)
+        @test eltype(actual.logweights) === Float32
+        saved = deepcopy(actual.samples)
+        importance_sample!(sampler)
+        @test actual.samples == saved
+        product
+    end
+
+    # The unused first slot has no matching schema and must not renumber active IDs.
+    bank = ProposalBank([ProductProposal((unused=FixedProductBlock(0f0, 0f0),)),
+        products...], Float32[0, 3, 7])
+    target(x) = -(abs2(x.scalar) + sum(abs2, x.vector) + sum(abs2, x.singleton)) / 2f0
+    result = importance_sample(Random.Xoshiro(82), target,
+        ImportanceSampling(bank; nsamples=128, mis_scheme=RandomMixture()); threaded=false)
+    expected = map(1:length(result)) do index
+        x = (scalar=result.samples.scalar[index], vector=result.samples.vector[:, index],
+            singleton=result.samples.singleton[:, index])
+        density = sum(bank.masses[j] * exp(DensityInterface.logdensityof(bank.proposals[j], x))
+            for j in 2:3)
+        target(x) - log(density)
+    end
+    @test result.logweights ≈ expected rtol=32eps(Float32)
+    @test Set(result.provenance.proposal_id) == Set((2, 3))
+
+    named_proposal = ProductProposal((a=SphericalGaussian(0.0, 1.0), b=SphericalGaussian(0.0, 1.0)))
+    named_result = importance_sample(Random.Xoshiro(83), NamedProductDensity(),
+        ImportanceSampling(named_proposal; nsamples=16); threaded=false)
+    @test all(isapprox(log(2pi); atol=8eps()), named_result.logweights)
 end
 
 @testset "transformed support density type stability" begin
@@ -235,7 +292,7 @@ end
     specification = (
         weights=(1:2 => SimplexTransform(3)),
         rate=(3 => PositiveTransform()),
-        offset=(4 => IdentityTransform()),
+        offset=4,
     )
     proposal = @inferred TransformedProposal(base, specification)
     layout = getfield(proposal, :transform)
@@ -256,6 +313,14 @@ end
     @test actual.rate isa Float64
     @test actual.offset isa Float64
     @test rand(actual_rng) == rand(expected_rng)
+
+    identity = TransformedProposal(base, (scalar=1, singleton=2:2, tail=3:4))
+    explicit = TransformedProposal(base, (scalar=1=>IdentityTransform(),
+        singleton=2:2=>IdentityTransform(), tail=3:4=>IdentityTransform()))
+    sample = rand(Random.Xoshiro(27), identity)
+    @test sample == rand(Random.Xoshiro(27), explicit)
+    @test DensityInterface.logdensityof(identity, sample) ≈
+          DensityInterface.logdensityof(base, [sample.scalar; sample.singleton; sample.tail])
 
     logical_origin = (weights=fill(1 / 3, 3), rate=1.0, offset=0.0)
     at_origin = @inferred DensityInterface.logdensityof(proposal, logical_origin)
@@ -429,7 +494,7 @@ end
     layout = (
         weights=(1:2 => SimplexTransform(3)),
         rate=(3 => PositiveTransform()),
-        offset=(4 => IdentityTransform()),
+        offset=4,
     )
     target(sample) = _dependent_structured_logdensity(sample, factor)
     result = importance_sample(

@@ -141,7 +141,7 @@ end
 ) where {T<:_TransformFloat}
     isfinite(x) || return (x, x, _NATIVE_TRANSFORM_NONFINITE_INPUT)
     x > transform.lower || return (x, x, _NATIVE_TRANSFORM_OUTSIDE_SUPPORT)
-    z = log(x - transform.lower)
+    z = _log_positive_difference(x, transform.lower)
     return _native_checked_transform_result(z, z)
 end
 
@@ -151,7 +151,7 @@ end
 ) where {T<:_TransformFloat}
     isfinite(x) || return (x, x, _NATIVE_TRANSFORM_NONFINITE_INPUT)
     x < transform.upper || return (x, x, _NATIVE_TRANSFORM_OUTSIDE_SUPPORT)
-    z = log(transform.upper - x)
+    z = _log_positive_difference(transform.upper, x)
     return _native_checked_transform_result(z, z)
 end
 

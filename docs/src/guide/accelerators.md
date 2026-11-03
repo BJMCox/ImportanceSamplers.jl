@@ -113,13 +113,19 @@ They do not imply that every user target compiles on every backend.
 | Native CUDA | All methods with supported native Gaussian/Student-t proposals | Device-compatible target and gradient operations |
 | Metal | Native Gaussian/Student-t paths for all methods | `Float32`, explicit GRAMIS gradient |
 | Reactant GPU | Built-in compiled paths, including batch targets | Traceable operations and fixed prepared schedules |
-| Reactant CPU | Plain/static IS, scalar AMIS/NPMC, global DM-PMC, and built-in LAIS cases | Cooperative-kernel paths listed below are rejected |
+| Reactant CPU | Plain/static IS, scalar AMIS/NPMC, global DM-PMC, and built-in LAIS cases | Preflight restrictions listed below |
 | AMDGPU | Not validated or claimed | A KernelAbstractions backend alone does not supply full package support |
 
 Reactant CPU rejects GRAMIS, APIS, CAIS, locally resampled DM-PMC,
-and factor-proposal AMIS/NPMC during preflight.
+factor-proposal AMIS/NPMC, and LAIS-SMH during preflight.
 Their cooperative kernels hit an upstream CPU-lowering limit.
+Active RAM tuning also fails CPU lowering and is rejected, including batch targets.
+RAM with `WarmupTuning(0)` avoids the tuning kernels.
 Use `MLDataDevices.CPUDevice()` for ordinary CPU execution.
+
+Reactant CPU can flush subnormal floating-point values to zero, including tiny
+normalized weights. Selecting `Float64` does not change that backend behavior.
+Use ordinary CPU execution when gradual underflow matters for weighted moments.
 
 Reactant GPU has checked factor Student-t paths for static MIS, AMIS, NPMC, DM-PMC,
 APIS, CAIS, and all three LAIS transitions.
@@ -129,7 +135,12 @@ Native CUDA supports supplied gradients and supported Enzyme reverse-mode gradie
 Metal requires supplied gradients.
 See [Gradients](@ref gradients-guide) for the exact interface.
 
-Generic proposals and `ProductProposal` remain CPU-only.
+Plain and static MIS support same-precision Gaussian `ProductProposal` blocks
+on accelerators, preserving names and within-block covariance.
+Correlated products keep blockwise CPU execution where available and become
+dense native proposals during explicit device transfer.
+Compatible named product banks share one field layout and transform specification.
+Other generic products remain CPU-only.
 Native `transform=` layouts can expose named, bounded, positive, and simplex parameters.
 Do not infer bank support from a standalone transformed proposal.
 

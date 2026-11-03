@@ -6,6 +6,43 @@ The package test suite and standalone reproducers check mathematical and device-
 A successful example is not proof of accuracy for every model.
 A checked-in GPU script is not evidence that it passed on the current machine.
 
+## Checked sampler examples
+
+This table executes each example during the build. Every row checks 256 retained
+samples, finite values, sample and log-weight precision, and normalized weights.
+Adaptive examples use two rounds. The scalar Gaussian row also checks the exact
+self-target weight identity. These are execution checks, not accuracy benchmarks.
+
+```@eval
+import Markdown
+include(joinpath(@__DIR__, "..", "..", "..", "validation", "support_table.jl"))
+Markdown.parse(SamplerSupportTable.checked_support_table())
+```
+
+The table covers only the stated examples. CUDA, Metal, and Reactant are **not
+validated by this CPU build**. A missing hardware run means unvalidated, not unsupported.
+`passed` denotes execution in this build. `not run` denotes no result from this build.
+`restricted` denotes a documented preflight restriction, not a hardware test.
+An optional-backend run reports `rejected` only after checking the expected exception reason.
+[Devices](@ref devices-guide) lists deliberate restrictions, including
+Reactant CPU cooperative kernels and generic accelerator proposals.
+
+Run the same checks on CUDA from the validation environment:
+
+```julia
+using CUDA, MLDataDevices
+include("validation/support_table.jl")
+CUDA.allowscalar(false)
+device = MLDataDevices.with_eltype(MLDataDevices.CUDADevice(), nothing)
+print(SamplerSupportTable.checked_support_table(
+    backend=:cuda, device, isresident=x -> x isa CUDA.AnyCuArray,
+))
+```
+
+The checker verifies residency before explicit CPU readback. Any failed check
+stops table generation. Optional-backend checks below cover deeper numerical,
+reuse, statistics, and failure contracts.
+
 ## Run the package tests
 
 From a checkout:

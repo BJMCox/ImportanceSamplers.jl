@@ -48,21 +48,27 @@ end
 end
 
 @testset "weighted variance range" begin
-    for (T, magnitude, mass) in ((Float32, 1f20, 1f-20), (Float64, 1e200, 1e-200))
-        samples = T[0, magnitude]
+    for (T, origin, magnitude, mass) in (
+        (Float32, 0f0, 1f20, 1f-20), (Float64, 0.0, 1e200, 1e-200),
+        (Float64, -1e308, 1e308, 1e-310),
+    )
+        samples = T[origin, magnitude]
         for logmass in (log(mass), T(-Inf))
             logweights = T[0, logmass]
             weights = exp.(BigFloat.(logweights))
             weights ./= sum(weights)
             center = sum(weights .* BigFloat.(samples))
             expected = T(sum(weights .* abs2.(BigFloat.(samples) .- center)))
+            # Subnormal normalized weights also incur one absolute subnormal ulp.
+            tolerance = 8eps(T) + eps(zero(T)) / mass
             scalar = WeightedSamples(samples, logweights)
             matrix = WeightedSamples(reshape(samples, 1, :), logweights)
             named = WeightedSamples((position=samples,), logweights)
-            @test var(scalar) ≈ expected rtol=8eps(T)
-            @test var(identity, scalar) ≈ expected rtol=8eps(T)
-            @test only(var(matrix)) ≈ expected rtol=8eps(T)
-            @test var(named).position ≈ expected rtol=8eps(T)
+            @test var(scalar) ≈ expected rtol=tolerance
+            @test var(identity, scalar) ≈ expected rtol=tolerance
+            @test only(var(matrix)) ≈ expected rtol=tolerance
+            @test only(cov(matrix)) ≈ expected rtol=tolerance
+            @test var(named).position ≈ expected rtol=tolerance
         end
     end
 end

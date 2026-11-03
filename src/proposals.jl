@@ -101,10 +101,17 @@ _prepare_proposal_inputs(proposals) = copy(proposals)
 """
     ProductProposal(blocks::NamedTuple)
 
-Construct a CPU proposal for the product of independent named proposal blocks.
+Construct a proposal for the product of independent named proposal blocks.
 Blocks are drawn in field order with the supplied RNG, and their normalized log
-densities are summed. `ProductProposal` and transforms built on it are CPU-only.
-Native flat `transform=` layouts instead support accelerator execution.
+densities are summed. Plain and static MIS support native preparation of
+same-precision Gaussian blocks, preserving names, scalar/vector shapes, and
+within-block covariance. Diagonal products use native CPU execution. Correlated
+products retain blockwise generic CPU execution where available and become dense
+native proposals on explicit accelerator transfer. Heterogeneous banks without
+a generic CPU route use native packing. Supported named transforms also follow
+these paths. Other products remain CPU-only. Direct `rand` uses the original blocks.
+Named LogDensityProblems targets retain the generic CPU path; use a callable
+target to prepare a native named sampler.
 """
 struct ProductProposal{B<:NamedTuple}
     blocks::B
@@ -131,6 +138,10 @@ Construct a proposal that maps draws from `base` into logical values through
 `log q_x(x) = log q_z(z) - log|J(z)|`. The proposal owns this Jacobian;
 target densities must use the resulting logical reference measure without
 applying it again.
+
+For named flat layouts, bare indices or ranges mean identity transforms, for
+example `(rate=1=>PositiveTransform(), offsets=2:3)`. Every coordinate still
+requires a named selector.
 """
 struct TransformedProposal{B,T}
     base::B

@@ -56,6 +56,20 @@ Mixed sample/log-weight precision can require an explicit batched request.
 The diagnostic records the resolved policy.
 It does not prove that every phase used a matrix operation.
 
+## Account for named product storage
+
+Diagonal Gaussian products can use native CPU execution. Correlated products
+keep blockwise generic CPU arithmetic where available, avoiding a dense solve
+across independent blocks. Heterogeneous banks without a generic route use native packing.
+
+Explicit accelerator transfer combines supported Gaussian products into one
+native proposal. A factor block makes that joint factor dense: storage grows
+as the square of the total sampling dimension. Factor batching still applies.
+
+Native named layouts currently retain a flat sample batch while constructing
+the named output arrays. Budget for both batches, alongside random buffers and
+method workspaces. They stay on the selected device; this is not CPU readback.
+
 ## Time warmed sampling
 
 Use BenchmarkTools in a benchmark environment:

@@ -5,6 +5,9 @@ import ImportanceSamplers
 import LinearAlgebra
 import Statistics
 
+ImportanceSamplers._default_mass_type(proposal::Distributions.Distribution) =
+    float(eltype(proposal))
+
 function ImportanceSamplers._prepare_proposal_input(proposal::Distributions.Normal)
     location, scale = Distributions.params(proposal)
     return ImportanceSamplers.SphericalGaussian(location, scale)

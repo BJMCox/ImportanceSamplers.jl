@@ -93,7 +93,10 @@ Student-t components may have different degrees of freedom.
 Native proposals support `Float32` and `Float64` and copy their input arrays.
 Use matching types for locations, scales, factors, and Student-t degrees of freedom.
 
-For a wholly single-precision bank, supply single-precision masses too:
+Omitted bank masses use the proposals' precision for native and Distributions.jl
+inputs. Unknown generic proposals default to `Float64` masses. Explicit masses
+retain their precision, so use single-precision masses for a wholly
+single-precision weighted bank:
 
 ```@example proposals
 bank32 = ProposalBank([

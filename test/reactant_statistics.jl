@@ -56,4 +56,13 @@ end
         @test Float32(var(scalar)) ≈ expected rtol=8eps(Float32)
         @test only(Array(var(matrix))) ≈ expected rtol=8eps(Float32)
     end
+    # XLA CPU flushes subnormal weights; check its range using normal weights.
+    cpu = Reactant.XLA.device_kind(Reactant.XLA.device(device(zeros(Float64, 1)))) == "cpu"
+    magnitude, small_mass = cpu ? (1e200, 1e-200) : (1e308, 1e-310)
+    for mass in (small_mass, 0.0)
+        host = WeightedSamples(reshape([-magnitude, magnitude], 1, :), [0.0, log(mass)])
+        moved = device(host)
+        @test Array(var(moved)) ≈ var(host) rtol=1e-12
+        @test Array(cov(moved)) ≈ cov(host) rtol=1e-12
+    end
 end

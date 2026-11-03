@@ -395,8 +395,8 @@ end
         ImportanceSampling(
             ProposalBank(
                 [
-                    ProductProposal((x=SphericalGaussian(0.0, 1.0),)),
-                    ProductProposal((x=SphericalGaussian(1.0, 1.0),)),
+                    ProductProposal((x=StaticMISKernelExternalGaussian(0.0),)),
+                    ProductProposal((x=StaticMISKernelExternalGaussian(1.0),)),
                 ],
             );
             nsamples=4,

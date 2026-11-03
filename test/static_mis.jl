@@ -81,6 +81,18 @@ end
     @test equal_bank.masses == [0.5, 0.5]
     @test weighted_bank.masses == [0.25, 0.75]
 
+    proposal32 = SphericalStudentT(5f0, zeros(Float32, 2), 1f0)
+    target32(x) = DensityInterface.logdensityof(proposal32, x)
+    for masses in (nothing, Float64[1, 1])
+        bank = isnothing(masses) ? ProposalBank([proposal32, proposal32]) :
+               ProposalBank([proposal32, proposal32], masses)
+        result = importance_sample(Random.Xoshiro(17), target32,
+            ImportanceSampling(bank; nsamples=32); threaded=false)
+        T = isnothing(masses) ? Float32 : Float64
+        @test eltype(result.logweights) === T
+        @test maximum(abs, result.logweights) <= 32eps(Float32)
+    end
+
     largest = floatmax(Float64)
     near_overflow = ProposalBank(proposals, [largest, largest / 2])
     @test near_overflow.masses ≈ [2 / 3, 1 / 3]

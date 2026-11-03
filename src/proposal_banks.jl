@@ -14,7 +14,9 @@ abstract type AbstractProposalPopulation end
     ProposalBank(proposals, masses)
 
 Construct an explicit proposal population with copied proposals and normalized
-nonnegative masses. Omitted masses are equal. The readable `proposals` and
+nonnegative masses. Omitted masses are equal and use the promoted precision of
+native proposals or Distributions.jl inputs; unknown generic proposals use
+Float64. Explicit masses keep their existing promotion rules. The readable `proposals` and
 `masses` fields preserve input order; masses sum to one. A configured positive
 mass must remain positive through floating conversion and normalization;
 otherwise construction rejects the bank instead of making that proposal inert.
@@ -37,6 +39,10 @@ placed in a bank.
 struct ProposalBank{P<:AbstractVector,M<:AbstractVector} <: AbstractProposalPopulation
     proposals::P
     masses::M
+
+    # Preparation replaces equivalent proposals without renormalizing validated masses.
+    ProposalBank(proposals::P, masses::M, ::_PreparedProposalToken) where {P,M} =
+        new{P,M}(proposals, masses)
 
     function ProposalBank(
         proposals::P,
@@ -85,6 +91,31 @@ struct ProposalBank{P<:AbstractVector,M<:AbstractVector} <: AbstractProposalPopu
             normalized_masses,
         )
     end
+end
+
+_native_product_layout(::ProposalBank{<:AbstractVector{<:_NativeRadialProposal}}, factors::Bool=false) = nothing
+
+function _native_product_layout(bank::ProposalBank, factors::Bool=false)
+    # A heterogeneous bank has no generic CPU route; native packing enables it.
+    factors |= !isconcretetype(eltype(bank.proposals))
+    first_active = findfirst(!iszero, bank.masses)
+    first_lowered = _native_product_layout(bank.proposals[first_active], factors)
+    isnothing(first_lowered) && return nothing
+    active = findall(!iszero, bank.masses)
+    lowered = map(index -> index == first_active ? first_lowered :
+        _native_product_layout(bank.proposals[index], factors), active)
+    any(isnothing, lowered) && return nothing
+    layout = first(lowered).layout
+    all(item -> item.layout.blocks == layout.blocks &&
+                item.layout.dimension == layout.dimension, lowered) || return nothing
+    # Inactive entries are never sampled or evaluated, but their IDs remain stable.
+    active_proposals = map(item -> item.proposal, lowered)
+    proposals = fill!(similar(active_proposals, length(bank.proposals)), first(active_proposals))
+    for (index, proposal) in zip(active, active_proposals)
+        proposals[index] = proposal
+    end
+    return (proposal=ProposalBank(proposals, copy(bank.masses), _PreparedProposalToken()),
+        layout=layout)
 end
 
 function _require_preserved_positive_masses(source, destination, operation)
@@ -623,9 +654,16 @@ function _proposal_dimension(bank::ProposalBank)
     return dimension
 end
 
+_default_mass_type(proposal) = Float64
+_default_mass_type(proposal::_NativeRadialProposal) = _gaussian_float_type(proposal.location)
+_default_mass_type(proposal::TransformedProposal) = _default_mass_type(proposal.base)
+_default_mass_type(proposal::ProductProposal) =
+    mapreduce(_default_mass_type, promote_type, values(proposal.blocks))
+
 function ProposalBank(proposals::AbstractVector)
     isempty(proposals) && throw(ArgumentError("a proposal bank cannot be empty"))
-    return ProposalBank(proposals, ones(Float64, length(proposals)))
+    T = mapreduce(_default_mass_type, promote_type, proposals)
+    return ProposalBank(proposals, ones(T, length(proposals)))
 end
 
 """

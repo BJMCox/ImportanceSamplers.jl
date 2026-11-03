@@ -67,7 +67,9 @@ A full Gaussian or Student-t factor can capture correlations between named field
 Names do not impose independence.
 
 The flat selectors must cover every numerical coordinate exactly once.
-Use explicit identity fields for unconstrained coordinates.
+Use bare selectors for unconstrained fields, such as `offset=4` or
+`coefficients=5:8`. These are equivalent to `4=>IdentityTransform()` and
+`5:8=>IdentityTransform()`. Every output field still has an explicit name.
 Omitting `transform` leaves the whole sample unchanged.
 
 ## Choose a scalar constraint
@@ -129,7 +131,7 @@ The target here is an unnormalized exponential density on the positive line.
 The proposal evaluates its normalized density with the inverse Jacobian.
 Do not also pass the same transformation through `transform=`.
 
-For CPU-only independent named blocks, combine `ProductProposal` and `TransformedProposal`:
+For independent named blocks, combine `ProductProposal` and `TransformedProposal`:
 
 ```@example transforms
 structured = TransformedProposal(
@@ -144,12 +146,16 @@ rand(Xoshiro(9), structured)
 ```
 
 An omitted known product field uses identity. Here `offset` stays unconstrained.
-This omission rule applies to named product fields, not to flat selector layouts.
+For flat layouts, omit the transform with a bare selector, not the field name
+or selector. A flat proposal has no field names to infer for omitted indices.
 
 ## Gradients, devices, and the simplex measure
 
 Native flat layouts work with adaptive methods and supported devices.
-`ProductProposal` remains CPU-only.
+Plain and static MIS also support same-precision Gaussian products with named
+outputs on accelerators. Correlated products keep blockwise CPU execution where
+available and become dense joint proposals during explicit device transfer.
+Generic products retain CPU execution. Use an explicit native flat layout for adaptive methods.
 Explicit named gradients differentiate the logical target.
 The package supplies the transform pullback and Jacobian derivative.
 See [Gradients](@ref gradients-guide).

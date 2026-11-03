@@ -80,6 +80,20 @@ end
 _algorithm_proposal(algorithm::ImportanceSampling) = algorithm.proposal
 _algorithm_sample_budget(algorithm::ImportanceSampling) = algorithm.nsamples
 
+_prepare_product_layout(algorithm, transform, target) = (algorithm, transform)
+function _prepare_product_layout(algorithm::ImportanceSampling, transform, target)
+    isnothing(transform) || return algorithm, transform
+    lowered = _native_product_layout(algorithm.proposal)
+    isnothing(lowered) && return algorithm, transform
+    # Named LDP inputs used the generic path before native product preparation.
+    target.context isa _NoTargetContext &&
+        LogDensityProblems.capabilities(target.logdensity) !== nothing &&
+        return algorithm, transform
+    native = ImportanceSampling(lowered.proposal, algorithm.nsamples,
+        algorithm.mis_scheme, _VALIDATED_IMPORTANCE_SAMPLING_TOKEN)
+    return native, lowered.layout
+end
+
 """
     SamplerBusyError
 
@@ -137,7 +151,7 @@ function Base.showerror(io::IO, error::SamplerDeviceError)
     elseif error.reason === :generic_proposal_cpu_only
         "generic proposals are CPU-only"
     elseif error.reason === :product_proposal_cpu_only
-        "ProductProposal is CPU-only"
+        "this product proposal has no native accelerator representation"
     elseif error.reason === :factor_proposal_cpu_only
         "factor Gaussian proposal banks are CPU-only"
     elseif error.reason === :transformed_proposal_cpu_only
@@ -153,6 +167,9 @@ function Base.showerror(io::IO, error::SamplerDeviceError)
         "argument representation"
     elseif error.reason === :reactant_cpu_cooperative_kernels
         "Reactant's CPU backend cannot compile this sampler's cooperative kernels; " *
+        "use CPUDevice() or Reactant on a supported GPU"
+    elseif error.reason === :reactant_cpu_transition_tuning
+        "Reactant's CPU backend cannot compile active RAM tuning; " *
         "use CPUDevice() or Reactant on a supported GPU"
     elseif error.reason === :prepared_migration_unsupported
         "accelerator-resident prepared samplers cannot be transferred"
@@ -269,6 +286,7 @@ into a reusable prepared sampler.
 
 An optional named `transform` uses complete, disjoint flat selectors such as
 `(weights=(1:2=>SimplexTransform(3)), scale=(3=>PositiveTransform()))`.
+A bare index or range, such as `offset=4`, means an identity transform.
 The target receives named logical parameters. The sampler keeps numerical
 coordinates internally and includes the forward log Jacobian in raw weights.
 Returned named arrays retain the original weights and provenance. Names do not
@@ -363,6 +381,7 @@ function _prepare_importance_sampler(
 )
     threaded isa Bool || throw(ArgumentError("threaded must be Bool"))
     factor_execution = _validate_factor_execution(factor_execution)
+    algorithm, transform = _prepare_product_layout(algorithm, transform, target)
     proposal = _algorithm_proposal(algorithm)
     sample_budget = _algorithm_sample_budget(algorithm)
     prepared_target = _resolve_prepared_target(target, proposal, transform)
@@ -418,6 +437,20 @@ _copy_accelerator_algorithm(device, algorithm, method_state) =
 
 _prepare_transferred_method_state(device, algorithm, method_state, _transferred_target) =
     _prepare_method_state(algorithm)
+
+_accelerator_product_source(sampler) = nothing
+function _accelerator_product_source(sampler::_PreparedImportanceSampler{R,B,T,A}) where
+    {R,B,T,A<:ImportanceSampling}
+    sampler.target isa _BoundLogDensityProblemsTarget && return nothing
+    lowered = _native_product_layout(sampler.algorithm.proposal, true)
+    isnothing(lowered) && return nothing
+    algorithm = ImportanceSampling(lowered.proposal, sampler.algorithm.nsamples,
+        sampler.algorithm.mis_scheme, _VALIDATED_IMPORTANCE_SAMPLING_TOKEN)
+    target = sampler.target isa _PreparedLogTarget ? sampler.target :
+        _PreparedLogTarget(sampler.target, _NoTargetContext(), ADTypes.NoAutoDiff(), nothing)
+    return _prepare_importance_sampler(sampler.rng, target, algorithm,
+        sampler.factor_execution, lowered.layout, sampler.threaded)
+end
 
 _accelerator_method_state_limit(method_state) = nothing
 
@@ -549,6 +582,12 @@ function _transfer_prepared_sampler(
     _backend_functional(device) || throw(
         SamplerDeviceError(device, :backend_unavailable),
     )
+    source = _accelerator_product_source(sampler)
+    if !isnothing(source)
+        product_destination = _transfer_prepared_sampler(device, source, Val(clone_rng))
+        sampler.rng = source.rng
+        return product_destination
+    end
     proposal_limit = _accelerator_proposal_limit(
         _algorithm_proposal(sampler.algorithm),
     )

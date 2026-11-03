@@ -28,6 +28,22 @@ _transition_walk(state::IS._RAMState) = state.walk
 _transition_accepted(state) = state.accepted
 _transition_accepted(state::IS._RAMState) = state.walk.accepted
 
+function IS._preflight_transition(device::MLDataDevices.ReactantDevice,
+    state::IS._RAMState, target)
+    # CPU lowering lacks RAM's device math; scalar warmup also retains GPU barriers.
+    tuning = state.tuning isa IS.ContinuousTuning || state.n_tuned < state.tuning.steps
+    tuning && Reactant.XLA.device_kind(Reactant.XLA.device(state.walk.normals)) == "cpu" &&
+        throw(IS.SamplerDeviceError(device, :reactant_cpu_transition_tuning))
+    return IS._preflight_transition(device, state.walk, target, IS._transition_adaptation(state))
+end
+
+function IS._preflight_transition(device::MLDataDevices.ReactantDevice,
+    state::IS._SampleMetropolisHastingsState, target)
+    _reject_reactant_cpu(device, state)
+    return invoke(IS._preflight_transition,
+        Tuple{Any,IS._SampleMetropolisHastingsState,Any}, device, state, target)
+end
+
 # Plain Julia scalars are tracing constants. RAM's diminishing gain must remain
 # a live input on the same device as its transition arrays.
 _transition_number(array, value) = Reactant.to_rarray(value; track_numbers=true,

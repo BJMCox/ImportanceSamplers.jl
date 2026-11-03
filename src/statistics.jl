@@ -181,9 +181,15 @@ function _weighted_sum(samples::NamedTuple, weights)
     return NamedTuple{keys(samples)}(summaries)
 end
 
+_statistic_rounding_barrier(value) = value
+
 function _weighted_squared_deviation(value, center, weight)
     deviation = value - center
-    contribution = real(conj(deviation) * (weight * deviation))
+    contribution = real(conj(deviation) * _statistic_rounding_barrier(weight * deviation))
+    # Weight before subtracting when the distance overflows. ifelse also works
+    # with traced scalar predicates, without host control flow.
+    contribution = ifelse(isfinite(deviation), contribution,
+        abs2(_scaled_deviation(value, center, sqrt(weight))))
     return ifelse(iszero(weight), zero(contribution), contribution)
 end
 
@@ -206,8 +212,16 @@ function _weighted_variance(samples::NamedTuple, weights, center)
 end
 
 function _weighted_covariance(samples::AbstractMatrix, weights, center)
-    centered = samples .- center
-    return (centered .* reshape(weights, 1, :)) * adjoint(centered)
+    scales = reshape(sqrt.(weights), 1, :)
+    centered = _scaled_deviation.(samples, center, scales)
+    return centered * adjoint(centered)
+end
+
+function _scaled_deviation(value, center, scale)
+    deviation = value - center
+    scaled_value = _statistic_rounding_barrier(scale * value)
+    scaled_center = _statistic_rounding_barrier(scale * center)
+    return ifelse(isfinite(deviation), scale * deviation, scaled_value - scaled_center)
 end
 
 function _weighted_covariance(samples, weights, center)

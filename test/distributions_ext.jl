@@ -13,6 +13,10 @@ import Random
 
         @test length(result) == 32
         @test all(isapprox(zero(T); atol=8eps(T)), result.logweights)
+        bank_result = importance_sample(Random.Xoshiro(0x4d91), target,
+            ImportanceSampling(ProposalBank([proposal, proposal]); nsamples=32))
+        @test eltype(bank_result.logweights) === T
+        @test maximum(abs, bank_result.logweights) <= 16eps(T)
     end
 
     for T in (Float32, Float64)

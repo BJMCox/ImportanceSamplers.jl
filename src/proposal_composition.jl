@@ -12,6 +12,56 @@ struct _FlatTransformLayout{B<:NamedTuple} <: AbstractSampleTransform
     dimension::Int
 end
 
+_native_product_layout(proposal, factors::Bool=false) = nothing
+_native_product_layout(proposal::ProductProposal, factors::Bool=false) =
+    _native_product_layout(proposal, map(_ -> IdentityTransform(), proposal.blocks), factors)
+_native_product_layout(proposal::TransformedProposal{<:ProductProposal,<:_NamedTransformLayout}, factors::Bool=false) =
+    _native_product_layout(proposal.base, map(block -> block.transform, proposal.transform.blocks), factors)
+
+function _native_product_layout(proposal::ProductProposal, transforms, factors)
+    blocks = map(_prepare_proposal_input, proposal.blocks)
+    all(block -> block isa _GaussianProposal, blocks) || return nothing
+    T = _gaussian_float_type(first(blocks).location)
+    all(block -> _gaussian_float_type(block.location) === T, blocks) || return nothing
+    all(map(blocks, transforms) do block, transform
+        _supports_native_fused_cpu(TransformedProposal(block, transform))
+    end) || return nothing
+    hasfactor = any(block -> block.scale isa _FactorGaussianScale, blocks)
+    # Keep blockwise CPU arithmetic instead of making sparse products dense.
+    hasfactor && !factors && return nothing
+
+    offset = Ref(0)
+    located = map(blocks, transforms) do block, transform
+        first_index = offset[] + 1
+        offset[] += _gaussian_dimension(block.location)
+        selector = block.location isa Number ? first_index : first_index:offset[]
+        _LocatedTransform(selector, transform)
+    end
+    layout = _FlatTransformLayout(located, offset[])
+    location = vcat(map(block -> block.location, values(blocks))...)
+    if hasfactor
+        factor = zeros(T, layout.dimension, layout.dimension)
+        for (block, position) in zip(blocks, located)
+            indices = _selector_indices(position.location)
+            destination = reshape(view(factor, indices, indices), length(indices), length(indices), 1)
+            _copy_packed_gaussian_factor!(destination, block, 1)
+        end
+        native = FactorGaussian(location, factor)
+    else
+        scales = similar(location)
+        for (block, position) in zip(blocks, located)
+            destination = view(scales, _selector_indices(position.location))
+            if block.scale isa _SphericalGaussianScale
+                fill!(destination, block.scale.scale)
+            else
+                copyto!(destination, block.scale.scales)
+            end
+        end
+        native = DiagonalGaussian(location, scales)
+    end
+    return (proposal=native, layout=layout)
+end
+
 _logical_block_length(block::_LocatedTransform{Int}) = 1
 _logical_block_length(block::_LocatedTransform{<:UnitRange}) = length(block.location)
 _logical_block_length(block::_LocatedTransform{<:UnitRange,SimplexTransform}) =
@@ -34,12 +84,12 @@ end
 function _prepare_transformed_proposal(base, specification::NamedTuple)
     if isempty(specification) || all(value -> value isa AbstractSampleTransform, specification)
         return _prepare_named_transformed_proposal(base, specification)
-    elseif all(value -> value isa Pair, specification)
+    elseif all(value -> value isa Union{Pair,Int,UnitRange{Int}}, specification)
         return _prepare_flat_transformed_proposal(base, specification)
     end
     throw(
         ArgumentError(
-            "a named transform layout must contain only transforms or only selector pairs",
+            "a named transform layout must contain transforms or flat selectors with optional transforms",
         ),
     )
 end
@@ -153,6 +203,9 @@ end
 
 _selector_indices(selector::Int) = selector:selector
 _selector_indices(selector::UnitRange{Int}) = selector
+
+_prepare_flat_transform_block(selector::Union{Int,UnitRange{Int}}, dimension, selected) =
+    _prepare_flat_transform_block(selector => IdentityTransform(), dimension, selected)
 
 function _prepare_flat_transform_block(pair::Pair, dimension, selected)
     selector = _validated_flat_selector(first(pair), dimension)
@@ -334,9 +387,20 @@ _zero_transform_input(layout::_NamedTransformLayout{B}, value::NamedTuple{Names}
 _zero_transform_input(layout::_FlatTransformLayout{B}, value::NamedTuple{Names}) where
     {Names,B<:NamedTuple{Names}} = zeros(_transform_float_type(value), layout.dimension)
 
+# Only the arithmetic type matters at the sentinel anchor. Its mapped value may
+# round to a boundary even when this transform has many valid interior values.
+_support_anchor_logjac(transform, coordinate) = last(_transform_with_logjac(transform, coordinate))
+_support_anchor_logjac(transform::_NativeScalarTransform, coordinate::Number) =
+    _native_transform_with_logjac(transform, coordinate)[2]
+_support_anchor_logjac(layout::_NamedTransformLayout, coordinate::NamedTuple) =
+    sum(map((block, value) -> _support_anchor_logjac(block.transform, value), layout.blocks, coordinate))
+_support_anchor_logjac(layout::_FlatTransformLayout, coordinate::AbstractVector) =
+    sum(map(block -> _support_anchor_logjac(block.transform,
+        _selected_coordinate(coordinate, block.location)), layout.blocks))
+
 function _out_of_support_logdensity(proposal::TransformedProposal, logical_value)
     coordinate = _zero_transform_input(proposal.transform, logical_value)
-    _, logabsjac = _transform_with_logjac(proposal.transform, coordinate)
+    logabsjac = _support_anchor_logjac(proposal.transform, coordinate)
     density = DensityInterface.logdensityof(proposal.base, coordinate) - logabsjac
     return oftype(density, -Inf)
 end

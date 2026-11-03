@@ -35,6 +35,7 @@ test_files = if isempty(ARGS)
         "transforms",
         "product_proposal",
         "distributions_ext",
+        "support_table",
     ]
 else
     ARGS
