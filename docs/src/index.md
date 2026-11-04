@@ -9,7 +9,7 @@ The result contains samples and their raw log weights.
 
 ## Install
 
-The package requires Julia 1.10 or later. Install the repository in your project:
+Install the package in your project:
 
 ```julia
 using Pkg

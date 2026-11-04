@@ -14,22 +14,22 @@ From a checkout:
 julia --project -e 'using Pkg; Pkg.test()'
 ```
 
-CPU CI runs Julia 1.10 and the latest stable Julia.
-The latest-stable matrix covers Linux, macOS, and Windows.
+CPU CI covers Linux, macOS, and Windows.
+The CI configuration defines the tested Julia environments.
 
 Accelerator checks are separate, explicit hardware runs.
 They do not run on the default hosted CPU CI jobs.
 
 ## Run a focused reproducer
 
-Use the repository's validation environment with its supported Julia version:
+Use the repository's validation environment:
 
 ```sh
 julia --project=validation -e 'using Pkg; Pkg.develop(path=pwd()); Pkg.instantiate()'
 julia --project=validation validation/reproducers/plain_is.jl
 ```
 
-The package supports Julia 1.10, but the validation environment currently requires Julia 1.12 or later.
+The validation environment declares its runtime requirements in `validation/Project.toml`.
 
 | Subject | Script under `validation/reproducers/` |
 |:--|:--|
@@ -81,7 +81,7 @@ CI deploys the built manual from `main`.
 
 ## Record useful evidence
 
-Record the commit and tracked diff, Julia version, package versions, command, seed,
+Record the commit and tracked diff, `Project.toml`, `Manifest.toml`, command, seed,
 precision, counts, threads, device, and complete result.
 
 For GPU checks, disable scalar indexing and verify array residency.

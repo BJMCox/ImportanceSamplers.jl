@@ -151,7 +151,7 @@ Use `current_proposal(MLDataDevices.CPUDevice(), sampler)` for a proposal snapsh
 Use [`retarget`](@ref reuse-guide) to rebuild target-dependent state on the same device.
 
 Accelerator setup consumes a seed from the source RNG for an owned backend stream.
-Reproducibility does not promise identical streams across devices or package versions.
+Seeded replay assumes the same software, hardware, and execution configuration.
 
 ## Pass state through supported containers
 

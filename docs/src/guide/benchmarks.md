@@ -5,14 +5,14 @@ Benchmark dependencies remain separate from package and documentation dependenci
 
 ## Reproduce a model comparison
 
-From the repository root, with Julia 1.13 for the pinned comparison environment:
+Run the comparison from the repository root:
 
 ```sh
 julia --project=benchmark/comparison -e 'using Pkg; Pkg.instantiate()'
 julia --threads=16 --project=benchmark/comparison benchmark/comparison/compare.jl --cuda
 ```
 
-The runner prints tables and records versions, source hashes, hardware, timings, and diagnostics.
+The runner prints tables and records the environment, source hashes, hardware, timings, and diagnostics.
 It refuses to overwrite an existing result.
 See the [comparison guide](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/README.md)
 for CPU-only runs, selected methods, pilot settings, and resumption.
@@ -41,7 +41,7 @@ defines data, coordinates, priors, and target functions.
 
 The [combined report](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/results-2026-09-22-refresh-comparison.md)
 retains timing ranges and accuracy warnings.
-Some rows reuse archived measurements. They are not simultaneous measurements or a cross-version speedup test.
+Some rows reuse archived measurements. They are not simultaneous measurements and cannot establish a speedup by themselves.
 
 ## Interpret ESS/s carefully
 
