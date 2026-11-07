@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/JuliaBayes/ImportanceSamplers.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/JuliaBayes/ImportanceSamplers.jl/actions/workflows/CI.yml)
 [![Coverage](https://codecov.io/gh/JuliaBayes/ImportanceSamplers.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/JuliaBayes/ImportanceSamplers.jl)
-[![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://juliabayes.github.io/ImportanceSamplers.jl/dev/)
+[![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://juliabayes.org/ImportanceSamplers.jl/dev/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 Plain, multiple, and adaptive importance sampling in Julia: AMIS, APIS, LAIS,
 CAIS, N-PMC, DM-PMC, and first-order GRAMIS-CAIS. Supports threaded CPU execution,
 native Gaussian and Student-t proposals, constrained parameters, and optional
-CUDA, Metal, and Reactant paths with [documented support limits](https://juliabayes.github.io/ImportanceSamplers.jl/dev/guide/accelerators/).
+CUDA, Metal, and Reactant paths with [documented support limits](https://juliabayes.org/ImportanceSamplers.jl/dev/guide/accelerators/).
 
 Install the package in your project:
 
@@ -129,9 +129,9 @@ configuration from the LAIS-RAM rows above, which remain for comparison.
 [Reproducer and recorded environment](benchmark/comparison/README.md) ·
 [Timings, ranges, and accuracy checks](benchmark/comparison/results-2026-09-22-refresh-comparison.md) ·
 [Scalar/batch measurements](benchmark/comparison/README.md#scalar-and-batch-regression-targets) ·
-[Models and methodology](https://juliabayes.github.io/ImportanceSamplers.jl/dev/guide/benchmarks/)
+[Models and methodology](https://juliabayes.org/ImportanceSamplers.jl/dev/guide/benchmarks/)
 
-[Development docs](https://juliabayes.github.io/ImportanceSamplers.jl/dev/) ·
+[Development docs](https://juliabayes.org/ImportanceSamplers.jl/dev/) ·
 [Logistic regression example](examples/logistic_regression.jl) ·
 [Contributing](CONTRIBUTING.md) ·
 [Apache 2.0 license](LICENSE)

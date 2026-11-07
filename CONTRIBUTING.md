@@ -15,7 +15,7 @@ julia --project -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
 CI tests Julia 1.10 on Linux and the latest stable Julia on Linux, macOS, and Windows.
 It also runs the Reactant CPU checks. Codecov upload failures do not block CI.
 GPU execution requires separate hardware checks; passing CPU CI does not prove
-GPU support. See the [validation guide](https://juliabayes.github.io/ImportanceSamplers.jl/dev/guide/validation/).
+GPU support. See the [validation guide](https://juliabayes.org/ImportanceSamplers.jl/dev/guide/validation/).
 
 ## Documentation
 

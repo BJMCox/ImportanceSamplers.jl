@@ -20,7 +20,7 @@ makedocs(
     sitename="ImportanceSamplers.jl",
     format=Documenter.HTML(
         prettyurls=true,
-        canonical="https://juliabayes.github.io/ImportanceSamplers.jl/stable/",
+        canonical="https://juliabayes.org/ImportanceSamplers.jl/stable/",
         edit_link="main",
         repolink="https://github.com/JuliaBayes/ImportanceSamplers.jl",
     ),
