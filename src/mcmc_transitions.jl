@@ -13,7 +13,11 @@ struct RandomWalkMetropolis{C} <: AbstractMCMCTransition
     covariance::C
 end
 
-"""Tune for `steps` upper-only moves, then freeze. Reuse does not repeat completed warmup."""
+"""
+    WarmupTuning(steps)
+
+Tune for `steps` upper-only moves, then freeze. Reuse does not repeat completed warmup.
+"""
 struct WarmupTuning
     steps::Int
     function WarmupTuning(steps::Integer)
@@ -22,7 +26,11 @@ struct WarmupTuning
     end
 end
 
-"""Tune on each production move, retaining the diminishing schedule across calls."""
+"""
+    ContinuousTuning()
+
+Tune on each production move, retaining the diminishing schedule across calls.
+"""
 struct ContinuousTuning end
 
 """

@@ -1,4 +1,5 @@
 using Documenter
+using DocumenterCodeBlocks
 using ImportanceSamplers
 using Statistics
 
@@ -13,17 +14,19 @@ for (directory, _, files) in walkdir(joinpath(@__DIR__, "src")), file in files
 end
 
 makedocs(
+    root=@__DIR__,
+    repo=Documenter.Remotes.GitHub("BJMCox", "ImportanceSamplers.jl"),
     modules=[ImportanceSamplers],
     sitename="ImportanceSamplers.jl",
     format=Documenter.HTML(
-        prettyurls=get(ENV, "CI", "false") == "true",
-        canonical="https://bjmcox.github.io/ImportanceSamplers.jl/",
+        prettyurls=true,
+        canonical="https://bjmcox.github.io/ImportanceSamplers.jl/stable/",
         edit_link="main",
         repolink="https://github.com/BJMCox/ImportanceSamplers.jl",
     ),
     build=joinpath(@__DIR__, "build"),
     pages=[
-        "Home" => "index.md",
+        "Getting started" => "index.md",
         "Tutorials" => [
             "First weighted estimate" => "tutorials/first_estimate.md",
             "Logistic regression" => "tutorials/logistic_regression.md",
@@ -69,6 +72,7 @@ makedocs(
         ],
     ],
     doctest=true,
+    plugins=[CodeBlocks()],
     checkdocs=:exports,
     linkcheck=get(ENV, "DOCUMENTER_LINKCHECK", "false") == "true",
     linkcheck_ignore=[

@@ -1,5 +1,9 @@
 # ImportanceSamplers.jl
 
+```@meta
+CurrentModule = ImportanceSamplers
+```
+
 Importance sampling estimates integrals and expectations using weighted draws.
 ImportanceSamplers provides fixed and adaptive proposals, multiple-proposal methods,
 and explicit CPU or accelerator execution.
@@ -18,7 +22,47 @@ Pkg.add(url="https://github.com/BJMCox/ImportanceSamplers.jl.git")
 
 Accelerator and automatic-differentiation packages are optional.
 
-## Start with an example
+## Draw weighted samples
+
+Estimate the mean of a three-dimensional standard Gaussian. Its log density is
+`-sum(abs2, x) / 2`, up to an additive constant. Each `x` is a vector of the three
+parameters being sampled.
+
+```@example overview
+using ImportanceSamplers, Random, Statistics
+
+logtarget(x) = -sum(abs2, x) / 2
+proposal = SphericalGaussian(zeros(3), 1.5)
+algorithm = ImportanceSampling(proposal; nsamples=10_000)
+samples = importance_sample(Xoshiro(42), logtarget, algorithm)
+
+size(samples.samples)
+```
+
+The proposal is a Gaussian with mean `zeros(3)` and standard deviation `1.5` in
+each coordinate. The result stores one draw per column, with a matching raw log
+weight in `samples.logweights`.
+
+## Estimate an expectation
+
+```@example overview
+(
+    mean=round.(mean(samples); digits=3),
+    variance=round.(var(samples); digits=3),
+    squared_radius=round(mean(x -> sum(abs2, x), samples); digits=3),
+)
+```
+
+The reference mean is `[0, 0, 0]`, the marginal variances are `[1, 1, 1]`, and
+the mean squared radius is `3`. These estimates use the importance weights.
+`mean(samples.samples; dims=2)` ignores them and describes the proposal instead.
+
+For plain IS, each log weight is `logtarget(x) - logdensityof(proposal, x)`.
+The weights correct for drawing from the proposal rather than the target.
+The proposal must cover every region that contributes to the expectation.
+Weight ESS measures concentration, not whether a run found every mode or tail.
+
+## Continue the example
 
 [Your first weighted estimate](@ref first-estimate) samples a three-dimensional
 target and computes its mean, covariance, and normalizing constant.
@@ -45,11 +89,8 @@ Every tutorial defines its data and runs from top to bottom.
 | Execute on CUDA, Metal, or Reactant | [Devices](@ref devices-guide) |
 | Look up a signature | [API reference](@ref api-reference) |
 
-## What the weights mean
+## Documentation versions
 
-The target may omit its normalizing constant. The proposal must be normalized
-and cover the regions that contribute to the integral.
-
-Weighted estimates need not resemble unweighted sample averages.
-A large weight ESS does not prove that a proposal found every mode or tail.
-The [results guide](@ref results-guide) explains these distinctions before introducing diagnostics.
+`dev` documents the current `main` branch. Tagged releases retain their own
+documentation; `stable` points to the latest release. Until the first release,
+use `dev`. The version selector appears on the deployed site.

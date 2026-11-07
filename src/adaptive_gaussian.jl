@@ -382,6 +382,12 @@ function current_proposal(
     return _moment_proposal_snapshot(method_state)
 end
 
+"""
+    current_proposal(destination, sampler)
+
+Copy the committed [`AMIS`](@ref) or [`NPMC`](@ref) proposal to an explicit
+preserving CPU device. This transfers the proposal parameters, not the sample history.
+"""
 function current_proposal(
     destination::MLDataDevices.AbstractCPUDevice,
     sampler::_PreparedImportanceSampler{R,B,T,A,M,D},

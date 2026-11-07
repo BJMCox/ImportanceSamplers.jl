@@ -5,10 +5,8 @@ end
 
 """
     Statistics.mean(result)
-    Statistics.mean(f, result)
 
-Return a self-normalized weighted expectation. The function form evaluates one
-scalar value per sample without transferring a device-resident result to CPU.
+Return the self-normalized weighted mean of the sampled parameters.
 """
 function Statistics.mean(result::_AbstractWeightedSamples)
     return _with_backend_device(_storage_device(result.logweights)) do
@@ -16,6 +14,12 @@ function Statistics.mean(result::_AbstractWeightedSamples)
     end
 end
 
+"""
+    Statistics.mean(f, result)
+
+Return the self-normalized weighted expectation of the scalar function `f`.
+Evaluate one value per sample without transferring a device-resident result to CPU.
+"""
 function Statistics.mean(f, result::_AbstractWeightedSamples)
     return _with_backend_device(_storage_device(result.logweights)) do
         weights = normalized_weights(result)
@@ -28,10 +32,8 @@ end
 
 """
     Statistics.var(result; corrected=false)
-    Statistics.var(f, result; corrected=false)
 
-Return the uncorrected weighted target variance. The function form computes
-the variance of one scalar value per sample. `corrected=true` is unsupported
+Return the uncorrected weighted target variance. `corrected=true` is unsupported
 because importance weights have no general sample-variance correction.
 """
 function Statistics.var(result::_AbstractWeightedSamples; corrected::Bool=false)
@@ -43,6 +45,12 @@ function Statistics.var(result::_AbstractWeightedSamples; corrected::Bool=false)
     end
 end
 
+"""
+    Statistics.var(f, result; corrected=false)
+
+Return the weighted target variance of the scalar function `f`.
+As with `var(result)`, `corrected=true` is unsupported.
+"""
 function Statistics.var(f, result::_AbstractWeightedSamples; corrected::Bool=false)
     _require_uncorrected(corrected)
     return _with_backend_device(_storage_device(result.logweights)) do
@@ -59,7 +67,6 @@ end
 
 """
     Statistics.std(result; corrected=false)
-    Statistics.std(f, result; corrected=false)
 
 Return the square root of the corresponding weighted target variance.
 """
@@ -69,6 +76,11 @@ function Statistics.std(result::_AbstractWeightedSamples; corrected::Bool=false)
     end
 end
 
+"""
+    Statistics.std(f, result; corrected=false)
+
+Return the square root of `var(f, result; corrected)`.
+"""
 function Statistics.std(f, result::_AbstractWeightedSamples; corrected::Bool=false)
     return _with_backend_device(_storage_device(result.logweights)) do
         _sqrt_summary(Statistics.var(f, result; corrected=corrected))
