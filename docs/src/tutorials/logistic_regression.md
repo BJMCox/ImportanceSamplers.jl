@@ -110,4 +110,4 @@ Adapting the proposal helps only when the pilot reaches the posterior mass.
 
 - Use [batch targets](@ref batch-guide) to evaluate a design matrix against many coefficient vectors.
 - Transfer the complete prepared sampler for [GPU execution](@ref devices-guide).
-- See the standalone [logistic regression script](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/logistic_regression.jl) for a prior-based pilot.
+- See the standalone [logistic regression script](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/examples/logistic_regression.jl) for a prior-based pilot.

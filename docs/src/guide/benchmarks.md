@@ -14,7 +14,7 @@ julia --threads=16 --project=benchmark/comparison benchmark/comparison/compare.j
 
 The runner prints tables and records the environment, source hashes, hardware, timings, and diagnostics.
 It refuses to overwrite an existing result.
-See the [comparison guide](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/README.md)
+See the [comparison guide](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/benchmark/comparison/README.md)
 for CPU-only runs, selected methods, pilot settings, and resumption.
 
 To print an existing table without sampling:
@@ -36,10 +36,10 @@ julia --project=benchmark/comparison benchmark/comparison/compare.jl --report be
 
 The comparison includes fixed and adaptive IS, AdvancedHMC NUTS, AdvancedMH,
 SliceSampling, and EnsembleMCMC.
-The [model source](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/models.jl)
+The [model source](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/benchmark/comparison/models.jl)
 defines data, coordinates, priors, and target functions.
 
-The [combined report](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/results-2026-09-22-refresh-comparison.md)
+The [combined report](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/benchmark/comparison/results-2026-09-22-refresh-comparison.md)
 retains timing ranges and accuracy warnings.
 Some rows reuse archived measurements. They are not simultaneous measurements and cannot establish a speedup by themselves.
 
@@ -64,8 +64,8 @@ A high ESS/s cell does not override a failed accuracy check.
 
 ## Compare scalar and batch targets
 
-The paired [CPU report](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-cpu-2026-09-28-paired.md)
-and [CUDA report](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-cuda-2026-09-28-paired.md)
+The paired [CPU report](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-cpu-2026-09-28-paired.md)
+and [CUDA report](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/benchmark/comparison/batch-cuda-2026-09-28-paired.md)
 compare scalar and batch evaluation.
 
 Shared machines require interleaved comparisons.
@@ -92,11 +92,11 @@ Passing those moment checks does not establish coverage of every tail functional
 
 ## Measure other costs
 
-- [`benchmark/time_to_accuracy.jl`](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/time_to_accuracy.jl)
+- [`benchmark/time_to_accuracy.jl`](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/benchmark/time_to_accuracy.jl)
   compares normalizer, mean, and second-moment errors against independent references.
-- [`benchmark/plain_is.jl`](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/plain_is.jl)
+- [`benchmark/plain_is.jl`](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/benchmark/plain_is.jl)
   measures preparation, warmed execution, and host allocations.
-- [`benchmark/logistic_gramis.jl`](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/benchmark/logistic_gramis.jl)
+- [`benchmark/logistic_gramis.jl`](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/benchmark/logistic_gramis.jl)
   separates preparation, first-call cost, warmed timing, and profiles.
 
 Record the exact source and environment rather than copying a published timing to another machine.

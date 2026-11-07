@@ -73,4 +73,4 @@ See [Results](@ref results-guide), [Targets](@ref targets-guide), and
 ## Sources
 
 - Elvira and Martino, [*Advances in Importance Sampling*](https://arxiv.org/abs/2102.05407).
-- [Analytic reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/plain_is.jl).
+- [Analytic reproducer](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/validation/reproducers/plain_is.jl).

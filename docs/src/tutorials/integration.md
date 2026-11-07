@@ -60,5 +60,5 @@ A proposal may live directly on the domain, or a transform may map unconstrained
 The target must use the same reference measure as the proposal.
 
 [Constraints and named parameters](@ref transforms-guide) explains Jacobian ownership.
-The standalone [integration example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/numerical_integration.jl)
+The standalone [integration example](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/examples/numerical_integration.jl)
 also treats a one-dimensional integral.

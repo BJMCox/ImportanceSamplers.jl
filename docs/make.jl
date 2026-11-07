@@ -6,7 +6,7 @@ using Statistics
 # Check repository source links locally instead of repeatedly requesting GitHub.
 for (directory, _, files) in walkdir(joinpath(@__DIR__, "src")), file in files
     endswith(file, ".md") || continue
-    for link in eachmatch(r"https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/([^\s#)]+)",
+    for link in eachmatch(r"https://github\.com/JuliaBayes/ImportanceSamplers\.jl/blob/main/([^\s#)]+)",
                           read(joinpath(directory, file), String))
         isfile(joinpath(@__DIR__, "..", link.captures[1])) ||
             error("Missing repository link: $(link.match)")
@@ -15,14 +15,14 @@ end
 
 makedocs(
     root=@__DIR__,
-    repo=Documenter.Remotes.GitHub("BJMCox", "ImportanceSamplers.jl"),
+    repo=Documenter.Remotes.GitHub("JuliaBayes", "ImportanceSamplers.jl"),
     modules=[ImportanceSamplers],
     sitename="ImportanceSamplers.jl",
     format=Documenter.HTML(
         prettyurls=true,
-        canonical="https://bjmcox.github.io/ImportanceSamplers.jl/stable/",
+        canonical="https://juliabayes.github.io/ImportanceSamplers.jl/stable/",
         edit_link="main",
-        repolink="https://github.com/BJMCox/ImportanceSamplers.jl",
+        repolink="https://github.com/JuliaBayes/ImportanceSamplers.jl",
     ),
     build=joinpath(@__DIR__, "build"),
     pages=[
@@ -76,7 +76,7 @@ makedocs(
     checkdocs=:exports,
     linkcheck=get(ENV, "DOCUMENTER_LINKCHECK", "false") == "true",
     linkcheck_ignore=[
-        r"^https://github\.com/BJMCox/ImportanceSamplers\.jl/blob/main/",
+        r"^https://github\.com/JuliaBayes/ImportanceSamplers\.jl/blob/main/",
     ],
     warnonly=false,
 )

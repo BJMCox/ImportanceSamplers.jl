@@ -77,7 +77,7 @@ They do not imply finite variance or unbiased logarithms.
 ## Sources
 
 - Elvira et al., [*Generalized Multiple Importance Sampling*](https://arxiv.org/abs/1511.03095).
-- [CPU reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/static_mis.jl).
-- [Standalone example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/static_mis.jl).
+- [CPU reproducer](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/validation/reproducers/static_mis.jl).
+- [Standalone example](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/examples/static_mis.jl).
 
 Use [Devices](@ref devices-guide) for backend support and [Proposals](@ref proposals-guide) for bank construction.

@@ -112,6 +112,6 @@ Batching can help data-heavy matrix models.
 Cheap scalar targets can be faster with fused scalar execution.
 Measure both on the intended model and device.
 
-The [standalone example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/batched_linear_regression.jl)
+The [standalone example](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/examples/batched_linear_regression.jl)
 also shows CUDA transfer.
 The [benchmark guide](@ref benchmarks-guide) links paired scalar/batch measurements.

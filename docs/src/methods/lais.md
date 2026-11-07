@@ -124,5 +124,5 @@ See [Devices](@ref devices-guide) and the [custom transition interface](@ref ext
 
 - Martino et al., [*Layered Adaptive Importance Sampling*](https://arxiv.org/abs/1505.04732).
 - Vihola, [*Robust Adaptive Metropolis Algorithm with Coerced Acceptance Rate*](https://users.jyu.fi/~mvihola/vihola_-_ram.pdf).
-- [Standalone example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/lais.jl).
-- [CUDA reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_lais.jl).
+- [Standalone example](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/examples/lais.jl).
+- [CUDA reproducer](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_lais.jl).

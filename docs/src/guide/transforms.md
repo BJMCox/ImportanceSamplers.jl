@@ -169,5 +169,5 @@ The orthonormal-logit construction has forward log Jacobian
 ```
 
 The constant matters for normalizers. It does not disappear from the proposal density.
-The [simplex reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/simplex_transform.jl)
+The [simplex reproducer](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/validation/reproducers/simplex_transform.jl)
 checks this measure against a normalized Dirichlet density.

@@ -77,5 +77,5 @@ See [Adaptation and reuse](@ref reuse-guide).
 
 - Cornuet et al., [*Adaptive Multiple Importance Sampling*](https://arxiv.org/abs/0907.1254).
 - Marin et al., [modified AMIS consistency analysis](https://arxiv.org/abs/1211.2548).
-- [Equation reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/amis.jl).
-- [Standalone example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/amis.jl).
+- [Equation reproducer](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/validation/reproducers/amis.jl).
+- [Standalone example](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/examples/amis.jl).

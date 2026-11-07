@@ -106,5 +106,5 @@ Constructor controls appear in the [sampler reference](@ref sampler-reference).
 
 - Elvira et al., [*Gradient-based Adaptive Importance Samplers*](https://arxiv.org/abs/2210.10785).
 - El-Laham et al., [*Robust Covariance Adaptation in Adaptive Importance Sampling*](https://arxiv.org/abs/1806.00093).
-- [Equation reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/first_order_gramis.jl).
-- [Standalone example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/first_order_gramis.jl).
+- [Equation reproducer](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/validation/reproducers/first_order_gramis.jl).
+- [Standalone example](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/examples/first_order_gramis.jl).

@@ -69,7 +69,7 @@ and the package's device preflight hook.
 It must not silently transfer each chain or sample to CPU.
 
 These are implementation extension points, not a compatibility promise for arbitrary external MCMC packages.
-The [built-in transitions](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/src/mcmc_transitions.jl)
+The [built-in transitions](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/src/mcmc_transitions.jl)
 provide the current concrete contract.
 
 ## Integrate a model package

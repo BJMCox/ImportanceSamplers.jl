@@ -17,7 +17,7 @@ Install the package in your project:
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/BJMCox/ImportanceSamplers.jl.git")
+Pkg.add(url="https://github.com/JuliaBayes/ImportanceSamplers.jl.git")
 ```
 
 Accelerator and automatic-differentiation packages are optional.

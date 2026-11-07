@@ -83,7 +83,7 @@ This does not make the logarithm or normalized expectations unbiased.
 ## Sources
 
 - Elvira et al., [*Improving Population Monte Carlo: Alternative Weighting and Resampling Schemes*](https://victorelvira.github.io/assets/papers/elvira2017improving_pre.pdf).
-- [Equation reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/dm_pmc_global.jl).
-- [Standalone example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/dm_pmc.jl).
+- [Equation reproducer](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/validation/reproducers/dm_pmc_global.jl).
+- [Standalone example](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/examples/dm_pmc.jl).
 
 See [Adaptation and reuse](@ref reuse-guide) and [Devices](@ref devices-guide).

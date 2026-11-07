@@ -57,5 +57,5 @@ See [Adaptation and reuse](@ref reuse-guide) and [Devices](@ref devices-guide).
 ## Sources
 
 - Koblents and Míguez, [*A Population Monte Carlo Scheme with Transformed Weights and its Application to Stochastic Kinetic Models*](https://arxiv.org/abs/1208.5600).
-- [Standalone example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/npmc.jl).
-- [CUDA reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_npmc.jl).
+- [Standalone example](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/examples/npmc.jl).
+- [CUDA reproducer](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_npmc.jl).

@@ -87,7 +87,7 @@ The validation environment declares its runtime requirements in `validation/Proj
 Read each script's setup before running optional-backend cases.
 Metal and Reactant checks need their respective packages and hardware.
 CPU LAIS recurrence checks are in
-[`test/lais.jl`](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/test/lais.jl).
+[`test/lais.jl`](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/test/lais.jl).
 
 The CUDA GRAMIS wrapper additionally records a supplied source revision:
 

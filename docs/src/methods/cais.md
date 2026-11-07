@@ -77,7 +77,7 @@ The degrees of freedom stay fixed.
 ## Sources
 
 - El-Laham, Elvira, and Bugallo, [*Robust Covariance Adaptation in Adaptive Importance Sampling*](https://arxiv.org/abs/1806.00093), Section III-B.
-- [Standalone example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/cais.jl).
-- [CUDA reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_cais.jl).
+- [Standalone example](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/examples/cais.jl).
+- [CUDA reproducer](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_cais.jl).
 
 See [Adaptation and reuse](@ref reuse-guide) and [Devices](@ref devices-guide).

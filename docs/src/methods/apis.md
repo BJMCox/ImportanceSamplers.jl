@@ -66,7 +66,7 @@ See [Adaptation and reuse](@ref reuse-guide).
 ## Sources
 
 - Martino et al., [*An Adaptive Population Importance Sampler: Learning From Uncertainty*](https://vixra.org/pdf/1405.0280v4.pdf).
-- [Standalone example](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/examples/apis.jl).
-- [CUDA reproducer](https://github.com/BJMCox/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_apis.jl).
+- [Standalone example](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/examples/apis.jl).
+- [CUDA reproducer](https://github.com/JuliaBayes/ImportanceSamplers.jl/blob/main/validation/reproducers/cuda_apis.jl).
 
 [Devices](@ref devices-guide) lists current backend limits.
