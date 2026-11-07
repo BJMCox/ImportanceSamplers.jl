@@ -13,7 +13,7 @@ The result contains samples and their raw log weights.
 
 ## Install
 
-The package requires Julia 1.10 or later. Install the repository in your project:
+Install the package in your project:
 
 ```julia
 using Pkg
@@ -92,5 +92,5 @@ Every tutorial defines its data and runs from top to bottom.
 ## Documentation versions
 
 `dev` documents the current `main` branch. Tagged releases retain their own
-documentation; `stable` points to the latest release. Until the first release,
-use `dev`. The version selector appears on the deployed site.
+documentation. `stable` points to the latest release. Use the deployed site's
+version selector to choose the documentation for your installed package.

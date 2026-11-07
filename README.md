@@ -10,7 +10,7 @@ CAIS, N-PMC, DM-PMC, and first-order GRAMIS-CAIS. Supports threaded CPU executio
 native Gaussian and Student-t proposals, constrained parameters, and optional
 CUDA, Metal, and Reactant paths with [documented support limits](https://bjmcox.github.io/ImportanceSamplers.jl/dev/guide/accelerators/).
 
-Requires Julia 1.10 or later. Install from GitHub until the package is registered:
+Install the package in your project:
 
 ```julia
 using Pkg
@@ -78,7 +78,7 @@ Only importance samplers have GPU measurements in this comparison.
 
 Bold denotes the highest measured CPU ESS/s per model. GPU results appear separately.
 
-EnsembleMCMC 0.0.2 uses the highest screening ESS/s among accuracy-eligible
+The EnsembleMCMC baseline uses the highest screening ESS/s among accuracy-eligible
 candidates: DE for eight schools and Gaussian replacement with shrinkage 1 for
 the other models. The table reports held-out results. All four moves remain
 in the detailed report.
@@ -112,7 +112,7 @@ DM-PMC and LAIS include an independent 4,096-draw width pilot.
 Compilation and post-run diagnostics are excluded. Unchanged rows reuse archived
 measurements. The report records each row's source and timing protocol.
 The September 22 EnsembleMCMC refresh used a shared host. Other rows retain
-their original measurement windows; these are not matched cross-version timings.
+their original measurement windows. These timings do not form a paired comparison.
 
 Signal-background uses the nine-parameter BAT paper model and its original
 37-event dataset. Its CAIS CPU and LAIS-RAM CUDA runs include failed moment
@@ -126,7 +126,7 @@ improved, but matched static IS remained faster on linear and robust regression.
 Longer LAIS runs degraded the fitted proposal. These findings concern a different
 configuration from the LAIS-RAM rows above, which remain for comparison.
 
-[Reproducer and pinned versions](benchmark/comparison/README.md) ·
+[Reproducer and recorded environment](benchmark/comparison/README.md) ·
 [Timings, ranges, and accuracy checks](benchmark/comparison/results-2026-09-22-refresh-comparison.md) ·
 [Scalar/batch measurements](benchmark/comparison/README.md#scalar-and-batch-regression-targets) ·
 [Models and methodology](https://bjmcox.github.io/ImportanceSamplers.jl/dev/guide/benchmarks/)

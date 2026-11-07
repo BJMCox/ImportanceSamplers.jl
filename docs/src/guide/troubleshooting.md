@@ -76,6 +76,6 @@ Use one sampler and RNG per concurrent task.
 ## Report a reproducible failure
 
 Include a small target, proposal, seed, count schedule, and device selection.
-Record Julia and dependency versions and the package revision.
+Include `Project.toml`, `Manifest.toml`, the package commit, and the command that failed.
 For a numerical error, include the expected mathematical quantity and observed result.
 Do not include private data or credentials.
